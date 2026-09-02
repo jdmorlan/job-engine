@@ -9,7 +9,6 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/jdmorlan/job-engine/internal/engine"
 	"github.com/jdmorlan/job-engine/internal/secrets"
 
 	"golang.org/x/term"
@@ -165,8 +164,8 @@ func secretList(ctx context.Context, env *Env) error {
 	// failing outright.
 	users := map[string][]string{}
 	declaredButUnset := map[string][]string{}
-	_ = withEngine(ctx, env, func(ctx context.Context, eng *engine.Engine) error {
-		jobs, err := eng.Jobs(ctx)
+	_ = withReader(ctx, env, func(ctx context.Context, rd Reader) error {
+		jobs, err := rd.Jobs(ctx)
 		if err != nil {
 			return err
 		}
@@ -175,7 +174,7 @@ func secretList(ctx context.Context, env *Env) error {
 			known[e.Name] = true
 		}
 		for _, j := range jobs {
-			def, _, err := eng.Definition(ctx, j.Slug)
+			def, err := rd.Definition(ctx, j.Slug)
 			if err != nil {
 				continue
 			}

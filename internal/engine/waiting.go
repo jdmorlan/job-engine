@@ -17,25 +17,25 @@ import (
 // than three, because "is anything stuck?" is one question.
 type Waiting struct {
 	// Scheduled is what the clock will fire next, soonest first.
-	Scheduled []ScheduledWindow
+	Scheduled []ScheduledWindow `json:"scheduled"`
 
 	// Queued is work waiting for a worker, i.e. behind the concurrency cap.
-	Queued []store.Run
+	Queued []store.Run `json:"queued"`
 
 	// Blocked is jobs that cannot run at all -- a missing secret, a file that
 	// does not parse. These are the ones that will never resolve themselves.
-	Blocked []store.Job
+	Blocked []store.Job `json:"blocked"`
 
 	// Running is what is executing right now, for context.
-	Running []store.Run
+	Running []store.Run `json:"running"`
 }
 
 // ScheduledWindow is one upcoming firing.
 type ScheduledWindow struct {
-	Job      string
-	Schedule string
-	Next     time.Time
-	CatchUp  jobdef.CatchUp
+	Job      string         `json:"job"`
+	Schedule string         `json:"schedule"`
+	Next     time.Time      `json:"next"`
+	CatchUp  jobdef.CatchUp `json:"catch_up"`
 }
 
 // Waiting reports the engine's intended future work.

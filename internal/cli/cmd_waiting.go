@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"text/tabwriter"
 	"time"
-
-	"github.com/jdmorlan/job-engine/internal/engine"
 )
 
 func init() {
@@ -31,13 +29,13 @@ func runWaiting(ctx context.Context, env *Env, args []string) error {
 		return usagef("unexpected argument %q", extra[0])
 	}
 
-	return withEngine(ctx, env, func(ctx context.Context, eng *engine.Engine) error {
-		w, err := eng.Waiting(ctx)
+	return withReader(ctx, env, func(ctx context.Context, rd Reader) error {
+		w, err := rd.Waiting(ctx)
 		if err != nil {
 			return err
 		}
 
-		names, err := jobNames(ctx, eng)
+		names, err := jobNames(ctx, rd)
 		if err != nil {
 			return err
 		}
@@ -100,8 +98,8 @@ func runWaiting(ctx context.Context, env *Env, args []string) error {
 	})
 }
 
-func jobNames(ctx context.Context, eng *engine.Engine) (map[int64]string, error) {
-	jobs, err := eng.Jobs(ctx)
+func jobNames(ctx context.Context, rd Reader) (map[int64]string, error) {
+	jobs, err := rd.Jobs(ctx)
 	if err != nil {
 		return nil, err
 	}

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"text/tabwriter"
 
-	"github.com/jdmorlan/job-engine/internal/engine"
 	"github.com/jdmorlan/job-engine/internal/store"
 )
 
@@ -29,8 +28,8 @@ func runJobs(ctx context.Context, env *Env, args []string) error {
 		return usagef("unexpected argument %q", extra[0])
 	}
 
-	return withEngine(ctx, env, func(ctx context.Context, eng *engine.Engine) error {
-		jobs, err := eng.Jobs(ctx)
+	return withReader(ctx, env, func(ctx context.Context, rd Reader) error {
+		jobs, err := rd.Jobs(ctx)
 		if err != nil {
 			return err
 		}
@@ -42,7 +41,7 @@ func runJobs(ctx context.Context, env *Env, args []string) error {
 		tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
 		fmt.Fprintln(tw, "JOB\tSTATUS\tCOMMAND\tFILE")
 		for _, j := range jobs {
-			def, _, err := eng.Definition(ctx, j.Slug)
+			def, err := rd.Definition(ctx, j.Slug)
 			command := ""
 			if err == nil {
 				command = truncate(shellJoin(def.Command), 40)

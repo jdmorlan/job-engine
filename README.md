@@ -12,11 +12,11 @@ design decisions. Comments in the code cite those decisions by number (`D14`,
 
 ## Status
 
-Early, but it runs jobs. This is stage 0 of the progression in D19: a binary you
-download and run in the foreground. There is no scheduler yet, so jobs run when
-you ask them to.
+Early, but it runs jobs on a schedule, unattended.
 
 ```
+je serve          run the daemon: schedules fire, jobs run
+je waiting        what has not happened yet, and what is stuck
 je run <job>      run a job now, in the foreground
 je jobs           what is loaded, and what is broken
 je runs           recent runs
@@ -24,10 +24,53 @@ je logs <run>     what a run printed
 je state get|history <job>    the cursor, and how it has moved
 je events         the raw timeline with causation
 je secret set|list|rm         values jobs declare and the engine injects
-je serve          run the daemon
 je status         is the daemon up, and how long was it down
 je emit <type>    put an event into the engine (D16's single ingress)
 ```
+
+Every read command works the same whether or not a daemon is running: it talks
+to the daemon when one is listening and opens the database itself when not.
+
+### Schedules
+
+```yaml
+on:
+  - every: 15m          # aligned to the clock: :00, :15, :30, :45
+    catch_up: once
+  - cron: "0 3 * * *"
+    timezone: America/Denver
+```
+
+A schedule tracks its position on a **grid**, not a time since the last run.
+That is what makes catch-up expressible: after the laptop wakes, the set of
+missed windows is exactly enumerable, and `catch_up` decides what to do with
+them — `skip` resumes from now, `once` fires a single run for the whole gap,
+`all` fires one per window. In normal operation all three behave identically;
+they only differ after a gap, which is when it matters.
+
+Missed windows are recorded as events even when skipped, so a hole in a job's
+history is explained rather than mysterious.
+
+### What has not happened yet
+
+```console
+$ je waiting
+SCHEDULED
+  heartbeat  every 2s   next 2026-09-02 13:37:30  (in 1s)
+  nightly    0 3 * * *  next 2026-09-03 04:00:00  (in 14h23m)
+
+BLOCKED  (these will not run until you fix them)
+  needs-token
+    secret not set: ABSENT_TOKEN (set it with: je secret set ABSENT_TOKEN)
+
+$ echo $?
+3
+```
+
+Most job engines can show you what ran. This is the negative space — what is
+scheduled, what is queued behind the concurrency cap, and what is blocked and
+will never resolve itself. It exits 3 when something needs a human, so "is
+everything OK?" is a query with an exit code rather than a vibe.
 
 ```console
 $ je run counter
@@ -107,10 +150,11 @@ the log file later cannot leak them. There is no `je secret get`.
 
 ### Not built yet
 
-Scheduler, retries, chains, job sources (D22), container executor, the
-TypeScript shim (D21), and the daemon-side run API. A job declaring `language:`
-loads but is marked misconfigured and will not run, rather than running without
-what it asked for.
+Retries, chains, job sources (D22), container executor, the TypeScript shim
+(D21), `je install` for launchd, and triggering a run through the daemon API
+(`je run` still executes in-process, so it needs the daemon stopped). A job
+declaring `language:` loads but is marked misconfigured and will not run,
+rather than running without what it asked for.
 
 ## Layout
 
@@ -132,6 +176,7 @@ is a thin wrapper around it and the CLI is a client of the daemon, so nothing in
 | `internal/jobdef` | parsing, validation, defaults, and D11 hashing. |
 | `internal/executor` | running a command. Process today, container later (D1). |
 | `internal/secrets` | the local secret store, and log redaction values (D10). |
+| `internal/schedule` | cron and interval windows, including the DST rules (D9). |
 
 ## Building
 

@@ -8,7 +8,6 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/jdmorlan/job-engine/internal/engine"
 	"github.com/jdmorlan/job-engine/internal/store"
 )
 
@@ -38,8 +37,8 @@ func runState(ctx context.Context, env *Env, args []string) error {
 	}
 	sub, slug := positional[0], positional[1]
 
-	return withEngine(ctx, env, func(ctx context.Context, eng *engine.Engine) error {
-		def, job, err := eng.Definition(ctx, slug)
+	return withReader(ctx, env, func(ctx context.Context, rd Reader) error {
+		def, err := rd.Definition(ctx, slug)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return fmt.Errorf("no job named %q", slug)
@@ -49,19 +48,20 @@ func runState(ctx context.Context, env *Env, args []string) error {
 
 		switch sub {
 		case "get":
-			current, err := eng.CurrentState(ctx, job.ID)
-			if errors.Is(err, sql.ErrNoRows) {
+			current, err := rd.CurrentState(ctx, slug)
+			if err != nil {
+				return err
+			}
+			if current == nil {
 				fmt.Fprintf(env.Stdout,
 					"%s has no cursor yet; it will be seeded on its first run\n", slug)
 				return nil
-			} else if err != nil {
-				return err
 			}
 			fmt.Fprintf(env.Stdout, "%s\n", current.Value)
 			return nil
 
 		case "history":
-			versions, err := eng.StateHistory(ctx, job.ID, *limit)
+			versions, err := rd.StateHistory(ctx, slug, *limit)
 			if err != nil {
 				return err
 			}

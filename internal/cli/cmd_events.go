@@ -6,7 +6,6 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/jdmorlan/job-engine/internal/engine"
 	"github.com/jdmorlan/job-engine/internal/model"
 )
 
@@ -35,8 +34,8 @@ func runEvents(ctx context.Context, env *Env, args []string) error {
 	// `je runs` and `je state`. See the note on withEngine: once the API has
 	// endpoints for these, every read routes through the daemon when one is
 	// running and falls back to embedded when it is not.
-	return withEngine(ctx, env, func(ctx context.Context, eng *engine.Engine) error {
-		events, err := eng.RecentEvents(ctx, *limit)
+	return withReader(ctx, env, func(ctx context.Context, rd Reader) error {
+		events, err := rd.Events(ctx, *limit)
 		if err != nil {
 			return err
 		}

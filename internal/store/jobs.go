@@ -3,21 +3,22 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"time"
 )
 
 // Job is a loaded definition as the database holds it.
 type Job struct {
-	ID             int64
-	Slug           string
-	DefinitionHash string
-	Definition     []byte // the snapshot JSON from job_versions
-	FilePath       string
-	Enabled        bool
-	LoadedAt       time.Time
-	LoadError      string
-	ConfigError    string
+	ID             int64           `json:"id"`
+	Slug           string          `json:"slug"`
+	DefinitionHash string          `json:"definition_hash"`
+	Definition     json.RawMessage `json:"definition,omitempty"`
+	FilePath       string          `json:"file_path"`
+	Enabled        bool            `json:"enabled"`
+	LoadedAt       time.Time       `json:"loaded_at"`
+	LoadError      string          `json:"load_error,omitempty"`
+	ConfigError    string          `json:"config_error,omitempty"`
 }
 
 // Runnable reports whether this job may start a run.
@@ -149,7 +150,7 @@ func scanJob(sc scanner) (Job, error) {
 		&j.Enabled, &loadedAt, &loadErr, &configErr); err != nil {
 		return Job{}, err
 	}
-	j.Definition = []byte(definition)
+	j.Definition = json.RawMessage(definition)
 	j.LoadError = loadErr.String
 	j.ConfigError = configErr.String
 

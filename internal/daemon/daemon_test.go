@@ -168,3 +168,64 @@ func getJSON(t *testing.T, url string, into any) {
 		t.Fatalf("decoding %s: %v", url, err)
 	}
 }
+
+// TestReadEndpointsAreServed covers the seam that made the scheduler
+// unobservable: until these existed, the one process that schedules held the
+// data directory lock, so `je waiting` could not answer the question it exists
+// to answer while anything was actually happening.
+func TestReadEndpointsAreServed(t *testing.T) {
+	base := startDaemon(t)
+
+	var jobs struct {
+		Jobs []struct {
+			Slug string `json:"slug"`
+		} `json:"jobs"`
+	}
+	getJSON(t, base+"/v1/jobs", &jobs)
+	// No jobs directory in the fixture, so an empty list -- and it must be a
+	// list rather than null, or every client has to special-case "no rows".
+	if jobs.Jobs == nil {
+		t.Error("/v1/jobs returned null rather than an empty array")
+	}
+
+	var waiting struct {
+		Scheduled []any `json:"scheduled"`
+		Queued    []any `json:"queued"`
+		Blocked   []any `json:"blocked"`
+		Running   []any `json:"running"`
+	}
+	getJSON(t, base+"/v1/waiting", &waiting)
+
+	var runs struct {
+		Runs []any `json:"runs"`
+	}
+	getJSON(t, base+"/v1/runs?limit=5", &runs)
+	if runs.Runs == nil {
+		t.Error("/v1/runs returned null rather than an empty array")
+	}
+}
+
+func TestMissingResourcesAre404(t *testing.T) {
+	base := startDaemon(t)
+
+	for _, path := range []string{"/v1/jobs/nope", "/v1/runs/9999", "/v1/runs/9999/logs"} {
+		resp, err := http.Get(base + path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("GET %s = %s, want 404", path, resp.Status)
+		}
+	}
+
+	// A non-numeric run id is the caller's mistake, not a missing resource.
+	resp, err := http.Get(base + "/v1/runs/abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("GET /v1/runs/abc = %s, want 400", resp.Status)
+	}
+}

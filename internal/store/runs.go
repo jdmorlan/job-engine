@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -11,23 +12,23 @@ import (
 
 // Run is a unit of intent, caused by one event, with 1..N attempts (D7).
 type Run struct {
-	ID                int64
-	JobID             int64
-	DefinitionHash    string
-	TriggeringEventID *int64
-	TriggeringRouteID *int64
-	RouteHash         string
-	Status            model.Status
-	QueuedAt          time.Time
-	StartedAt         *time.Time
-	EndedAt           *time.Time
-	AttemptCount      int
-	StateVersionIn    *int64
-	Output            []byte
-	Error             string
+	ID                int64           `json:"id"`
+	JobID             int64           `json:"job_id"`
+	DefinitionHash    string          `json:"definition_hash"`
+	TriggeringEventID *int64          `json:"triggering_event_id,omitempty"`
+	TriggeringRouteID *int64          `json:"triggering_route_id,omitempty"`
+	RouteHash         string          `json:"route_hash,omitempty"`
+	Status            model.Status    `json:"status"`
+	QueuedAt          time.Time       `json:"queued_at"`
+	StartedAt         *time.Time      `json:"started_at,omitempty"`
+	EndedAt           *time.Time      `json:"ended_at,omitempty"`
+	AttemptCount      int             `json:"attempt_count"`
+	StateVersionIn    *int64          `json:"state_version_in,omitempty"`
+	Output            json.RawMessage `json:"output,omitempty"`
+	Error             string          `json:"error,omitempty"`
 
 	// Overlap is the policy in force when this run was queued (D8).
-	Overlap string
+	Overlap string `json:"overlap"`
 }
 
 // Attempt is one execution of a run. It carries its own causation so the
@@ -259,7 +260,7 @@ func scanRun(sc scanner) (Run, error) {
 	r.RouteHash = routeHash.String
 	r.Error = runErr.String
 	if output.Valid {
-		r.Output = []byte(output.String)
+		r.Output = json.RawMessage(output.String)
 	}
 
 	var err error

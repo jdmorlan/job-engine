@@ -8,12 +8,12 @@ import (
 
 // LogLine is one captured line of job output (D6).
 type LogLine struct {
-	RunID   int64
-	Attempt int
-	Seq     int64
-	Stream  string // "stdout" or "stderr"
-	TS      time.Time
-	Line    string
+	RunID   int64     `json:"run_id"`
+	Attempt int       `json:"attempt"`
+	Seq     int64     `json:"seq"`
+	Stream  string    `json:"stream"` // "stdout" or "stderr"
+	TS      time.Time `json:"ts"`
+	Line    string    `json:"line"`
 }
 
 // Stream names, matching the schema's CHECK constraint.

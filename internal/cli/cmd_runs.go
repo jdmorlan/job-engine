@@ -8,8 +8,6 @@ import (
 	"strconv"
 	"text/tabwriter"
 	"time"
-
-	"github.com/jdmorlan/job-engine/internal/engine"
 )
 
 func init() {
@@ -41,20 +39,17 @@ func runRuns(ctx context.Context, env *Env, args []string) error {
 		return usagef("expected at most one job name, got %d", len(positional))
 	}
 
-	return withEngine(ctx, env, func(ctx context.Context, eng *engine.Engine) error {
-		var jobID int64
+	return withReader(ctx, env, func(ctx context.Context, rd Reader) error {
+		var jobSlug string
 		if len(positional) == 1 {
-			job, err := eng.Job(ctx, positional[0])
-			if errors.Is(err, sql.ErrNoRows) {
-				return fmt.Errorf("no job named %q", positional[0])
-			} else if err != nil {
-				return err
-			}
-			jobID = job.ID
+			jobSlug = positional[0]
 		}
 
-		runs, err := eng.Runs(ctx, jobID, *limit)
+		runs, err := rd.Runs(ctx, jobSlug, *limit)
 		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("no job named %q", jobSlug)
+			}
 			return err
 		}
 		if len(runs) == 0 {
@@ -63,13 +58,9 @@ func runRuns(ctx context.Context, env *Env, args []string) error {
 		}
 
 		// Resolve job names once rather than per row.
-		jobs, err := eng.Jobs(ctx)
+		names, err := jobNames(ctx, rd)
 		if err != nil {
 			return err
-		}
-		names := make(map[int64]string, len(jobs))
-		for _, j := range jobs {
-			names[j.ID] = j.Slug
 		}
 
 		tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
@@ -100,24 +91,16 @@ func runLogs(ctx context.Context, env *Env, args []string) error {
 		return usagef("%q is not a run id", positional[0])
 	}
 
-	return withEngine(ctx, env, func(ctx context.Context, eng *engine.Engine) error {
-		run, err := eng.Run(ctx, runID)
-		if errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("no run %d", runID)
-		} else if err != nil {
-			return err
-		}
-
-		n := *attempt
-		if n == 0 {
-			n = run.AttemptCount
-		}
-		lines, err := eng.Logs(ctx, runID, n)
+	return withReader(ctx, env, func(ctx context.Context, rd Reader) error {
+		lines, err := rd.Logs(ctx, runID, *attempt)
 		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("no run %d", runID)
+			}
 			return err
 		}
 		if len(lines) == 0 {
-			fmt.Fprintf(env.Stdout, "run %d attempt %d produced no output\n", runID, n)
+			fmt.Fprintf(env.Stdout, "run %d produced no output\n", runID)
 			return nil
 		}
 
