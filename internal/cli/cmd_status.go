@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"text/tabwriter"
 	"time"
+
+	"github.com/jdmorlan/job-engine/internal/service"
 )
 
 func init() {
@@ -61,12 +63,29 @@ func runStatus(ctx context.Context, env *Env, args []string) error {
 	// happens is somebody upgrading, seeing no change, and concluding the
 	// upgrade failed. A visible mismatch beats a mystery (P1), and it is the
 	// same reasoning behind D20 C10 refusing node version skew loudly.
+	if state, err := serviceState(); err == nil && !state.Installed {
+		// Not an error -- running `je serve` in a terminal is a legitimate
+		// mode, and D19 calls it stage 0. But somebody who expects unattended
+		// operation should find out now rather than after a reboot.
+		fmt.Fprintf(tw, "autostart\tnot registered (je service install)\n")
+	}
 	if !sameVersion(health.Version, env.Version) {
 		fmt.Fprintf(tw, "version\tdaemon is running %s, this binary is %s\n",
 			health.Version, env.Version)
 		fmt.Fprintf(tw, "\trestart the daemon to pick up %s\n", env.Version)
 	}
 	return tw.Flush()
+}
+
+// serviceState reports on the OS service registration, if this platform has
+// one. Failures are the caller's cue to say nothing rather than to complain:
+// an unsupported platform is not a problem with the engine.
+func serviceState() (service.State, error) {
+	mgr, err := service.New()
+	if err != nil {
+		return service.State{}, err
+	}
+	return mgr.Status()
 }
 
 // adviseNoDaemon turns a connection failure into an instruction.

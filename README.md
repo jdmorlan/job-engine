@@ -50,6 +50,35 @@ rather than leaving you to wonder why nothing changed.
 `je upgrade --check` reports without installing. Building from source is
 `go build ./cmd/je`.
 
+### Keeping it running
+
+Installing the binary and registering the daemon are separate acts, so they
+have separate names:
+
+```console
+$ je service install
+registered with  launchd
+unit             ~/Library/LaunchAgents/io.github.jdmorlan.je.plist
+listening on     127.0.0.1:7620
+engine log       ~/.je/daemon.log
+
+It is running now and will start again at login.
+```
+
+launchd on macOS, systemd on Linux, per-user in both cases — no sudo, and it
+runs as you, which is what lets jobs reach your files. `RunAtLoad` and
+`KeepAlive` (`Restart=always`) mean it survives a logout and comes back from a
+crash; `je service status | restart | uninstall` do the rest. Uninstalling
+removes the registration and nothing else.
+
+One detail worth knowing, because it is the classic way this goes wrong: a
+service manager starts processes with a minimal `PATH`, and jobs inherit it. So
+`je service install` records the `PATH` of the shell you ran it from. Without
+that, any job calling `npx` or `python3` works by hand and fails under the
+daemon. Re-run it after moving the binary or changing your `PATH`.
+
+`je upgrade --restart` upgrades and restarts in one step.
+
 ## Try it in two minutes
 
 ```console
@@ -101,6 +130,7 @@ Early, but it runs jobs on a schedule, unattended.
 ```
 je demo           write four example jobs and a tour
 je upgrade        install the latest release, checksum-verified
+je service ...    register the daemon with launchd or systemd
 je serve          run the daemon: schedules fire, jobs run
 je waiting        what has not happened yet, and what is stuck
 je run <job>      run a job now, in the foreground
@@ -251,7 +281,12 @@ the log file later cannot leak them. There is no `je secret get`.
 ### Not built yet
 
 Retries, chains, job sources (D22), container executor, the TypeScript shim
-(D21), `je install` for launchd, and retention. A job declaring `language:`
+(D21), and retention.
+
+**The daemon reads job definitions only at startup.** Adding or editing a job
+file needs `je service restart` (or a restart of `je serve`) before it takes
+effect. Watching the jobs directory is a v1 item and is the next obvious gap
+now that the daemon runs permanently. A job declaring `language:`
 loads but is marked misconfigured and will not run, rather than running without
 what it asked for.
 
@@ -277,6 +312,7 @@ is a thin wrapper around it and the CLI is a client of the daemon, so nothing in
 | `internal/secrets` | the local secret store, and log redaction values (D10). |
 | `internal/schedule` | cron and interval windows, including the DST rules (D9). |
 | `internal/selfupdate` | finding, verifying and installing a new binary. |
+| `internal/service` | launchd and systemd registration (D16). |
 
 ## Building
 

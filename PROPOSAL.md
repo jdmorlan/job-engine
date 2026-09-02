@@ -32,6 +32,9 @@ That's a precise complaint and it produced three changes and one withdrawal:
 - **D6 — state arrives in the environment, not a file.** The only surviving piece
   of a larger change I proposed and withdrew (below).
 
+- **D16 → `je service install`.** *"To a user, the download and install script
+  is installation."* Correct, and the collision only existed once there was a
+  real installer. Renamed before it was built.
 - **D22 (new) — job sources.** Definitions and their code arrive from
   registered sources, several at once, each logically separate but all feeding
   one engine and one timeline. This is D19's git source arriving early, for a
@@ -145,7 +148,7 @@ architecture), **D16** (daemon lifecycle and generic event ingress).
 | D13 | Retention | AGREED |
 | D14 | Job state / cursors | AGREED (revised v0.5) — **2 questions open** |
 | D15 | Daemon + API + CLI (`je`) | AGREED |
-| D16 | Daemon lifecycle + event ingress | AGREED |
+| D16 | Daemon lifecycle + event ingress | AGREED (renamed v0.5) |
 | D18 | Embedding / Almanac | **NEW — react** |
 | D19 | Kubernetes deployment / local-to-cluster | **NEW — react** |
 | D20 | Control plane + nodes / placement | **NEW — react** |
@@ -1530,9 +1533,10 @@ v0.1 and both are load-bearing.
 "it's running" can't depend on you remembering to start it — the whole value
 proposition dies the first time you reboot and don't notice for a week.
 
-Recommendation: **`je install`** writes a launchd LaunchAgent plist with
-`RunAtLoad` and `KeepAlive`, so the daemon starts at login and restarts if it
-crashes. **`je uninstall`** removes it. The daemon logs `engine.started` /
+Recommendation: **`je service install`** (named `je install` until v0.5) writes
+a launchd LaunchAgent plist with `RunAtLoad` and `KeepAlive`, so the daemon
+starts at login and restarts if it crashes. **`je service uninstall`** removes
+it. The daemon logs `engine.started` /
 `engine.stopped` as events, so downtime is a visible, queryable fact rather than an
 unexplained hole in the timeline — which is what makes D9's catch-up behavior
 comprehensible after the fact. `je status` shows engine uptime and the last gap.
@@ -1581,6 +1585,29 @@ code — which quietly makes the engine scriptable from anything.
 **Resolution (v0.4).**
 
 1. **`je install` writes the launchd plist.** Locked.
+
+   **Renamed in v0.5 to `je service install`**, before it was built. Your
+   objection:
+
+   > *"I think we should call it something other than install, because to a
+   > user, the download and install script is installation."*
+
+   Right, and the collision only appeared once there was a real installer.
+   "Install je" and "install the daemon" are different acts on different
+   things, and one word for both is the kind of confusion that is free to fix
+   now and permanent later -- the same reasoning that settled the binary's own
+   name in D15.
+
+   The group is `je service install | uninstall | status`, because there turned
+   out to be more than one verb: `je upgrade` wants to restart the service, and
+   `je status` wants to say whether autostart is even on. *service* is what the
+   OS calls the thing in both launchd and systemd, so it is a word people
+   already have. `je autostart` was the runner-up -- it names the effect rather
+   than the mechanism, which P3 would prefer -- but it does not extend to a
+   second verb without becoming odd.
+
+   Rejected: `je enable`, which collides with enabling a *job*, something the
+   CLI will certainly want later.
 
 2. **Taking the call on this one, since it's my area to know:** `je emit` is enough,
    and a live HomeKit subscription is not something we should build.
@@ -1716,7 +1743,7 @@ step — not a port. Four stages, each of which must not invalidate the last:
 | Stage | What it is | What it costs to get here |
 |---|---|---|
 | 0 | `je run weather-ingest` — foreground, no daemon, exit code | download a binary |
-| 1 | `je install` — launchd daemon, real schedules (D16a) | one command |
+| 1 | `je service install` — launchd daemon, real schedules (D16a) | one command |
 | 2 | Cluster — same definitions, same commands, always-on | one manifest or CR |
 | 3 | GitOps — the repo is the source of truth for jobs | one commit |
 
@@ -2344,7 +2371,7 @@ invented ones — see Q2. Feature set:
 - retries, timeouts, overlap policy, concurrency cap
 - SQLite state + logs, with retention
 - **job state / cursors (D14)**
-- **CLI over a local API; daemon installed via launchd (D15, D16)**
+- **CLI over a local API; daemon registered via `je service install` (D15, D16)**
 - job definitions as watched YAML files, CLI-editable (D2)
 - **chain files + `JOB_EVENTS_FILE`, with load-time cycle checking, `je chains`
   and `je routes` (D17)**

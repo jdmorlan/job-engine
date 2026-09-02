@@ -10,6 +10,7 @@ import (
 
 	"github.com/jdmorlan/job-engine/internal/daemon"
 	"github.com/jdmorlan/job-engine/internal/selfupdate"
+	"github.com/jdmorlan/job-engine/internal/service"
 )
 
 func init() {
@@ -28,6 +29,7 @@ func runUpgrade(ctx context.Context, env *Env, args []string) error {
 	cmd := commands["upgrade"]
 	fs := newFlagSet(cmd, env)
 	check := fs.Bool("check", false, "report what is available without installing it")
+	restart := fs.Bool("restart", false, "restart the registered service afterwards")
 	repo := fs.String("repo", "", "GitHub repository to fetch releases from")
 	if extra, err := parseArgs(fs, args); err != nil {
 		return err
@@ -135,7 +137,36 @@ func runUpgrade(ctx context.Context, env *Env, args []string) error {
 	}
 	fmt.Fprintf(env.Stdout, "\nupgraded to %s at %s\n", release.TagName, target)
 
+	if *restart {
+		return restartService(env)
+	}
 	warnStaleDaemon(env, release.TagName)
+	return nil
+}
+
+// restartService picks up the new binary in the running daemon.
+//
+// Opt-in rather than automatic: restarting is a visible interruption to
+// whatever is mid-run, and doing it as a side effect of an upgrade somebody
+// asked for at 2pm is the kind of helpfulness nobody wants.
+func restartService(env *Env) error {
+	mgr, err := service.New()
+	if err != nil {
+		return err
+	}
+	state, err := mgr.Status()
+	if err != nil {
+		return err
+	}
+	if !state.Installed {
+		fmt.Fprintln(env.Stderr,
+			"\nnothing to restart: no service is registered (je service install)")
+		return nil
+	}
+	if err := mgr.Restart(); err != nil {
+		return err
+	}
+	fmt.Fprintf(env.Stdout, "restarted the %s service\n", mgr.Name())
 	return nil
 }
 
@@ -154,7 +185,9 @@ func warnStaleDaemon(env *Env, newVersion string) {
 	}
 	fmt.Fprintf(env.Stderr,
 		"\nnote: a daemon is still running %s (pid %d).\n"+
-			"      Restart it to pick up %s.\n", info.Version, info.PID, newVersion)
+			"      Restart it to pick up %s:  je service restart\n"+
+			"      (or upgrade with --restart next time)\n",
+		info.Version, info.PID, newVersion)
 }
 
 // sameVersion compares versions ignoring a leading v, so v0.2.0 and 0.2.0 are
