@@ -29,6 +29,17 @@ type Run struct {
 
 	// Overlap is the policy in force when this run was queued (D8).
 	Overlap string `json:"overlap"`
+
+	// RunsOn is the capability label a worker must advertise to take this run
+	// (D20/C3). Snapshotted at enqueue time for the same reason Overlap is: a
+	// definition reloaded between enqueue and dispatch must not move a run
+	// that is already waiting.
+	RunsOn string `json:"runs_on"`
+
+	// WorkerID is who holds the lease, and LeaseExpiresAt is until when (C5).
+	// Both are nil for a queued run.
+	WorkerID       *string    `json:"worker_id,omitempty"`
+	LeaseExpiresAt *time.Time `json:"lease_expires_at,omitempty"`
 }
 
 // Attempt is one execution of a run. It carries its own causation so the
@@ -55,12 +66,12 @@ func (s *Store) CreateRun(ctx context.Context, r Run) (Run, error) {
 	err := s.state.QueryRowContext(ctx, `
 		INSERT INTO runs (job_id, definition_hash, triggering_event_id,
 		                  triggering_route_id, route_hash, status, queued_at,
-		                  attempt_count, state_version_in, overlap)
-		VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+		                  attempt_count, state_version_in, overlap, runs_on)
+		VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
 		RETURNING id`,
 		r.JobID, r.DefinitionHash, r.TriggeringEventID, r.TriggeringRouteID,
 		nullString(r.RouteHash), string(r.Status), formatTime(r.QueuedAt), r.StateVersionIn,
-		r.Overlap,
+		r.Overlap, r.RunsOn,
 	).Scan(&r.ID)
 	if err != nil {
 		return Run{}, fmt.Errorf("creating run: %w", err)
@@ -283,7 +294,8 @@ func (s *Store) InterruptRunning(ctx context.Context, at time.Time) (int64, erro
 const selectRun = `
 	SELECT id, job_id, definition_hash, triggering_event_id, triggering_route_id,
 	       route_hash, status, queued_at, started_at, ended_at, attempt_count,
-	       state_version_in, output, error, overlap
+	       state_version_in, output, error, overlap, runs_on, worker_id,
+	       lease_expires_at
 	FROM runs`
 
 func scanRun(sc scanner) (Run, error) {
@@ -296,11 +308,17 @@ func scanRun(sc scanner) (Run, error) {
 		routeHash sql.NullString
 		output    sql.NullString
 		runErr    sql.NullString
+		workerID  sql.NullString
+		leaseEnds sql.NullString
 	)
 	if err := sc.Scan(&r.ID, &r.JobID, &r.DefinitionHash, &r.TriggeringEventID,
 		&r.TriggeringRouteID, &routeHash, &status, &queuedAt, &startedAt, &endedAt,
-		&r.AttemptCount, &r.StateVersionIn, &output, &runErr, &r.Overlap); err != nil {
+		&r.AttemptCount, &r.StateVersionIn, &output, &runErr, &r.Overlap,
+		&r.RunsOn, &workerID, &leaseEnds); err != nil {
 		return Run{}, err
+	}
+	if workerID.Valid {
+		r.WorkerID = &workerID.String
 	}
 	r.Status = model.Status(status)
 	r.RouteHash = routeHash.String
@@ -317,6 +335,9 @@ func scanRun(sc scanner) (Run, error) {
 		return Run{}, fmt.Errorf("run %d: %w", r.ID, err)
 	}
 	if r.EndedAt, err = parseNullTime(endedAt); err != nil {
+		return Run{}, fmt.Errorf("run %d: %w", r.ID, err)
+	}
+	if r.LeaseExpiresAt, err = parseNullTime(leaseEnds); err != nil {
 		return Run{}, fmt.Errorf("run %d: %w", r.ID, err)
 	}
 	return r, nil

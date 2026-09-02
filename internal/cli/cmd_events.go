@@ -34,7 +34,7 @@ func runEvents(ctx context.Context, env *Env, args []string) error {
 	// `je runs` and `je state`. See the note on withEngine: once the API has
 	// endpoints for these, every read routes through the daemon when one is
 	// running and falls back to embedded when it is not.
-	return withReader(ctx, env, func(ctx context.Context, rd Reader) error {
+	return withClient(ctx, env, func(ctx context.Context, rd *Client) error {
 		events, err := rd.Events(ctx, *limit)
 		if err != nil {
 			return err

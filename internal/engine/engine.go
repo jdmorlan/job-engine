@@ -17,6 +17,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sort"
+	"sync"
 	"time"
 
 	"github.com/jdmorlan/job-engine/internal/lockfile"
@@ -34,21 +36,23 @@ type Options struct {
 	// is what a test wants; the daemon passes a real one.
 	Logger *slog.Logger
 
-	// Version is reported by Health, and will later gate node registration
-	// (D20 C10 refuses version skew loudly rather than negotiating).
+	// Version is reported by Health and gates worker registration: D20/C10
+	// refuses version skew loudly rather than negotiating.
 	Version string
 
 	// Now exists so tests can control time. Nil means time.Now.
 	Now func() time.Time
 
-	// Concurrency caps how many runs execute at once (D8). Zero means
-	// DefaultConcurrency. It bounds the worker pool, so excess work waits in
-	// the queue rather than being dropped or running anyway.
+	// Concurrency caps how many runs a single worker executes at once (D8).
+	// Zero means DefaultConcurrency. Under D20/C11 the cap is enforced by the
+	// worker, since that is where processes are; the control plane bounds the
+	// queue, not the machine.
 	Concurrency int
 }
 
-// Engine owns the database and, once the scheduler exists, the run loop.
-// It is the sole writer (D20 C1).
+// Engine is the control plane. It owns the database, decides what should run,
+// and records what came back. It is the sole writer (D20/C1) and it never
+// executes a job (D20/C11) -- that is a worker's only job.
 type Engine struct {
 	opts    Options
 	log     *slog.Logger
@@ -58,9 +62,13 @@ type Engine struct {
 	lock    *lockfile.Lock
 	broker  *logBroker
 
-	// started records whether Start ran. A one-shot `je run` with no daemon
-	// (D19 stage 0) opens the engine without claiming to be one, and must not
-	// litter the timeline with an engine.started/stopped pair per command.
+	// inflight tracks runs a worker currently holds (D20). See the type.
+	inflightMu sync.Mutex
+	inflight   map[int64]*inflight
+
+	// started records whether Start ran. A tool that opens the engine to read
+	// (a migration check, a test) must not litter the timeline with an
+	// engine.started/stopped pair.
 	started   bool
 	startedAt time.Time
 	// downtime is how long the engine was stopped before this start, derived
@@ -241,11 +249,25 @@ type Health struct {
 	LastDowntime time.Duration `json:"last_downtime_ns"`
 	// UncleanStop reports that the previous run never wrote engine.stopped.
 	UncleanStop bool `json:"unclean_stop"`
+
+	// Workers is how many are online, and Labels which capabilities they
+	// cover between them (D20/C8).
+	//
+	// On the health endpoint rather than behind `je workers` because zero is
+	// not a detail: a control plane with no worker attached runs nothing at
+	// all, and that has to be the first thing `je status` says rather than
+	// something you find out by asking the right question.
+	Workers int      `json:"workers"`
+	Labels  []string `json:"labels,omitempty"`
 }
 
-// Health reports the engine's current state.
-func (e *Engine) Health() Health {
-	return Health{
+// Health reports the control plane's current state.
+//
+// It takes a context because the worker count is a query. That is a change
+// from the version that could answer entirely from memory, and it is the right
+// trade: an uptime that cannot tell you nothing is running is not health.
+func (e *Engine) Health(ctx context.Context) Health {
+	h := Health{
 		Version:      e.opts.Version,
 		StartedAt:    e.startedAt,
 		Uptime:       e.now().Sub(e.startedAt),
@@ -254,4 +276,29 @@ func (e *Engine) Health() Health {
 		LastDowntime: e.downtime,
 		UncleanStop:  e.uncleanStop,
 	}
+
+	now := e.now()
+	workers, err := e.store.Workers(ctx)
+	if err != nil {
+		// Health must not fail. An unknown worker count renders as zero, which
+		// errs towards alarming rather than reassuring -- the right direction
+		// for the one number that says whether anything can run.
+		e.log.Error("counting workers for health", "error", err)
+		return h
+	}
+	seen := map[string]bool{}
+	for _, w := range workers {
+		if !w.Online(now, LeaseTTL) {
+			continue
+		}
+		h.Workers++
+		for _, label := range w.Labels {
+			if !seen[label] {
+				seen[label] = true
+				h.Labels = append(h.Labels, label)
+			}
+		}
+	}
+	sort.Strings(h.Labels)
+	return h
 }

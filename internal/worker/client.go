@@ -1,0 +1,130 @@
+package worker
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"time"
+
+	"github.com/jdmorlan/job-engine/internal/api"
+	"github.com/jdmorlan/job-engine/internal/engine"
+	"github.com/jdmorlan/job-engine/internal/store"
+)
+
+// Client is a worker's connection to the control plane.
+//
+// Everything the worker knows arrives through it, and everything it learns goes
+// back the same way. There is no second channel and no direct database access
+// (C1), which is what makes the control plane's timeline complete rather than a
+// partial view assembled from two places.
+type Client struct {
+	base *url.URL
+	http *http.Client
+}
+
+// Dial returns a client for an address like "127.0.0.1:7620".
+func Dial(addr string) (*Client, error) {
+	base, err := url.Parse("http://" + addr)
+	if err != nil {
+		return nil, fmt.Errorf("bad control plane address %q: %w", addr, err)
+	}
+	return &Client{base: base, http: &http.Client{Timeout: 30 * time.Second}}, nil
+}
+
+// Addr reports where this client is pointed, for log lines and errors.
+func (c *Client) Addr() string { return c.base.Host }
+
+func (c *Client) Register(ctx context.Context, w store.Worker) (store.Worker, error) {
+	return do[store.Worker](ctx, c, http.MethodPost, "/v1/workers", w)
+}
+
+func (c *Client) Heartbeat(ctx context.Context, id string, holding []int64) ([]int64, error) {
+	out, err := do[api.HeartbeatResponse](ctx, c, http.MethodPost,
+		"/v1/workers/"+url.PathEscape(id)+"/heartbeat",
+		api.HeartbeatRequest{Holding: holding})
+	return out.Revoked, err
+}
+
+// Claim asks for work. A nil Dispatch with a nil error means there is none,
+// which is the ordinary case.
+func (c *Client) Claim(ctx context.Context, id string) (*engine.Dispatch, error) {
+	out, err := do[api.ClaimResponse](ctx, c, http.MethodPost,
+		"/v1/workers/"+url.PathEscape(id)+"/claim", nil)
+	if err != nil {
+		return nil, err
+	}
+	return out.Dispatch, nil
+}
+
+func (c *Client) AppendLogs(ctx context.Context, runID int64, attempt int, lines []engine.LogLine) error {
+	_, err := do[struct{}](ctx, c, http.MethodPost,
+		fmt.Sprintf("/v1/runs/%d/logs", runID),
+		api.AppendLogsRequest{Attempt: attempt, Lines: lines})
+	return err
+}
+
+func (c *Client) Complete(ctx context.Context, runID int64, workerID string, comp engine.Completion) error {
+	_, err := do[struct{}](ctx, c, http.MethodPost,
+		fmt.Sprintf("/v1/runs/%d/complete", runID),
+		api.CompleteRequest{WorkerID: workerID, Completion: comp})
+	return err
+}
+
+// do issues one request and decodes the response into T.
+func do[T any](ctx context.Context, c *Client, method, path string, body any) (T, error) {
+	var zero T
+
+	var reader io.Reader
+	if body != nil {
+		encoded, err := json.Marshal(body)
+		if err != nil {
+			return zero, err
+		}
+		reader = bytes.NewReader(encoded)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, c.base.String()+path, reader)
+	if err != nil {
+		return zero, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return zero, fmt.Errorf("control plane at %s: %w", c.base.Host, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNoContent {
+		return zero, nil
+	}
+	if resp.StatusCode >= 400 {
+		return zero, decodeError(resp)
+	}
+
+	var out T
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil && err != io.EOF {
+		return zero, fmt.Errorf("decoding %s response: %w", path, err)
+	}
+	return out, nil
+}
+
+func decodeError(resp *http.Response) error {
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+	var parsed struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(body, &parsed) == nil && parsed.Error.Message != "" {
+		return errors.New(parsed.Error.Message)
+	}
+	return fmt.Errorf("control plane returned %s: %s", resp.Status, bytes.TrimSpace(body))
+}

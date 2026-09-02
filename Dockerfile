@@ -33,7 +33,20 @@ ENV TZ=UTC
 VOLUME /var/lib/je
 EXPOSE 7620
 
-# 0.0.0.0 inside the container: the trust boundary is the Service, not the
+# One image, two components (D20). `serve` is the control plane and `worker` is
+# a worker; compose.yaml runs both from this image, and so does a cluster.
+#
+# Shipping them together is C10 made cheap: there is one artifact and one
+# version, so the skew the control plane refuses to tolerate cannot arise by
+# accident in a deployment that pulls one tag.
+#
+# Note what a worker image usually is NOT: this one is FROM scratch and can run
+# nothing but /je itself, which is correct for the system worker (whose jobs are
+# the engine's own) and wrong for yours. A worker that runs Python jobs needs a
+# Python image with /je copied in -- that is the job author's concern, and it is
+# only expressible at all because the control plane never runs anybody's code.
+#
+# 0.0.0.0 inside the container: the trust boundary is the network, not the
 # loopback interface (D19's rider on N1). Nothing here weakens the local
 # default, which stays 127.0.0.1.
 ENTRYPOINT ["/je"]

@@ -28,13 +28,21 @@ const (
 	StatusInterrupted Status = "interrupted" // D5: we were killed, not the job
 	StatusCancelled   Status = "cancelled"
 	StatusTimedOut    Status = "timed_out" // D8: distinct from failed on purpose
+
+	// StatusLost is D20/C6: the worker holding this run stopped heartbeating,
+	// and "it died" is indistinguishable from "it is partitioned and still
+	// running your job". Deliberately not `failed` -- we do not know that it
+	// failed, and asserting so in the one place a person goes to find out what
+	// happened would be a lie (P1).
+	StatusLost Status = "lost"
 )
 
 // Terminal reports whether the status is final. Anything not terminal at
 // daemon startup is a run we were in the middle of when we died (D5).
 func (s Status) Terminal() bool {
 	switch s {
-	case StatusSucceeded, StatusFailed, StatusInterrupted, StatusCancelled, StatusTimedOut:
+	case StatusSucceeded, StatusFailed, StatusInterrupted, StatusCancelled,
+		StatusTimedOut, StatusLost:
 		return true
 	}
 	return false

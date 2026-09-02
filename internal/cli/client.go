@@ -22,15 +22,19 @@ import (
 	"github.com/jdmorlan/job-engine/internal/store"
 )
 
-// ErrNoDaemon means we could not find or reach a running engine.
+// ErrNoControlPlane means we could not find or reach a running control plane.
 //
 // It is a distinct error because the remedy is distinct: nearly every other
 // failure wants you to look at a job, and this one wants you to start the
-// daemon. Commands wrap it with that advice rather than printing a connection
-// refused.
-var ErrNoDaemon = errors.New("no engine is running")
+// control plane. Commands wrap it with that advice rather than printing a
+// connection refused.
+//
+// Named for the component (F1, v0.6) rather than for "daemon". That word is a
+// deployment form, not a component: the thing you cannot reach is the same
+// whether it is a container, a foreground `je serve`, or a registered service.
+var ErrNoControlPlane = errors.New("no control plane is running")
 
-// Client is a thin HTTP client for the daemon API.
+// Client is the CLI's only way to reach the system (D20/C11).
 //
 // D19's R2 says every command you learned locally must work against a remote
 // engine by switching context. That is why the address is a field resolved at
@@ -41,19 +45,19 @@ type Client struct {
 	http *http.Client
 }
 
-// Connect locates the daemon for a data directory.
+// Connect locates the control plane for a data directory.
 //
 // Resolution order: the JE_ADDR environment variable, then the runtime file
-// the daemon publishes on start. There is no default fallback: guessing the
-// default port and then failing to connect produces a worse error message than
-// noticing there is no runtime file at all.
+// the control plane publishes on start. There is no default fallback: guessing
+// the default port and then failing to connect produces a worse error message
+// than noticing there is no runtime file at all.
 func Connect(l paths.Layout) (*Client, error) {
 	addr := os.Getenv("JE_ADDR")
 	if addr == "" {
 		info, err := daemon.ReadRuntime(l.Runtime())
 		switch {
 		case os.IsNotExist(err):
-			return nil, fmt.Errorf("%w for %s", ErrNoDaemon, l.Data)
+			return nil, fmt.Errorf("%w for %s", ErrNoControlPlane, l.Data)
 		case err != nil:
 			return nil, err
 		}
@@ -118,7 +122,7 @@ func do[T any](ctx context.Context, c *Client, method, path string, body any) (T
 	if err != nil {
 		// A refused connection here almost always means the daemon died
 		// without cleaning up its runtime file. Say the useful thing.
-		return zero, fmt.Errorf("%w at %s: %w", ErrNoDaemon, c.base.Host, err)
+		return zero, fmt.Errorf("%w at %s: %w", ErrNoControlPlane, c.base.Host, err)
 	}
 	defer resp.Body.Close()
 
@@ -161,7 +165,7 @@ func withTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
 // knows how the wire protocol reports errors, and adding an endpoint cannot
 // get it wrong.
 
-func (c *Client) Source() string { return "daemon at " + c.base.Host }
+func (c *Client) Source() string { return "control plane at " + c.base.Host }
 
 func (c *Client) Jobs(ctx context.Context) ([]store.Job, error) {
 	out, err := do[struct {
@@ -232,4 +236,34 @@ func (c *Client) StateHistory(ctx context.Context, slug string, limit int) ([]st
 
 func (c *Client) Waiting(ctx context.Context) (engine.Waiting, error) {
 	return do[engine.Waiting](ctx, c, http.MethodGet, "/v1/waiting", nil)
+}
+
+// The secret side of the client (D10).
+//
+// `je secret` reaches the store only through these. It used to call
+// secrets.Open on the local data directory, which meant that against a control
+// plane anywhere but this machine it silently wrote to the wrong filesystem --
+// a failure that produced no error and showed up later as a job that could not
+// see its own token.
+
+func (c *Client) Secrets(ctx context.Context) (engine.SecretsView, error) {
+	return do[engine.SecretsView](ctx, c, http.MethodGet, "/v1/secrets", nil)
+}
+
+func (c *Client) SetSecret(ctx context.Context, name, value string) (engine.SetSecretResult, error) {
+	return do[engine.SetSecretResult](ctx, c, http.MethodPut,
+		"/v1/secrets/"+url.PathEscape(name), api.SetSecretRequest{Value: value})
+}
+
+func (c *Client) DeleteSecret(ctx context.Context, name string) error {
+	_, err := do[struct{}](ctx, c, http.MethodDelete, "/v1/secrets/"+url.PathEscape(name), nil)
+	return err
+}
+
+// Workers lists the data plane (D20/C8).
+func (c *Client) Workers(ctx context.Context) ([]engine.WorkerView, error) {
+	out, err := do[struct {
+		Workers []engine.WorkerView `json:"workers"`
+	}](ctx, c, http.MethodGet, "/v1/workers", nil)
+	return out.Workers, err
 }

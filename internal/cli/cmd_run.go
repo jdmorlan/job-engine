@@ -2,8 +2,6 @@ package cli
 
 import (
 	"context"
-	"database/sql"
-	"errors"
 	"fmt"
 	"os/user"
 	"time"
@@ -20,9 +18,9 @@ func init() {
 		Usage: "run a job now and follow its output",
 		Long: "Creates a new run, which is a new unit of intent with a fresh cursor read.\n" +
 			"To add an attempt to an existing run instead, use `je retry <run>` (D7).\n\n" +
-			"Works whether or not the daemon is running. With one, the run is queued\n" +
-			"there and its output is streamed back; without one it executes here.\n" +
-			"The exit code is the job's own either way, so this composes with your shell.",
+			"The run is queued with the control plane, dispatched to a worker, and its\n" +
+			"output streamed back here. The exit code is the job's own, so this composes\n" +
+			"with your shell.",
 		Run: runRun,
 	})
 }
@@ -40,17 +38,19 @@ func runRun(ctx context.Context, env *Env, args []string) error {
 	}
 	slug := positional[0]
 
-	// The daemon owns the data directory whenever it is running, so this is
-	// not a preference -- it is the only way to run a job without stopping the
-	// scheduler. The two paths print the same thing.
-	if client, err := Connect(env.Layout); err == nil && reachable(ctx, client) {
-		return runViaDaemon(ctx, env, client, slug, *quiet)
-	}
-	return runInProcess(ctx, env, slug, *quiet)
+	return withClient(ctx, env, func(ctx context.Context, client *Client) error {
+		return runViaControlPlane(ctx, env, client, slug, *quiet)
+	})
 }
 
-// runViaDaemon queues the run with the daemon and follows it.
-func runViaDaemon(ctx context.Context, env *Env, client *Client, slug string, quiet bool) error {
+// runViaControlPlane queues the run and follows it.
+//
+// There is no second path. `je run` used to execute the job in this process
+// when no control plane was reachable, which made the CLI a writer to the
+// database and gave the system two executors with different behaviour for
+// logs, timeouts and cancellation. D20/C11 removed that: every run goes to a
+// worker, including this one.
+func runViaControlPlane(ctx context.Context, env *Env, client *Client, slug string, quiet bool) error {
 	triggerCtx, cancel := withTimeout(ctx)
 	defer cancel()
 
@@ -84,8 +84,9 @@ func runViaDaemon(ctx context.Context, env *Env, client *Client, slug string, qu
 	if streamErr != nil {
 		if ctx.Err() != nil {
 			// Ctrl-C detaches rather than cancelling. The run belongs to the
-			// daemon now, and silently killing someone's half-finished job
-			// because they stopped watching would be a bad surprise.
+			// control plane and its worker now, and silently killing someone's
+			// half-finished job because they stopped watching would be a bad
+			// surprise.
 			fmt.Fprintf(env.Stderr,
 				"\nje: stopped following. Run %d continues in the background: je logs %d\n",
 				run.ID, run.ID)
@@ -107,43 +108,6 @@ func runViaDaemon(ctx context.Context, env *Env, client *Client, slug string, qu
 		return fmt.Errorf("run %d %s: %s", detail.Run.ID, detail.Run.Status, detail.Run.Error)
 	}
 	return nil
-}
-
-// runInProcess is D19 stage 0: no daemon, the CLI is the engine.
-func runInProcess(ctx context.Context, env *Env, slug string, quiet bool) error {
-	return withEngine(ctx, env, func(ctx context.Context, eng *engine.Engine) error {
-		opts := engine.RunOptions{Actor: currentActor()}
-		if !quiet {
-			opts.Live = func(stream string, ts time.Time, line string) {
-				w := env.Stdout
-				if stream == "stderr" {
-					w = env.Stderr
-				}
-				fmt.Fprintln(w, line)
-			}
-		}
-
-		result, err := eng.RunJob(ctx, slug, opts)
-		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return fmt.Errorf("no job named %q in %s", slug, env.Layout.Jobs)
-			}
-			return err
-		}
-
-		// Rendered through the same function as the daemon path, so the two
-		// cannot drift into showing different things about the same run.
-		detail, err := eng.RunDetail(ctx, result.Run.ID)
-		if err != nil {
-			return err
-		}
-		printRunDetail(env, detail)
-
-		if result.Run.Status != model.StatusSucceeded {
-			return fmt.Errorf("run %d %s: %s", result.Run.ID, result.Run.Status, result.Run.Error)
-		}
-		return nil
-	})
 }
 
 // printRunDetail renders what happened, after the job's own output.

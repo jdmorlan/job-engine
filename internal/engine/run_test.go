@@ -67,9 +67,9 @@ func TestSuccessfulRunCommitsEverything(t *testing.T) {
 	`
 	e, _ := jobFixture(t, "ingest", script)
 
-	result, err := e.RunJob(ctx, "ingest", engine.RunOptions{Actor: "tester"})
+	result, err := runJob(t, e, "ingest", engine.RunOptions{Actor: "tester"})
 	if err != nil {
-		t.Fatalf("RunJob: %v", err)
+		t.Fatalf("running the job: %v", err)
 	}
 	if result.Run.Status != model.StatusSucceeded {
 		t.Fatalf("status = %s, error = %s", result.Run.Status, result.Run.Error)
@@ -115,9 +115,9 @@ func TestFailedRunCommitsNothing(t *testing.T) {
 	`
 	e, _ := jobFixture(t, "flaky", script)
 
-	result, err := e.RunJob(ctx, "flaky", engine.RunOptions{})
+	result, err := runJob(t, e, "flaky", engine.RunOptions{})
 	if err != nil {
-		t.Fatalf("RunJob: %v", err)
+		t.Fatalf("running the job: %v", err)
 	}
 	if result.Run.Status != model.StatusFailed {
 		t.Fatalf("status = %s, want failed", result.Run.Status)
@@ -158,9 +158,9 @@ func TestCursorIsSeededOnFirstRun(t *testing.T) {
 	e, _ := jobFixture(t, "seeded", `echo "$JE_STATE"`,
 		"state:", "  primary_cursor: watermark")
 
-	result, err := e.RunJob(ctx, "seeded", engine.RunOptions{})
+	result, err := runJob(t, e, "seeded", engine.RunOptions{})
 	if err != nil {
-		t.Fatalf("RunJob: %v", err)
+		t.Fatalf("running the job: %v", err)
 	}
 	if result.StateIn == nil {
 		t.Fatal("no state was supplied to the job")
@@ -184,7 +184,7 @@ func TestCursorIsSeededOnFirstRun(t *testing.T) {
 		t.Error("the engine advanced the cursor by itself")
 	}
 
-	second, err := e.RunJob(ctx, "seeded", engine.RunOptions{})
+	second, err := runJob(t, e, "seeded", engine.RunOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,10 +205,9 @@ func TestCursorIsSeededOnFirstRun(t *testing.T) {
 }
 
 func TestLastSuccessAtIsServedButNotOnTheFirstRun(t *testing.T) {
-	ctx := context.Background()
 	e, _ := jobFixture(t, "reporter", `echo "last=${JE_LAST_SUCCESS_AT:-never}"`)
 
-	first, err := e.RunJob(ctx, "reporter", engine.RunOptions{})
+	first, err := runJob(t, e, "reporter", engine.RunOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +215,7 @@ func TestLastSuccessAtIsServedButNotOnTheFirstRun(t *testing.T) {
 		t.Errorf("first run saw %q, want last=never", got)
 	}
 
-	second, err := e.RunJob(ctx, "reporter", engine.RunOptions{})
+	second, err := runJob(t, e, "reporter", engine.RunOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,15 +226,14 @@ func TestLastSuccessAtIsServedButNotOnTheFirstRun(t *testing.T) {
 }
 
 func TestTimeoutIsDistinctFromFailure(t *testing.T) {
-	ctx := context.Background()
 	// D8 keeps timed_out separate from failed because they call for different
 	// responses: one is a slow job, the other is a broken one.
 	e, _ := jobFixture(t, "slow", `sleep 30`, "timeout: 300ms")
 
 	start := time.Now()
-	result, err := e.RunJob(ctx, "slow", engine.RunOptions{})
+	result, err := runJob(t, e, "slow", engine.RunOptions{})
 	if err != nil {
-		t.Fatalf("RunJob: %v", err)
+		t.Fatalf("running the job: %v", err)
 	}
 	elapsed := time.Since(start)
 
@@ -252,7 +250,6 @@ func TestTimeoutIsDistinctFromFailure(t *testing.T) {
 }
 
 func TestMalformedEventsFileFailsTheRunWithoutCommitting(t *testing.T) {
-	ctx := context.Background()
 	// Everything is parsed before anything is written, so a bad events line
 	// cannot leave a committed cursor behind. This is the atomicity that
 	// separate channels make possible.
@@ -263,9 +260,9 @@ func TestMalformedEventsFileFailsTheRunWithoutCommitting(t *testing.T) {
 	`
 	e, _ := jobFixture(t, "badevents", script)
 
-	result, err := e.RunJob(ctx, "badevents", engine.RunOptions{})
+	result, err := runJob(t, e, "badevents", engine.RunOptions{})
 	if err != nil {
-		t.Fatalf("RunJob: %v", err)
+		t.Fatalf("running the job: %v", err)
 	}
 	if result.Run.Status != model.StatusFailed {
 		t.Fatalf("status = %s, want failed", result.Run.Status)
@@ -280,7 +277,6 @@ func TestMalformedEventsFileFailsTheRunWithoutCommitting(t *testing.T) {
 }
 
 func TestOversizedStateIsRejected(t *testing.T) {
-	ctx := context.Background()
 	// 64KB is the cap, because state travels in the environment.
 	script := `
 		printf '{"blob":"' > "$JOB_STATE_OUT_FILE"
@@ -289,9 +285,9 @@ func TestOversizedStateIsRejected(t *testing.T) {
 	`
 	e, _ := jobFixture(t, "fat", script)
 
-	result, err := e.RunJob(ctx, "fat", engine.RunOptions{})
+	result, err := runJob(t, e, "fat", engine.RunOptions{})
 	if err != nil {
-		t.Fatalf("RunJob: %v", err)
+		t.Fatalf("running the job: %v", err)
 	}
 	if result.Run.Status != model.StatusFailed {
 		t.Fatalf("status = %s, want failed", result.Run.Status)
@@ -307,7 +303,7 @@ func TestJobEnvironmentIsExactlyTheProtocol(t *testing.T) {
 	t.Setenv("A_SECRET_THE_JOB_MUST_NOT_SEE", "hunter2")
 	e, _ := jobFixture(t, "env", `echo "${A_SECRET_THE_JOB_MUST_NOT_SEE:-absent}"; echo "job=$JOB_ID attempt=$ATTEMPT by=$TRIGGERED_BY"`)
 
-	result, err := e.RunJob(ctx, "env", engine.RunOptions{})
+	result, err := runJob(t, e, "env", engine.RunOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -327,12 +323,11 @@ func TestJobEnvironmentIsExactlyTheProtocol(t *testing.T) {
 }
 
 func TestMisconfiguredJobWillNotRun(t *testing.T) {
-	ctx := context.Background()
 	// D10's pit of success: a job declaring a secret that cannot be supplied is
 	// visibly broken rather than failing cryptically at 3am.
 	e, _ := jobFixture(t, "needy", `echo hi`, "secrets: [SOME_TOKEN]")
 
-	if _, err := e.RunJob(ctx, "needy", engine.RunOptions{}); err == nil {
+	if _, err := runJob(t, e, "needy", engine.RunOptions{}); err == nil {
 		t.Fatal("a misconfigured job ran")
 	} else if !strings.Contains(err.Error(), "misconfigured") {
 		t.Errorf("error = %v", err)
@@ -358,15 +353,13 @@ func TestCancellationIsInterruptedNotFailed(t *testing.T) {
 	// on_interrupt keys off.
 	e, _ := jobFixture(t, "longrunner", `sleep 30`)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		time.Sleep(200 * time.Millisecond)
-		cancel()
-	}()
-
-	result, err := e.RunJob(ctx, "longrunner", engine.RunOptions{})
+	// The cancellation now belongs to the worker, which is where the process
+	// is (D20/C11). It reports `interrupted` explicitly rather than the engine
+	// inferring it from its own context, because after the split the engine no
+	// longer has a context that has anything to do with the job.
+	result, err := runJobInterrupted(t, e, "longrunner", 200*time.Millisecond)
 	if err != nil {
-		t.Fatalf("RunJob: %v", err)
+		t.Fatalf("running the job: %v", err)
 	}
 	if result.Run.Status != model.StatusInterrupted {
 		t.Errorf("status = %s, want interrupted", result.Run.Status)
@@ -394,9 +387,9 @@ func TestDeclaredSecretIsInjectedAndRedacted(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := e.RunJob(ctx, "tokenuser", engine.RunOptions{})
+	result, err := runJob(t, e, "tokenuser", engine.RunOptions{})
 	if err != nil {
-		t.Fatalf("RunJob: %v", err)
+		t.Fatalf("running the job: %v", err)
 	}
 	if result.Run.Status != model.StatusSucceeded {
 		t.Fatalf("status = %s: %s", result.Run.Status, result.Run.Error)
@@ -441,7 +434,7 @@ func TestMissingSecretIsALoadTimeError(t *testing.T) {
 		t.Errorf("config error does not say how to fix it: %q", jobs[0].ConfigError)
 	}
 
-	if _, err := e.RunJob(ctx, "needstoken", engine.RunOptions{}); err == nil {
+	if _, err := runJob(t, e, "needstoken", engine.RunOptions{}); err == nil {
 		t.Error("a job with an unset secret ran anyway")
 	}
 }
@@ -464,7 +457,7 @@ func TestSecretBecomingAvailableClearsTheError(t *testing.T) {
 	if !jobs[0].Runnable() {
 		t.Fatalf("job still misconfigured after the secret was set: %q", jobs[0].ConfigError)
 	}
-	if _, err := e.RunJob(ctx, "eventually", engine.RunOptions{}); err != nil {
-		t.Errorf("RunJob: %v", err)
+	if _, err := runJob(t, e, "eventually", engine.RunOptions{}); err != nil {
+		t.Errorf("running the job: %v", err)
 	}
 }

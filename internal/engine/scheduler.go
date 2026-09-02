@@ -49,62 +49,53 @@ type scheduleEntry struct {
 	lastWindow time.Time
 }
 
-// Scheduler fires jobs when their own clocks say so, and runs the worker pool
-// that executes what it queues.
+// Scheduler fires jobs when their own clocks say so.
 //
-// Both halves live here because they are two ends of one queue and splitting
-// them across packages would mean exporting the queue.
+// It queues; it does not execute. D20/C11 moved the worker pool that used to
+// live here out of the control plane entirely -- workers pull from the same
+// queue over the API, and the only difference between the pool that was here
+// and the one that is there is that the remote one is the only one, so it
+// cannot be the under-exercised path.
 type Scheduler struct {
-	engine      *Engine
-	concurrency int
+	engine *Engine
 
 	mu      sync.Mutex
 	entries map[scheduleKey]*scheduleEntry
 }
 
-func newScheduler(e *Engine, concurrency int) *Scheduler {
-	if concurrency <= 0 {
-		concurrency = DefaultConcurrency
-	}
+func newScheduler(e *Engine) *Scheduler {
 	return &Scheduler{
-		engine:      e,
-		concurrency: concurrency,
-		entries:     map[scheduleKey]*scheduleEntry{},
+		engine:  e,
+		entries: map[scheduleKey]*scheduleEntry{},
 	}
 }
 
-// RunScheduler starts the schedule loop and the worker pool, blocking until
+// RunScheduler starts the schedule loop and the lease reaper, blocking until
 // the context is cancelled.
 //
-// This is the daemon's job. A one-shot `je run` never calls it, which is why
-// the foreground path bypasses the queue entirely.
+// This is the control plane's own loop. It fires schedules into the queue and
+// expires leases; between those two the queue sits still until a worker asks
+// for something, which is the whole of C11 in one function.
 func (e *Engine) RunScheduler(ctx context.Context) error {
-	s := newScheduler(e, e.opts.Concurrency)
+	s := newScheduler(e)
 	if err := s.reload(ctx); err != nil {
 		return err
 	}
 
-	var wg sync.WaitGroup
-	wg.Add(s.concurrency)
-	for i := range s.concurrency {
-		go func() {
-			defer wg.Done()
-			s.worker(ctx, i)
-		}()
-	}
-
-	e.log.Info("scheduler started",
-		"schedules", len(s.entries), "concurrency", s.concurrency)
+	e.log.Info("scheduler started", "schedules", len(s.entries))
 
 	ticker := time.NewTicker(tickInterval)
 	defer ticker.Stop()
 
+	// The reaper runs on its own, slower clock. Expiring a lease declares
+	// somebody's running job lost (C6), so it is deliberately not something
+	// the one-second tick can do in a hurry.
+	reaper := time.NewTicker(LeaseTTL / 3)
+	defer reaper.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
-			// Workers observe the same cancellation. Waiting for them means
-			// the engine is not closed while a job is still writing.
-			wg.Wait()
 			return nil
 		case <-ticker.C:
 			if err := s.tick(ctx, e.now()); err != nil {
@@ -112,6 +103,10 @@ func (e *Engine) RunScheduler(ctx context.Context) error {
 				// database error at 03:00 should cost one window, not the
 				// night.
 				e.log.Error("scheduler tick", "error", err)
+			}
+		case <-reaper.C:
+			if _, err := e.ExpireLeases(ctx); err != nil {
+				e.log.Error("expiring leases", "error", err)
 			}
 		}
 	}
@@ -291,52 +286,6 @@ func (s *Scheduler) enqueueWindow(ctx context.Context, entry *scheduleEntry, win
 	s.engine.log.Info("queued",
 		"job", entry.slug, "run", prepared.Run.ID, "window", window.Format(time.RFC3339))
 	return nil
-}
-
-// worker pulls queued runs and executes them. There are `concurrency` of these,
-// which is what enforces D8's global cap: excess work waits in the queue rather
-// than being dropped or running anyway.
-func (s *Scheduler) worker(ctx context.Context, id int) {
-	ticker := time.NewTicker(200 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-
-		for {
-			claimed, err := s.claimAndRun(ctx)
-			if err != nil {
-				s.engine.log.Error("worker", "id", id, "error", err)
-				break
-			}
-			if !claimed || ctx.Err() != nil {
-				break
-			}
-		}
-	}
-}
-
-func (s *Scheduler) claimAndRun(ctx context.Context) (bool, error) {
-	run, err := s.engine.store.ClaimNextQueuedRun(ctx, s.engine.now())
-	if isNoRows(err) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-
-	prepared, err := s.engine.prepareClaimed(ctx, run)
-	if err != nil {
-		return true, err
-	}
-	if _, err := s.engine.execute(ctx, prepared, RunOptions{}); err != nil {
-		return true, err
-	}
-	return true, nil
 }
 
 var errNoSuchRun = errors.New("run vanished between claim and execution")

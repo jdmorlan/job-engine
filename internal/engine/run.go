@@ -50,10 +50,6 @@ type RunOptions struct {
 	// `je run` leaves it nil and the engine emits run.requested instead, so
 	// every run has exactly one cause.
 	TriggeringEvent *model.Event
-
-	// Live receives log lines as they are produced, for foreground `je run`.
-	// Storage happens regardless; this is only for watching it happen.
-	Live func(stream string, ts time.Time, line string)
 }
 
 // RunResult is everything that happened, for the CLI to render.
@@ -79,33 +75,17 @@ type RunResult struct {
 	causeDepth int
 }
 
-// RunJob enqueues a job and runs it immediately, bypassing the queue.
-//
-// This is the foreground path -- `je run` at a terminal, D19 stage 0 -- where
-// waiting behind the concurrency cap would be surprising: you asked for it now,
-// and there is no scheduler competing for slots.
-func (e *Engine) RunJob(ctx context.Context, slug string, opts RunOptions) (*RunResult, error) {
-	prepared, err := e.Enqueue(ctx, slug, opts)
-	if err != nil {
-		return nil, err
-	}
-	if prepared == nil {
-		return nil, fmt.Errorf("job %s: %w", slug, ErrOverlapSkipped)
-	}
-	return e.execute(ctx, *prepared, opts)
-}
-
 // ErrOverlapSkipped means the job's overlap policy declined to start a run.
 // It is a normal outcome recorded as an event, not a failure, but a caller
 // that asked for a run needs to know it did not get one.
 var ErrOverlapSkipped = errors.New("the previous run has not finished (overlap: skip)")
 
-// TriggerRun queues a run for the worker pool and returns immediately.
+// TriggerRun queues a run and returns immediately.
 //
-// This is the daemon's path: `je run` against a running engine posts here, gets
-// a run id, and follows the live stream. It exists separately from RunJob
-// because the caller is not the executor -- the worker pool is -- so blocking
-// until completion would tie a job's lifetime to an HTTP request.
+// `je run` posts here, gets a run id, and follows the live stream while a
+// worker executes it. It returns rather than blocking because the caller is not
+// the executor and never was -- tying a job's lifetime to an HTTP request would
+// mean a dropped connection could end somebody's half-finished job.
 func (e *Engine) TriggerRun(ctx context.Context, slug string, opts RunOptions) (store.Run, error) {
 	prepared, err := e.Enqueue(ctx, slug, opts)
 	if err != nil {
@@ -117,13 +97,22 @@ func (e *Engine) TriggerRun(ctx context.Context, slug string, opts RunOptions) (
 	return prepared.Run, nil
 }
 
-// Prepared is a run that exists in the database and is waiting to execute.
+// Prepared is a run that exists in the database and is waiting for a worker.
+//
+// It is the value that crosses D20's seam: everything decided by the control
+// plane before any process exists, which is deliberately everything that is
+// easy to get subtly different -- which event caused the run, which cursor
+// version it starts from, and what happens when the job is already running.
 type Prepared struct {
 	Run     store.Run
 	Job     store.Job
 	Def     *jobdef.Definition
 	StateIn store.StateVersion
 	Cause   model.Event
+
+	// Actor is the person responsible, carried onto the attempt row so the
+	// history can distinguish a human intervening from an automatic retry (D7).
+	Actor string
 }
 
 // Enqueue validates a job, records its cause, reads its cursor, and creates a
@@ -183,121 +172,18 @@ func (e *Engine) Enqueue(ctx context.Context, slug string, opts RunOptions) (*Pr
 		TriggeringEventID: &cause.ID,
 		StateVersionIn:    &stateIn.Version,
 		Overlap:           string(def.Overlap),
+		// C3: snapshotted here for the same reason the overlap policy is. A
+		// definition reloaded between enqueue and dispatch must not move a run
+		// that is already waiting.
+		RunsOn: def.RunsOn,
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	return &Prepared{Run: run, Job: job, Def: def, StateIn: stateIn, Cause: cause}, nil
-}
-
-// execute runs a prepared run to completion.
-//
-// The ordering here is the whole of D14's contract and is worth reading as a
-// unit: the cursor was read before the run existed, and it commits only after
-// the attempt exits zero. Everything between those two points can fail without
-// moving it, which is the bug class this engine exists to eliminate.
-func (e *Engine) execute(ctx context.Context, p Prepared, opts RunOptions) (*RunResult, error) {
-	startedAt := e.now()
-	if err := e.store.StartRun(ctx, p.Run.ID, startedAt); err != nil {
-		return nil, err
-	}
-	// Keep the in-memory copy in step with the row. StartRun writes the
-	// database; without this the returned Run still says it never started and
-	// every duration renders as zero.
-	p.Run.StartedAt = &startedAt
-	p.Run.Status = model.StatusRunning
-	e.broker.Publish(p.Run.ID, StreamEvent{
-		Kind: StreamStatus, Status: model.StatusRunning, TS: startedAt,
-	})
-
-	attempt, err := e.store.CreateAttempt(ctx, store.Attempt{
-		RunID:             p.Run.ID,
-		TriggeringEventID: &p.Cause.ID,
-		Actor:             opts.Actor,
-		Executor:          string(p.Def.Runtime),
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	result := &RunResult{
-		Run: p.Run, Attempt: attempt, Job: p.Job,
-		StateIn: &p.StateIn, causeDepth: p.Cause.Depth,
-		PrimaryCursor: p.Def.State.PrimaryCursor,
-	}
-
-	// The scratch directory holds the three output channels. It is per-attempt
-	// and removed afterwards, which is what makes them a handoff rather than
-	// storage -- the durable copy is the one the engine promotes.
-	scratch, err := os.MkdirTemp("", fmt.Sprintf("je-%s-%d-%d-", p.Job.Slug, p.Run.ID, attempt.Number))
-	if err != nil {
-		return nil, fmt.Errorf("creating scratch directory: %w", err)
-	}
-	defer os.RemoveAll(scratch)
-
-	channels := newChannels(scratch)
-	env, err := e.buildEnv(ctx, p.Job, p.Def, p.Run, attempt, p.Cause, p.StateIn, channels)
-	if err != nil {
-		return nil, err
-	}
-
-	workdir, err := e.resolveWorkdir(p.Def.Workdir)
-	if err != nil {
-		return nil, err
-	}
-
-	// The same resolved values that went into the environment drive redaction,
-	// so the two cannot drift (D10).
-	resolved, err := e.secrets.Resolve(p.Def.Secrets)
-	if err != nil {
-		return nil, fmt.Errorf("job %s: %w", p.Job.Slug, err)
-	}
-	sink := newLogSink(e, p.Run.ID, attempt.Number, opts.Live, newRedactor(resolved))
-
-	execResult, execErr := executor.Process{}.Run(ctx, executor.Spec{
-		Command: p.Def.Command,
-		Workdir: workdir,
-		Env:     env,
-		Timeout: p.Def.Timeout.D,
-		Output:  sink,
-	})
-	sink.Close()
-
-	result.TimedOut = execResult.TimedOut
-	result.Killed = execResult.Killed
-
-	// Bookkeeping after the process exits must not inherit the cancellation
-	// that stopped it. Shutting the engine down is precisely when recording
-	// what happened matters most, and writing with a dead context would leave
-	// the hole in the timeline that `interrupted` exists to fill (D5, D16).
-	//
-	// The original ctx is still consulted below to decide *which* terminal
-	// status this is -- cancellation is the fact, it just must not prevent us
-	// from writing the fact down.
-	finishCtx, cancelFinish := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-	defer cancelFinish()
-
-	// An executor error means we could not run the command at all -- a missing
-	// binary, an unreadable workdir. That is distinct from a command that ran
-	// and failed, and the run records it as such.
-	if execErr != nil {
-		return result, e.finish(finishCtx, result, model.StatusFailed, execResult, execErr.Error())
-	}
-
-	status := statusFor(execResult, ctx)
-	if !execResult.Succeeded() {
-		// D14, the whole point: failure, timeout, crash or interrupt and the
-		// cursor does not move. The channel files are simply discarded.
-		return result, e.finish(finishCtx, result, status, execResult, interruptMessage(status, execResult))
-	}
-
-	// Success. Promote the three channels, in an order chosen so that a
-	// malformed file fails the run before anything is committed.
-	if err := e.promote(finishCtx, result, p.Def, channels); err != nil {
-		return result, e.finish(finishCtx, result, model.StatusFailed, execResult, err.Error())
-	}
-	return result, e.finish(finishCtx, result, model.StatusSucceeded, execResult, "")
+	return &Prepared{
+		Run: run, Job: job, Def: def, StateIn: stateIn, Cause: cause, Actor: opts.Actor,
+	}, nil
 }
 
 // recordSkipped notes that the overlap policy declined to start a run.
@@ -370,36 +256,27 @@ func (e *Engine) stateForRun(ctx context.Context, job store.Job, def *jobdef.Def
 }
 
 // channels holds the three output file paths of D6's protocol.
-type channels struct {
-	stateOut string
-	output   string
-	events   string
-}
-
-func newChannels(dir string) channels {
-	return channels{
-		stateOut: filepath.Join(dir, "state.json"),
-		output:   filepath.Join(dir, "output.json"),
-		events:   filepath.Join(dir, "events.jsonl"),
-	}
-}
-
-// promote reads the three output channels and commits them.
+// promote validates the three output channels and commits them.
 //
 // Order matters. Everything is parsed and validated before anything is written,
 // so a malformed events file cannot leave a committed cursor behind. That is
 // the atomicity the four separate channels make possible -- and one of the
 // reasons the withdrawn single-channel design was worse.
-func (e *Engine) promote(ctx context.Context, result *RunResult, def *jobdef.Definition, ch channels) error {
-	stateOut, err := readJSONObject(ch.stateOut, jobdef.MaxStateBytes, "state")
+//
+// The channels arrive as bytes from a worker rather than as files on this
+// machine, and the validation stayed here on purpose: the caps and the object
+// constraint are the protocol (D6), and a worker is a place where a process
+// ran, not a trusted enforcer of the contract.
+func (e *Engine) promote(ctx context.Context, result *RunResult, def *jobdef.Definition, c Completion) error {
+	stateOut, err := validateJSONObject(c.StateOut, jobdef.MaxStateBytes, "state")
 	if err != nil {
 		return err
 	}
-	output, err := readJSONObject(ch.output, 1<<20, "output")
+	output, err := validateJSONObject(c.Output, 1<<20, "output")
 	if err != nil {
 		return err
 	}
-	events, err := readEvents(ch.events)
+	events, err := parseEvents(c.Events)
 	if err != nil {
 		return err
 	}
@@ -482,20 +359,6 @@ func (e *Engine) finish(ctx context.Context, result *RunResult, status model.Sta
 	return nil
 }
 
-func statusFor(exec executor.Result, ctx context.Context) model.Status {
-	switch {
-	case exec.TimedOut:
-		// D8 keeps this distinct from `failed` because they call for different
-		// responses: one is a slow job, the other is a broken one.
-		return model.StatusTimedOut
-	case ctx.Err() != nil:
-		// D5: we were killed, not the job. `interrupted`, not `failed`.
-		return model.StatusInterrupted
-	default:
-		return model.StatusFailed
-	}
-}
-
 // interruptMessage explains a non-success outcome in the terms of its status.
 func interruptMessage(status model.Status, exec executor.Result) string {
 	if status == model.StatusInterrupted {
@@ -528,25 +391,18 @@ func unrunnable(job store.Job) error {
 	}
 }
 
-// readJSONObject reads one of the single-value output channels.
+// validateJSONObject checks one of the single-value output channels (D6).
 //
-// A missing file means "no change", unambiguously -- which is why not writing
-// it is a supported outcome rather than an error (D14).
-func readJSONObject(path string, max int, what string) (json.RawMessage, error) {
-	info, err := os.Stat(path)
-	if os.IsNotExist(err) {
-		return nil, nil
-	} else if err != nil {
-		return nil, err
-	}
-	if info.Size() > int64(max) {
+// Empty means "no change", unambiguously -- which is why not writing the file
+// is a supported outcome rather than an error (D14).
+//
+// The caps are enforced on this side of D20's seam. A worker reads the file and
+// sends what it found; whether that is acceptable is the control plane's
+// decision, because it is the control plane's contract.
+func validateJSONObject(body []byte, max int, what string) (json.RawMessage, error) {
+	if len(body) > max {
 		return nil, fmt.Errorf("job wrote %d bytes of %s, over the %d byte limit",
-			info.Size(), what, max)
-	}
-
-	body, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
+			len(body), what, max)
 	}
 	body = bytes.TrimSpace(body)
 	if len(body) == 0 {
@@ -563,18 +419,13 @@ func readJSONObject(path string, max int, what string) (json.RawMessage, error) 
 	return json.RawMessage(body), nil
 }
 
-// readEvents parses the JSONL events channel (D17).
-func readEvents(path string) ([]model.Event, error) {
-	f, err := os.Open(path)
-	if os.IsNotExist(err) {
+// parseEvents reads the events channel, one JSON object per line (D17).
+func parseEvents(body []byte) ([]model.Event, error) {
+	if len(body) == 0 {
 		return nil, nil
-	} else if err != nil {
-		return nil, err
 	}
-	defer f.Close()
-
 	var out []model.Event
-	sc := bufio.NewScanner(f)
+	sc := bufio.NewScanner(bytes.NewReader(body))
 	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
 	for line := 1; sc.Scan(); line++ {
 		raw := bytes.TrimSpace(sc.Bytes())

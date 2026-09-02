@@ -1,0 +1,55 @@
+# The control plane and its system worker, together (D20/C12).
+#
+# One command brings up both, because two components that must both be running
+# is a worse first five minutes than one -- and C11 means a control plane on its
+# own runs nothing at all. `docker compose up -d` is the whole of D19's stage
+# "dev", and the image here is the same one that runs in a cluster.
+
+name: job-engine
+
+services:
+  control-plane:
+    build: .
+    image: job-engine:dev
+    command: ["serve", "--addr", "0.0.0.0:7620"]
+    ports:
+      # Published on loopback only. The trust boundary moved from the process
+      # to the network (D19's rider on N1), and binding 0.0.0.0 on your laptop
+      # would move it further than anybody asked.
+      - "127.0.0.1:7620:7620"
+    environment:
+      # D9/D19: containers default to UTC and schedules mean local time to a
+      # human. This is the "why did my 3am job run at 8pm" bug, set explicitly
+      # so it cannot happen.
+      TZ: ${TZ:-UTC}
+    volumes:
+      # A named volume, never a bind mount. SQLite on a macOS bind mount goes
+      # through VirtioFS/gRPC-FUSE, which has the same class of locking
+      # pathology D19 warns about for NFS -- silent, and weeks out.
+      - je-data:/var/lib/je
+      # Definitions are read-only and safe to bind: no SQLite involved, and
+      # editing job YAML on the host is the point (P3).
+      - ./jobs:/var/lib/je/jobs:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "/je", "status"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+  worker:
+    build: .
+    image: job-engine:dev
+    # Only the control plane holds state, so the worker needs no volume at all
+    # (C2). Losing this container costs its in-flight runs and nothing else.
+    command: ["worker", "--addr", "control-plane:7620", "--name", "system", "--labels", "default"]
+    environment:
+      TZ: ${TZ:-UTC}
+    depends_on:
+      control-plane:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  je-data:

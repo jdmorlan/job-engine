@@ -39,7 +39,7 @@ func runRuns(ctx context.Context, env *Env, args []string) error {
 		return usagef("expected at most one job name, got %d", len(positional))
 	}
 
-	return withReader(ctx, env, func(ctx context.Context, rd Reader) error {
+	return withClient(ctx, env, func(ctx context.Context, rd *Client) error {
 		var jobSlug string
 		if len(positional) == 1 {
 			jobSlug = positional[0]
@@ -91,7 +91,7 @@ func runLogs(ctx context.Context, env *Env, args []string) error {
 		return usagef("%q is not a run id", positional[0])
 	}
 
-	return withReader(ctx, env, func(ctx context.Context, rd Reader) error {
+	return withClient(ctx, env, func(ctx context.Context, rd *Client) error {
 		lines, err := rd.Logs(ctx, runID, *attempt)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {

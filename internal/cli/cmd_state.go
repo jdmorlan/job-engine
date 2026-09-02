@@ -37,7 +37,7 @@ func runState(ctx context.Context, env *Env, args []string) error {
 	}
 	sub, slug := positional[0], positional[1]
 
-	return withReader(ctx, env, func(ctx context.Context, rd Reader) error {
+	return withClient(ctx, env, func(ctx context.Context, rd *Client) error {
 		def, err := rd.Definition(ctx, slug)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {

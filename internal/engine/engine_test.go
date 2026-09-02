@@ -96,7 +96,7 @@ func TestDowntimeIsMeasuredAcrossRestart(t *testing.T) {
 		t.Fatalf("Start after gap: %v", err)
 	}
 
-	health := e2.Health()
+	health := e2.Health(context.Background())
 	if health.LastDowntime != 4*time.Hour {
 		t.Errorf("LastDowntime = %s, want 4h", health.LastDowntime)
 	}
@@ -123,7 +123,7 @@ func TestUncleanStopIsDetected(t *testing.T) {
 	if err := e2.Start(ctx); err != nil {
 		t.Fatalf("Start after crash: %v", err)
 	}
-	if !e2.Health().UncleanStop {
+	if !e2.Health(context.Background()).UncleanStop {
 		t.Error("UncleanStop = false after a start with no matching stop")
 	}
 }

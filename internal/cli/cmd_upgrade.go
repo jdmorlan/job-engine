@@ -10,7 +10,6 @@ import (
 
 	"github.com/jdmorlan/job-engine/internal/daemon"
 	"github.com/jdmorlan/job-engine/internal/selfupdate"
-	"github.com/jdmorlan/job-engine/internal/service"
 )
 
 func init() {
@@ -19,8 +18,11 @@ func init() {
 		Usage: "download and install the latest release",
 		Long: "Replaces this binary in place, after verifying its SHA-256 against the\n" +
 			"checksum file published with the release.\n\n" +
-			"A running daemon keeps executing the old version until it is restarted;\n" +
-			"`je status` says so rather than leaving you to wonder why nothing changed.",
+			"A running control plane keeps executing the old version until it is\n" +
+			"restarted; `je status` says so rather than leaving you to wonder why\n" +
+			"nothing changed. Where the control plane is a container, upgrading it is\n" +
+			"`docker compose pull && docker compose up -d` rather than this command --\n" +
+			"this upgrades the CLI you are typing at.",
 		Run: runUpgrade,
 	})
 }
@@ -29,7 +31,6 @@ func runUpgrade(ctx context.Context, env *Env, args []string) error {
 	cmd := commands["upgrade"]
 	fs := newFlagSet(cmd, env)
 	check := fs.Bool("check", false, "report what is available without installing it")
-	restart := fs.Bool("restart", false, "restart the registered service afterwards")
 	repo := fs.String("repo", "", "GitHub repository to fetch releases from")
 	if extra, err := parseArgs(fs, args); err != nil {
 		return err
@@ -137,45 +138,17 @@ func runUpgrade(ctx context.Context, env *Env, args []string) error {
 	}
 	fmt.Fprintf(env.Stdout, "\nupgraded to %s at %s\n", release.TagName, target)
 
-	if *restart {
-		return restartService(env)
-	}
-	warnStaleDaemon(env, release.TagName)
+	warnStaleControlPlane(env, release.TagName)
 	return nil
 }
 
-// restartService picks up the new binary in the running daemon.
-//
-// Opt-in rather than automatic: restarting is a visible interruption to
-// whatever is mid-run, and doing it as a side effect of an upgrade somebody
-// asked for at 2pm is the kind of helpfulness nobody wants.
-func restartService(env *Env) error {
-	mgr, err := service.New()
-	if err != nil {
-		return err
-	}
-	state, err := mgr.Status()
-	if err != nil {
-		return err
-	}
-	if !state.Installed {
-		fmt.Fprintln(env.Stderr,
-			"\nnothing to restart: no service is registered (je service install)")
-		return nil
-	}
-	if err := mgr.Restart(); err != nil {
-		return err
-	}
-	fmt.Fprintf(env.Stdout, "restarted the %s service\n", mgr.Name())
-	return nil
-}
-
-// warnStaleDaemon points out that a running daemon is still the old binary.
+// warnStaleControlPlane points out that a running control plane is still the
+// old binary.
 //
 // The file on disk changed; the process did not. Without this the next thing
 // that happens is somebody upgrading, seeing no change in behaviour, and
 // concluding the upgrade did not work.
-func warnStaleDaemon(env *Env, newVersion string) {
+func warnStaleControlPlane(env *Env, newVersion string) {
 	info, err := daemon.ReadRuntime(env.Layout.Runtime())
 	if err != nil {
 		return
@@ -184,9 +157,8 @@ func warnStaleDaemon(env *Env, newVersion string) {
 		return
 	}
 	fmt.Fprintf(env.Stderr,
-		"\nnote: a daemon is still running %s (pid %d).\n"+
-			"      Restart it to pick up %s:  je service restart\n"+
-			"      (or upgrade with --restart next time)\n",
+		"\nnote: a control plane is still running %s (pid %d).\n"+
+			"      Restart it to pick up %s.\n",
 		info.Version, info.PID, newVersion)
 }
 

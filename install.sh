@@ -4,10 +4,10 @@
 #   curl -fsSL https://raw.githubusercontent.com/jdmorlan/job-engine/main/install.sh | sh
 #
 # Downloads the release build for this machine, checks it against the published
-# SHA-256, and puts it somewhere on your PATH. Nothing else: no daemon is
+# SHA-256, and puts it somewhere on your PATH. Nothing else: nothing is
 # started, nothing is added to your shell config, and no directory outside the
-# install location is touched. `je install` registers the daemon, separately and
-# only when you ask.
+# install location is touched. Starting the engine is a separate, explicit
+# step -- `je quickstart` to try it, `docker compose up -d` to keep it running.
 #
 # Environment:
 #   JE_VERSION      release tag to install (default: latest)

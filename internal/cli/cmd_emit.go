@@ -55,14 +55,14 @@ func runEmit(ctx context.Context, env *Env, args []string) error {
 
 	client, err := Connect(env.Layout)
 	if err != nil {
-		return adviseNoDaemon(err)
+		return adviseNoControlPlane(err)
 	}
 	ctx, cancel := withTimeout(ctx)
 	defer cancel()
 
 	resp, err := client.Emit(ctx, req)
 	if err != nil {
-		return adviseNoDaemon(err)
+		return adviseNoControlPlane(err)
 	}
 
 	// Report the dedupe outcome explicitly. Silently succeeding on a duplicate

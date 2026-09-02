@@ -11,11 +11,11 @@ import (
 func init() {
 	register(&Command{
 		Name:  "serve",
-		Usage: "run the engine daemon in the foreground",
-		Long: "The daemon owns the database and is the only process that writes to it.\n" +
-			"Every other command is a client of its API.\n\n" +
-			"Stage 0 of D19's progression is running this in a terminal and watching it.\n" +
-			"`je install` will later register it with launchd so it starts at login.",
+		Usage: "run the control plane in the foreground",
+		Long: "The control plane owns the database and is the only process that writes\n" +
+			"to it. Every other command is a client of its API.\n\n" +
+			"It never runs a job itself (D20/C11) -- that needs at least one worker,\n" +
+			"which is what `je worker` starts. `docker compose up` brings up both.",
 		Run: runServe,
 	})
 }
@@ -36,8 +36,8 @@ func runServe(ctx context.Context, env *Env, args []string) error {
 		level = slog.LevelDebug
 	}
 	// Logs go to stderr so that stdout stays available for anything a command
-	// is genuinely producing. Under launchd both are redirected to a file,
-	// and keeping them separate there is what makes the file readable.
+	// is genuinely producing. In a container both are collected anyway, and
+	// keeping them separate is what makes the collected stream readable.
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 
 	return daemon.Run(ctx, daemon.Config{

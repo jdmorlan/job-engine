@@ -29,7 +29,7 @@ func runJobs(ctx context.Context, env *Env, args []string) error {
 		return usagef("unexpected argument %q", extra[0])
 	}
 
-	return withReader(ctx, env, func(ctx context.Context, rd Reader) error {
+	return withClient(ctx, env, func(ctx context.Context, rd *Client) error {
 		loaded, err := rd.Jobs(ctx)
 		if err != nil {
 			return err

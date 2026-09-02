@@ -21,6 +21,7 @@ type rawDefinition struct {
 	Command     []string      `yaml:"command"`
 	Workdir     *string       `yaml:"workdir"`
 	Runtime     *Runtime      `yaml:"runtime"`
+	RunsOn      *string       `yaml:"runs_on"`
 	Language    *string       `yaml:"language"`
 	Timeout     *Duration     `yaml:"timeout"`
 	Overlap     *Overlap      `yaml:"overlap"`
@@ -82,6 +83,7 @@ func Parse(path, slug string, body []byte) (*Definition, error) {
 		// override, and forgetting the override fails a test rather than
 		// producing a silent zero value.
 		Runtime:     DefaultRuntime,
+		RunsOn:      DefaultRunsOn,
 		Timeout:     Duration{DefaultTimeout},
 		Overlap:     DefaultOverlap,
 		OnInterrupt: DefaultOnInterrupt,
@@ -96,6 +98,7 @@ func Parse(path, slug string, body []byte) (*Definition, error) {
 	setIf(&d.Description, raw.Description)
 	setIf(&d.Workdir, raw.Workdir)
 	setIf(&d.Runtime, raw.Runtime)
+	setIf(&d.RunsOn, raw.RunsOn)
 	setIf(&d.Language, raw.Language)
 	setIf(&d.Timeout, raw.Timeout)
 	setIf(&d.Overlap, raw.Overlap)

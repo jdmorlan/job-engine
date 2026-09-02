@@ -43,6 +43,16 @@ type Definition struct {
 	// protocol, which is the floor every language reaches.
 	Language string `json:"language,omitempty"`
 
+	// RunsOn is the capability label a worker must advertise to run this job
+	// (D20/C3). Jobs are pinned, not placed: this names what the job needs,
+	// not where the deployment happens to put things, which is why it stays
+	// true on a laptop and in a cluster alike (D19/R1).
+	//
+	// The default exists so the first job somebody writes does not have to
+	// know that placement is a concept -- a control plane ships with a worker
+	// advertising it (C12).
+	RunsOn string `json:"runs_on"`
+
 	Timeout     Duration    `json:"timeout"`
 	Overlap     Overlap     `json:"overlap"`
 	OnInterrupt OnInterrupt `json:"on_interrupt"`
@@ -133,6 +143,11 @@ const (
 	DefaultCatchUp       = CatchUpSkip
 	DefaultStateCommit   = CommitOnSuccess
 	DefaultPrimaryCursor = "since"
+
+	// DefaultRunsOn is the label a job needs when it does not say (D20/C3).
+	// It must match store.DefaultLabel and the label the system worker
+	// advertises; the demo jobs and `je quickstart` both rely on it.
+	DefaultRunsOn = "default"
 )
 
 // MaxStateBytes caps the cursor at 64KB.

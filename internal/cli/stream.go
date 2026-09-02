@@ -43,7 +43,7 @@ func (c *Client) StreamRun(ctx context.Context, id int64, onEvent func(engine.St
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("%w at %s: %w", ErrNoDaemon, c.base.Host, err)
+		return fmt.Errorf("%w at %s: %w", ErrNoControlPlane, c.base.Host, err)
 	}
 	defer resp.Body.Close()
 

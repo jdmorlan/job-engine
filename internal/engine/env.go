@@ -29,10 +29,16 @@ var passthroughEnv = []string{
 	"SHELL",
 }
 
-// buildEnv assembles the complete environment for one attempt (D6).
+// buildEnv assembles the environment for one attempt (D6), minus the four
+// values only the worker can know.
 //
 // The full v1 protocol, and nothing else. A job that wants more has to declare
 // it, which is what makes the set auditable.
+//
+// JOB_WORKDIR and the three output channel paths are added by the worker, on
+// the machine where the files will actually exist (D20). That split is what
+// keeps D6 unchanged across the network: the job still writes to local files
+// and never learns that the engine is somewhere else.
 func (e *Engine) buildEnv(
 	ctx context.Context,
 	job store.Job,
@@ -41,7 +47,6 @@ func (e *Engine) buildEnv(
 	attempt store.Attempt,
 	cause model.Event,
 	stateIn store.StateVersion,
-	ch channels,
 ) ([]string, error) {
 	if len(stateIn.Value) > jobdef.MaxStateBytes {
 		// Should be impossible -- CommitState enforces the cap on the way in --
@@ -68,17 +73,11 @@ func (e *Engine) buildEnv(
 		"ATTEMPT="+strconv.Itoa(attempt.Number),
 		"TRIGGERED_BY="+cause.Type,
 		"EVENT_PAYLOAD="+payload,
-		"JOB_WORKDIR="+ch.dir(),
 
 		// D14. State arrives in the environment because inputs carry no
 		// commit-on-success requirement -- that is what makes the three output
 		// channels files and this one not.
 		"JE_STATE="+string(stateIn.Value),
-
-		// The three output channels (D6, D14, D17).
-		"JOB_STATE_OUT_FILE="+ch.stateOut,
-		"JOB_OUTPUT_FILE="+ch.output,
-		"JOB_EVENTS_FILE="+ch.events,
 	)
 
 	// D10: only declared secrets, and the whole store is never handed over.
@@ -108,8 +107,3 @@ func (e *Engine) buildEnv(
 
 	return env, nil
 }
-
-// dir is the scratch directory holding the output channels, exposed to the job
-// as JOB_WORKDIR so it has somewhere to put intermediate files that the engine
-// will clean up.
-func (c channels) dir() string { return filepathDir(c.stateOut) }

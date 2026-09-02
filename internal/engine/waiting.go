@@ -2,6 +2,8 @@ package engine
 
 import (
 	"context"
+	"slices"
+	"sort"
 	"time"
 
 	"github.com/jdmorlan/job-engine/internal/jobdef"
@@ -28,6 +30,22 @@ type Waiting struct {
 
 	// Running is what is executing right now, for context.
 	Running []store.Run `json:"running"`
+
+	// Unservable is work queued for a capability label no online worker
+	// advertises (D20/C8).
+	//
+	// This is the failure the split introduced and the one it must never be
+	// quiet about: the run is queued, the schedule is firing, everything looks
+	// busy, and nothing can ever pick it up. An offline worker must produce a
+	// visible waiting state, never a silent backlog.
+	Unservable []UnservedLabel `json:"unservable,omitempty"`
+}
+
+// UnservedLabel is one capability nothing is serving, and what is stuck on it.
+type UnservedLabel struct {
+	Label string   `json:"label"`
+	Runs  []int64  `json:"runs"`
+	Jobs  []string `json:"jobs"`
 }
 
 // ScheduledWindow is one upcoming firing.
@@ -95,13 +113,48 @@ func (e *Engine) Waiting(ctx context.Context) (Waiting, error) {
 	if w.Running, err = e.store.RecentRunsWithStatus(ctx, "running", 50); err != nil {
 		return Waiting{}, err
 	}
+
+	// C8: which of the queued runs is waiting on a label nothing serves.
+	covered, err := e.store.LabelsCovered(ctx, now, LeaseTTL)
+	if err != nil {
+		return Waiting{}, err
+	}
+	stuck := map[string]*UnservedLabel{}
+	for _, run := range w.Queued {
+		if covered[run.RunsOn] {
+			continue
+		}
+		entry := stuck[run.RunsOn]
+		if entry == nil {
+			entry = &UnservedLabel{Label: run.RunsOn}
+			stuck[run.RunsOn] = entry
+		}
+		entry.Runs = append(entry.Runs, run.ID)
+		if job, err := e.store.JobByID(ctx, run.JobID); err == nil {
+			if !slices.Contains(entry.Jobs, job.Slug) {
+				entry.Jobs = append(entry.Jobs, job.Slug)
+			}
+		}
+	}
+	for _, entry := range stuck {
+		w.Unservable = append(w.Unservable, *entry)
+	}
+	sort.Slice(w.Unservable, func(i, j int) bool {
+		return w.Unservable[i].Label < w.Unservable[j].Label
+	})
 	return w, nil
 }
 
 // NeedsAttention reports whether anything here is a problem a human should look
 // at, which is what gives `je waiting` and `je status` a meaningful exit code
 // (P1: a query with an exit code rather than a vibe).
-func (w Waiting) NeedsAttention() bool { return len(w.Blocked) > 0 }
+// Unservable counts here because a run nobody can take is stuck in exactly the
+// way Blocked is: it will not resolve on its own, and no amount of waiting
+// helps. It is arguably the worse of the two, because everything about it looks
+// like ordinary queueing.
+func (w Waiting) NeedsAttention() bool {
+	return len(w.Blocked) > 0 || len(w.Unservable) > 0
+}
 
 func sortScheduled(s []ScheduledWindow) {
 	for i := 1; i < len(s); i++ {

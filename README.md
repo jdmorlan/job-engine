@@ -18,8 +18,8 @@ curl -fsSL https://raw.githubusercontent.com/jdmorlan/job-engine/main/install.sh
 
 Downloads the build for your platform, verifies its SHA-256 against the
 checksums published with the release, and puts it in `~/.local/bin` (no sudo).
-It starts nothing and edits no shell config; registering the daemon is a
-separate, explicit step.
+It starts nothing and edits no shell config; starting the engine is a separate,
+explicit step.
 
 ```sh
 JE_INSTALL_DIR=/usr/local/bin  # where to put it
@@ -50,34 +50,118 @@ rather than leaving you to wonder why nothing changed.
 `je upgrade --check` reports without installing. Building from source is
 `go build ./cmd/je`.
 
-### Keeping it running
+## Two components
 
-Installing the binary and registering the daemon are separate acts, so they
-have separate names:
+The engine is a **control plane** and one or more **workers**.
 
-```console
-$ je service install
-registered with  launchd
-unit             ~/Library/LaunchAgents/io.github.jdmorlan.je.plist
-listening on     127.0.0.1:7620
-engine log       ~/.je/daemon.log
+The control plane owns the database, fires schedules, serves the API, and holds
+every fact about what happened. It never runs a job. Workers run jobs and hold
+nothing: they dial the control plane, ask for work, and report back.
 
-It is running now and will start again at login.
+That split is not deployment trivia — it is why a job that has to touch *your
+Mac* can, while the thing that remembers what happened lives in a cluster. A
+worker goes where the work is; the control plane goes where a database is happy.
+
+```
+                    ┌──────────────────┐
+   je ─────────────▶│  control plane   │  schedules, history, cursors, API
+                    │  (one container) │  never runs your code
+                    └────────┬─────────┘
+                       ▲     │ dispatch
+                dials  │     ▼
+              ┌────────┴──┐  ┌───────────┐
+              │  worker   │  │  worker   │   runs_on: default / macos / ...
+              │ (default) │  │  (macos)  │   no state, no open ports
+              └───────────┘  └───────────┘
 ```
 
-launchd on macOS, systemd on Linux, per-user in both cases — no sudo, and it
-runs as you, which is what lets jobs reach your files. `RunAtLoad` and
-`KeepAlive` (`Restart=always`) mean it survives a logout and comes back from a
-crash; `je service status | restart | uninstall` do the rest. Uninstalling
-removes the registration and nothing else.
+A control plane with no worker attached runs **nothing**, and says so:
 
-One detail worth knowing, because it is the classic way this goes wrong: a
-service manager starts processes with a minimal `PATH`, and jobs inherit it. So
-`je service install` records the `PATH` of the shell you ran it from. Without
-that, any job calling `npx` or `python3` works by hand and fails under the
-daemon. Re-run it after moving the binary or changing your `PATH`.
+```console
+$ je status
+control plane  running (v0.3.0)
+workers        NONE -- nothing will run
+               start one:  je worker
+```
 
-`je upgrade --restart` upgrades and restarts in one step.
+### Running it
+
+For trying it out, one command runs both halves in your terminal:
+
+```console
+$ je quickstart
+je: control plane on 127.0.0.1:7620, one worker attached (default)
+    try:  je jobs        in another terminal
+          je run <job>
+```
+
+For anything unattended, Docker — the same image that runs in a cluster:
+
+```console
+$ docker compose up -d      # control plane and its system worker
+```
+
+Two rules in `compose.yaml` that are not optional. The data directory must be a
+**named volume, never a bind mount** — SQLite over macOS bind mounts (and over
+NFS) has silent locking pathologies that surface weeks later. And `TZ` must be
+set explicitly, because containers default to UTC and schedules mean local time
+to a human.
+
+### Workers, and where jobs run
+
+```console
+$ je workers
+NAME     ROLES    LABELS   SESSION
+system   execute  default  online just now
+macbook  execute  macos    online 4d
+```
+
+A job picks a worker by capability, not by address:
+
+```yaml
+runs_on: macos        # default: "default"
+command: ["shortcuts", "run", "Water the plants"]
+```
+
+Jobs are **pinned, not placed**: a run goes to a worker advertising its label,
+or it waits — visibly. Nothing balances load, steals work, or reschedules, and
+none of that machinery is needed, because the whole point of a label is that the
+work is *not* interchangeable.
+
+```console
+$ je waiting
+WAITING FOR A WORKER  (queued for a label nothing is serving)
+  runs_on: macos
+    3 run(s), jobs: water-plants
+    start one:  je worker --labels macos
+```
+
+To run a worker on your Mac:
+
+```console
+$ je worker --labels macos
+```
+
+It opens no ports and dials out, so it works from a laptop behind NAT. It holds
+no state, so killing it costs its in-flight runs and nothing else.
+
+### When a worker disappears
+
+If a worker stops answering, the control plane cannot tell "it died" from "it is
+partitioned and still running your job". Nothing can. So it stops guessing and
+says what it actually knows:
+
+```console
+$ je runs
+RUN  JOB      STATUS  STARTED              DURATION  ATTEMPTS
+41   sleeper  lost    2026-09-02 17:57:30  -         1
+```
+
+`lost`, not `failed` — we do not know that it failed. The run appears in
+`je waiting`, a `run.lost` event lands in the timeline, and a human decides.
+Automatic retry of lost runs (`on_node_lost: retry`) is deliberately not here
+yet: it is at-least-once, and choosing that for you is not something a job
+engine should do quietly.
 
 ## Try it in two minutes
 
@@ -88,7 +172,7 @@ wrote 7 files to /Users/you/.je/jobs
   demo-hello    prints a line and exits           the smallest job that exists
   demo-counter  keeps a cursor and advances it    what other schedulers leave to you
   demo-flaky    fails about one run in three      watch the cursor NOT move
-  demo-tick     runs every minute                 gives the daemon something to do
+  demo-tick     runs every minute                 gives the scheduler something to do
 ```
 
 They are ordinary files. Read them, change them, break them, `je demo --remove`
@@ -130,27 +214,31 @@ Early, but it runs jobs on a schedule, unattended.
 ```
 je demo           write four example jobs and a tour
 je upgrade        install the latest release, checksum-verified
-je service ...    register the daemon with launchd or systemd
-je serve          run the daemon: schedules fire, jobs run
+je quickstart     a control plane and a worker, in this terminal
+je serve          run the control plane: schedules fire, API serves
+je worker         run a worker: this is what actually executes jobs
+je workers        what is attached, and what it can run
 je waiting        what has not happened yet, and what is stuck
-je run <job>      run a job now, in the foreground
+je run <job>      run a job now and follow its output
 je jobs           what is loaded, and what is broken
 je runs           recent runs
 je logs <run>     what a run printed
 je state get|history <job>    the cursor, and how it has moved
 je events         the raw timeline with causation
 je secret set|list|rm         values jobs declare and the engine injects
-je status         is the daemon up, and how long was it down
+je status         is the control plane up, and how long was it down
 je emit <type>    put an event into the engine (D16's single ingress)
 ```
 
-Every command works the same whether or not a daemon is running: it talks to
-the daemon when one is listening and opens the database itself when not. `je
-run` against a live daemon queues the run there and streams its output back, so
-you never have to stop the scheduler to run something by hand.
+**The CLI is a client and nothing else.** It has no path to the database of its
+own — every command is an API call, including `je secret` and `je run`. So the
+same commands work against a control plane in a container, in a cluster, or on
+another machine: only the address changes.
+
+`je run` queues the run, a worker executes it, and the output streams back here:
 
 ```console
-$ je run weather-ingest       # daemon running; output streams live
+$ je run weather-ingest
 ingested 41 readings
 
 ok  run 12 succeeded in 1.2s
@@ -158,8 +246,8 @@ ok  run 12 succeeded in 1.2s
     emitted weather.ingested (event 88)
 ```
 
-Ctrl-C detaches rather than cancelling: the run belongs to the daemon, and it
-tells you how to follow it again.
+Ctrl-C detaches rather than cancelling: the run belongs to the control plane and
+its worker, and it tells you how to follow it again.
 
 ### Schedules
 
@@ -283,18 +371,24 @@ the log file later cannot leak them. There is no `je secret get`.
 Retries, chains, job sources (D22), container executor, the TypeScript shim
 (D21), and retention.
 
-**The daemon reads job definitions only at startup.** Adding or editing a job
-file needs `je service restart` (or a restart of `je serve`) before it takes
-effect. Watching the jobs directory is a v1 item and is the next obvious gap
-now that the daemon runs permanently. A job declaring `language:`
-loads but is marked misconfigured and will not run, rather than running without
-what it asked for.
+**The control plane reads job definitions only at startup.** Adding or editing a
+job file needs a restart before it takes effect. Watching the jobs directory —
+or a sync endpoint, which is what the split makes the more obvious answer — is a
+v1 item and the largest remaining gap. A job declaring `language:` loads but is
+marked misconfigured and will not run, rather than running without what it asked
+for.
+
+**Secrets reach a worker in the dispatch.** That is correct for a trusted
+network and wrong for anything else, and it is the real work item behind putting
+a worker on a machine you do not fully control (D10).
 
 ## Layout
 
-The one structural rule, from D18: **the engine core is a library.** The daemon
-is a thin wrapper around it and the CLI is a client of the daemon, so nothing in
-`internal/engine` may call `os.Exit`, print, read flags, or handle signals.
+Two structural rules. From D18: **the engine core is a library** — the control
+plane is a thin wrapper around it, so nothing in `internal/engine` may call
+`os.Exit`, print, read flags, or handle signals. From D20: **the control plane
+never executes a job.** `internal/engine` starts no processes; `internal/worker`
+is the only package that does.
 
 | Package | Owns |
 |---|---|
@@ -304,7 +398,8 @@ is a thin wrapper around it and the CLI is a client of the daemon, so nothing in
 | `internal/model` | the F1 nouns. Depends on nothing. |
 | `internal/api` | the HTTP contract. Every capability is an endpoint (D15). |
 | `internal/daemon` | process concerns: listener, shutdown, runtime file. |
-| `internal/cli` | the `je` client. |
+| `internal/worker` | the data plane. The only package that starts a process. |
+| `internal/cli` | the `je` client. No database access of its own. |
 | `internal/paths` | the only place that knows where files live. |
 | `internal/lockfile` | the single-writer guarantee (D18). |
 | `internal/jobdef` | parsing, validation, defaults, and D11 hashing. |
@@ -312,7 +407,6 @@ is a thin wrapper around it and the CLI is a client of the daemon, so nothing in
 | `internal/secrets` | the local secret store, and log redaction values (D10). |
 | `internal/schedule` | cron and interval windows, including the DST rules (D9). |
 | `internal/selfupdate` | finding, verifying and installing a new binary. |
-| `internal/service` | launchd and systemd registration (D16). |
 
 ## Building
 
@@ -324,9 +418,9 @@ make release-dry  # build every release artifact locally, as CI does
 ```
 
 One direct dependency: `modernc.org/sqlite`, the pure-Go driver. That is what
-keeps the binary static and cgo-free, which is in turn why the same artifact
-runs in a terminal, under launchd, in a `FROM scratch` image, and inside a Mac
-app (D18).
+keeps the binary static and cgo-free, which is in turn why one artifact is both
+the control plane and the worker, and runs in a terminal, in a `FROM scratch`
+image, in a cluster, and inside a Mac app (D18).
 
 ## Where things live
 
@@ -336,6 +430,6 @@ app (D18).
   logs.db         captured job output, separately (D4)
   lock            the single-writer flock
   secrets.json    the local secret store, mode 0600 (D10)
-  daemon.json     the running daemon's address, so the CLI can find it
+  daemon.json     the control plane's address, so clients can find it
   jobs/           job and chain definitions (override with JE_JOBS_DIR)
 ```

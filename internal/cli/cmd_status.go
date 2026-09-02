@@ -2,12 +2,10 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"strings"
 	"text/tabwriter"
 	"time"
-
-	"github.com/jdmorlan/job-engine/internal/service"
 )
 
 func init() {
@@ -29,7 +27,7 @@ func runStatus(ctx context.Context, env *Env, args []string) error {
 
 	client, err := Connect(env.Layout)
 	if err != nil {
-		return adviseNoDaemon(err)
+		return adviseNoControlPlane(err)
 	}
 
 	ctx, cancel := withTimeout(ctx)
@@ -37,11 +35,23 @@ func runStatus(ctx context.Context, env *Env, args []string) error {
 
 	health, err := client.Health(ctx)
 	if err != nil {
-		return adviseNoDaemon(err)
+		return adviseNoControlPlane(err)
 	}
 
 	tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintf(tw, "engine\trunning (%s)\n", health.Version)
+	fmt.Fprintf(tw, "control plane\trunning (%s)\n", health.Version)
+
+	// C8, and the most important line here. A control plane with no worker
+	// attached runs nothing at all: schedules fire into a queue that nobody
+	// drains. That is exactly the kind of quiet nothing-happening P1 exists to
+	// prevent, so it is stated on the default view and stated as a problem.
+	if health.Workers == 0 {
+		fmt.Fprintf(tw, "workers\tNONE -- nothing will run\n")
+		fmt.Fprintf(tw, "\tstart one:  je worker\n")
+	} else {
+		fmt.Fprintf(tw, "workers\t%d online (%s)\n",
+			health.Workers, strings.Join(health.Labels, ", "))
+	}
 	fmt.Fprintf(tw, "uptime\t%s\n", roundDuration(health.Uptime))
 	fmt.Fprintf(tw, "since\t%s\n", health.StartedAt.Local().Format(time.RFC1123))
 	fmt.Fprintf(tw, "data dir\t%s\n", health.DataDir)
@@ -58,45 +68,17 @@ func runStatus(ctx context.Context, env *Env, args []string) error {
 		fmt.Fprintf(tw, "note\tprevious run ended without a clean shutdown\n")
 	}
 
-	// The daemon runs whatever binary started it, and `je upgrade` replaces a
-	// file rather than a process. Without saying so, the next thing that
-	// happens is somebody upgrading, seeing no change, and concluding the
+	// The control plane runs whatever binary started it, and `je upgrade`
+	// replaces a file rather than a process. Without saying so, the next thing
+	// that happens is somebody upgrading, seeing no change, and concluding the
 	// upgrade failed. A visible mismatch beats a mystery (P1), and it is the
-	// same reasoning behind D20 C10 refusing node version skew loudly.
-	if state, err := serviceState(); err == nil && !state.Installed {
-		// Not an error -- running `je serve` in a terminal is a legitimate
-		// mode, and D19 calls it stage 0. But somebody who expects unattended
-		// operation should find out now rather than after a reboot.
-		fmt.Fprintf(tw, "autostart\tnot registered (je service install)\n")
-	}
+	// same reasoning behind D20/C10 refusing worker version skew loudly.
 	if !sameVersion(health.Version, env.Version) {
-		fmt.Fprintf(tw, "version\tdaemon is running %s, this binary is %s\n",
+		fmt.Fprintf(tw, "version\tcontrol plane is running %s, this binary is %s\n",
 			health.Version, env.Version)
-		fmt.Fprintf(tw, "\trestart the daemon to pick up %s\n", env.Version)
+		fmt.Fprintf(tw, "\trestart it to pick up %s\n", env.Version)
 	}
 	return tw.Flush()
-}
-
-// serviceState reports on the OS service registration, if this platform has
-// one. Failures are the caller's cue to say nothing rather than to complain:
-// an unsupported platform is not a problem with the engine.
-func serviceState() (service.State, error) {
-	mgr, err := service.New()
-	if err != nil {
-		return service.State{}, err
-	}
-	return mgr.Status()
-}
-
-// adviseNoDaemon turns a connection failure into an instruction.
-//
-// P1 in the small: the error a person sees at 2am should tell them what to do
-// next, not just what went wrong.
-func adviseNoDaemon(err error) error {
-	if errors.Is(err, ErrNoDaemon) {
-		return fmt.Errorf("%w\n\nStart one with:  je serve", err)
-	}
-	return err
 }
 
 // roundDuration renders a duration at a precision a human cares about:

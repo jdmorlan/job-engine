@@ -11,15 +11,27 @@ import (
 	"github.com/jdmorlan/job-engine/internal/model"
 )
 
-// runScheduler starts the scheduler and stops it once cond holds, or after a
-// deadline. Polling rather than sleeping a fixed time, so the test is neither
-// flaky nor slower than it needs to be.
+// runScheduler starts the scheduler, attaches a worker, and stops both once
+// cond holds or a deadline passes. Polling rather than sleeping a fixed time,
+// so the test is neither flaky nor slower than it needs to be.
+//
+// The worker is not optional scaffolding. D20/C11 means the scheduler only
+// queues -- a control plane with nothing attached runs nothing, which is the
+// behaviour C8 requires it to be loud about, and a scheduler test that did not
+// attach one would wait forever for runs that were never going to happen.
 func runScheduler(t *testing.T, e *engine.Engine, cond func() bool) {
 	t.Helper()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- e.RunScheduler(ctx) }()
+
+	workerDone := make(chan struct{})
+	go func() {
+		defer close(workerDone)
+		pumpWorker(t, e, ctx)
+	}()
+	defer func() { <-workerDone }()
 
 	deadline := time.After(20 * time.Second)
 	for !cond() {

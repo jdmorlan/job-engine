@@ -23,7 +23,9 @@ func init() {
 			"secrets a job declares are injected into it.\n\n" +
 			"A job declaring a secret that is not set is a definition error: it shows\n" +
 			"as misconfigured in `je jobs` and will not run, rather than failing with\n" +
-			"a cryptic exit code hours later.",
+			"a cryptic exit code hours later.\n\n" +
+			"Secrets live with the control plane, not on this machine, so these\n" +
+			"commands need one running.",
 		Run: runSecret,
 	})
 }
@@ -44,38 +46,39 @@ func runSecret(ctx context.Context, env *Env, args []string) error {
 		if len(positional) != 2 {
 			return usagef("usage: je secret set <NAME>")
 		}
-		return secretSet(env, positional[1])
+		return withClient(ctx, env, func(ctx context.Context, c *Client) error {
+			return secretSet(ctx, env, c, positional[1])
+		})
 	case "list":
 		if len(positional) != 1 {
 			return usagef("usage: je secret list")
 		}
-		return secretList(ctx, env)
+		return withClient(ctx, env, func(ctx context.Context, c *Client) error {
+			return secretList(ctx, env, c)
+		})
 	case "rm":
 		if len(positional) != 2 {
 			return usagef("usage: je secret rm <NAME>")
 		}
-		return secretRemove(env, positional[1])
+		return withClient(ctx, env, func(ctx context.Context, c *Client) error {
+			return secretRemove(ctx, env, c, positional[1])
+		})
 	case "get":
 		// Worth an explicit refusal rather than "unknown subcommand". Someone
 		// typing this has a mental model to correct, not a typo to fix.
-		return fmt.Errorf("there is no `je secret get`; the CLI never prints a secret value.\n" +
-			"If you need it, you know where the file is")
+		return fmt.Errorf("there is no `je secret get`; the CLI never prints a secret value")
 	default:
 		return usagef("unknown subcommand %q; expected set, list or rm", positional[0])
 	}
 }
 
-// secretSet reads a value without echoing it and stores it.
+// secretSet reads a value without echoing it and sends it to the control plane.
 //
-// It does not need the engine, and therefore does not need the data directory
-// lock -- so setting a secret works while the daemon is running, which is the
-// only time you actually want to.
-func secretSet(env *Env, name string) error {
+// The name is validated here as well as server-side, because refusing before
+// prompting is kinder than taking a value and then rejecting it.
+func secretSet(ctx context.Context, env *Env, c *Client, name string) error {
 	if !secrets.ValidName(name) {
 		return fmt.Errorf("%q is not a valid secret name; use A-Z, digits and underscores", name)
-	}
-	if err := env.Layout.EnsureData(); err != nil {
-		return err
 	}
 
 	value, err := readSecretValue(env, name)
@@ -87,26 +90,24 @@ func secretSet(env *Env, name string) error {
 		return fmt.Errorf("refusing to store an empty value for %s", name)
 	}
 
-	store := secrets.Open(env.Layout.Data)
-	if err := store.Set(name, value); err != nil {
+	setCtx, cancel := withTimeout(ctx)
+	defer cancel()
+
+	result, err := c.SetSecret(setCtx, name, value)
+	if err != nil {
 		return err
 	}
+	fmt.Fprintf(env.Stdout, "set %s\n", result.Name)
 
-	fmt.Fprintf(env.Stdout, "set %s\n", name)
-
-	if private, err := store.DirectoryIsPrivate(); err == nil && !private {
-		// Not fatal, and not something to fix behind their back -- the
-		// directory may have been created deliberately. But a data directory
-		// the rest of the machine can read is worth saying out loud once.
+	// Both warnings are facts about the control plane's own filesystem, so it
+	// reports them and this renders them. They are said now, while the value
+	// can still be changed, rather than left to be discovered in a log later.
+	if !result.DirectoryPrivate {
 		fmt.Fprintf(env.Stderr,
-			"warning: %s is readable by other users on this machine\n"+
-				"         the secret file itself is 0600, but run logs are not\n"+
-				"         fix with: chmod 700 %s\n",
-			env.Layout.Data, env.Layout.Data)
+			"warning: the control plane's data directory is readable by other users\n"+
+				"         the secret file itself is 0600, but run logs are not\n")
 	}
-	if len(value) < secrets.MinRedactableLength {
-		// Said now, at the moment it can still be changed, rather than left to
-		// be discovered in a log file later.
+	if !result.Redactable {
 		fmt.Fprintf(env.Stderr,
 			"warning: %s is shorter than %d characters and will NOT be redacted from job logs\n",
 			name, secrets.MinRedactableLength)
@@ -136,9 +137,11 @@ func readSecretValue(env *Env, name string) (string, error) {
 	return line, nil
 }
 
-func secretRemove(env *Env, name string) error {
-	store := secrets.Open(env.Layout.Data)
-	if err := store.Delete(name); err != nil {
+func secretRemove(ctx context.Context, env *Env, c *Client, name string) error {
+	rmCtx, cancel := withTimeout(ctx)
+	defer cancel()
+
+	if err := c.DeleteSecret(rmCtx, name); err != nil {
 		return err
 	}
 	// Deleting a secret can break jobs, and saying so beats letting `je jobs`
@@ -151,53 +154,26 @@ func secretRemove(env *Env, name string) error {
 // secretList shows names, when they were set, and which jobs use them (D10).
 //
 // The third column is the useful one: it answers "what breaks if I rotate
-// this?" and "why is this token here?", neither of which a bare list can.
-func secretList(ctx context.Context, env *Env) error {
-	store := secrets.Open(env.Layout.Data)
-	entries, err := store.List()
+// this?" and "why is this token here?", neither of which a bare list can. The
+// join is done by the control plane, so this only renders.
+func secretList(ctx context.Context, env *Env, c *Client) error {
+	listCtx, cancel := withTimeout(ctx)
+	defer cancel()
+
+	view, err := c.Secrets(listCtx)
 	if err != nil {
 		return err
 	}
 
-	// Which jobs declare which secret. Best-effort: if the engine cannot be
-	// opened because a daemon holds it, still list the secrets rather than
-	// failing outright.
-	users := map[string][]string{}
-	declaredButUnset := map[string][]string{}
-	_ = withReader(ctx, env, func(ctx context.Context, rd Reader) error {
-		jobs, err := rd.Jobs(ctx)
-		if err != nil {
-			return err
-		}
-		known := map[string]bool{}
-		for _, e := range entries {
-			known[e.Name] = true
-		}
-		for _, j := range jobs {
-			def, err := rd.Definition(ctx, j.Slug)
-			if err != nil {
-				continue
-			}
-			for _, name := range def.Secrets {
-				if known[name] {
-					users[name] = append(users[name], j.Slug)
-				} else {
-					declaredButUnset[name] = append(declaredButUnset[name], j.Slug)
-				}
-			}
-		}
-		return nil
-	})
-
-	if len(entries) == 0 {
+	if len(view.Secrets) == 0 {
 		fmt.Fprintln(env.Stdout, "no secrets set")
 	} else {
 		tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
 		fmt.Fprintln(tw, "NAME\tSET\tUSED BY")
-		for _, e := range entries {
+		for _, e := range view.Secrets {
 			used := "-"
-			if names := users[e.Name]; len(names) > 0 {
-				used = strings.Join(names, ", ")
+			if len(e.Jobs) > 0 {
+				used = strings.Join(e.Jobs, ", ")
 			}
 			fmt.Fprintf(tw, "%s\t%s\t%s\n", e.Name, humanAge(e.SetAt), used)
 		}
@@ -208,9 +184,14 @@ func secretList(ctx context.Context, env *Env) error {
 
 	// The inverse view, and the one that actually unblocks you: secrets a job
 	// is waiting for.
-	for name, jobs := range declaredButUnset {
+	for _, u := range view.Unset {
 		fmt.Fprintf(env.Stdout, "\n%s is declared by %s but not set\n  je secret set %s\n",
-			name, strings.Join(jobs, ", "), name)
+			u.Name, strings.Join(u.Jobs, ", "), u.Name)
+	}
+
+	if !view.DirectoryPrivate {
+		fmt.Fprintln(env.Stderr,
+			"\nwarning: the control plane's data directory is readable by other users")
 	}
 	return nil
 }

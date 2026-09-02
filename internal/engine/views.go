@@ -60,10 +60,9 @@ func (e *Engine) StateHistory(ctx context.Context, jobID int64, limit int) ([]st
 
 // RunDetail is everything worth knowing about one run.
 //
-// It exists so the daemon path and the in-process path can print the same
-// summary. Without it `je run` against a daemon would show less than `je run`
-// without one, and two renderings of the same event is how a tool starts
-// feeling untrustworthy.
+// It exists because `je run` needs to print what happened after following a
+// run it did not execute -- and because the same shape serves `je runs <id>`,
+// so the summary after a run and the summary you go back for cannot drift.
 //
 // It is also the shape D12's run-detail view wants, and what `je why` will
 // build on: the cursor before and after, what the run emitted, and every

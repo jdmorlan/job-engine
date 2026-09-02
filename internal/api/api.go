@@ -42,12 +42,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/events", s.handleListEvents)
 	mux.HandleFunc("POST /v1/events", s.handleEmitEvent)
 	s.registerReads(mux)
+	s.registerSecrets(mux)
+	s.registerWorkers(mux)
 	s.registerRuns(mux)
 	return mux
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.engine.Health())
+	writeJSON(w, http.StatusOK, s.engine.Health(r.Context()))
 }
 
 func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {

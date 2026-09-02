@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"strings"
 	"text/tabwriter"
 	"time"
 )
@@ -29,7 +30,7 @@ func runWaiting(ctx context.Context, env *Env, args []string) error {
 		return usagef("unexpected argument %q", extra[0])
 	}
 
-	return withReader(ctx, env, func(ctx context.Context, rd Reader) error {
+	return withClient(ctx, env, func(ctx context.Context, rd *Client) error {
 		w, err := rd.Waiting(ctx)
 		if err != nil {
 			return err
@@ -52,7 +53,7 @@ func runWaiting(ctx context.Context, env *Env, args []string) error {
 		}
 
 		if len(w.Queued) > 0 {
-			fmt.Fprintln(env.Stdout, "QUEUED  (behind the concurrency cap)")
+			fmt.Fprintln(env.Stdout, "QUEUED  (waiting for a worker slot)")
 			tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
 			for _, r := range w.Queued {
 				fmt.Fprintf(tw, "  %s\trun %d\tqueued %s\n",
@@ -72,6 +73,20 @@ func runWaiting(ctx context.Context, env *Env, args []string) error {
 					untilText(s.Next))
 			}
 			tw.Flush()
+			fmt.Fprintln(env.Stdout)
+		}
+
+		if len(w.Unservable) > 0 {
+			// C8: queued work nothing can take. Above BLOCKED because it is
+			// less obviously broken -- everything about it looks like ordinary
+			// queueing, which is exactly why it needs to be said out loud.
+			fmt.Fprintln(env.Stdout,
+				"WAITING FOR A WORKER  (queued for a label nothing is serving)")
+			for _, u := range w.Unservable {
+				fmt.Fprintf(env.Stdout, "  runs_on: %s\n    %d run(s), jobs: %s\n"+
+					"    start one:  je worker --labels %s\n",
+					u.Label, len(u.Runs), strings.Join(u.Jobs, ", "), u.Label)
+			}
 			fmt.Fprintln(env.Stdout)
 		}
 
@@ -98,7 +113,7 @@ func runWaiting(ctx context.Context, env *Env, args []string) error {
 	})
 }
 
-func jobNames(ctx context.Context, rd Reader) (map[int64]string, error) {
+func jobNames(ctx context.Context, rd *Client) (map[int64]string, error) {
 	jobs, err := rd.Jobs(ctx)
 	if err != nil {
 		return nil, err

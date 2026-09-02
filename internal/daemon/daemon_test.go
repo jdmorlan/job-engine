@@ -17,6 +17,8 @@ import (
 
 	"github.com/jdmorlan/job-engine/internal/daemon"
 	"github.com/jdmorlan/job-engine/internal/paths"
+	"github.com/jdmorlan/job-engine/internal/store"
+	"github.com/jdmorlan/job-engine/internal/worker"
 )
 
 // startDaemon runs a daemon on an ephemeral port and returns its base URL.
@@ -83,6 +85,57 @@ func startDaemon(t *testing.T, jobs ...string) string {
 		t.Fatalf("reading runtime file: %v", err)
 	}
 	return "http://" + info.Address
+}
+
+// startDaemonWithWorker is startDaemon plus a real worker, over real HTTP.
+//
+// This is the end-to-end shape D20 describes and the only test that exercises
+// it whole: the control plane queues, the worker claims over the API, runs the
+// process, ships logs back, and reports a completion. Everything the engine
+// tests fake with an in-process helper is genuine here, including the transport
+// and the JSON encoding of a Dispatch.
+func startDaemonWithWorker(t *testing.T, jobs ...string) string {
+	t.Helper()
+
+	base := startDaemon(t, jobs...)
+	addr := strings.TrimPrefix(base, "http://")
+
+	client, err := worker.Dial(addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := worker.New(worker.Options{
+		Name:        "test-worker",
+		Labels:      []string{store.DefaultLabel},
+		Concurrency: 2,
+		Version:     "test",
+		Client:      client,
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if err := w.Run(ctx); err != nil && ctx.Err() == nil {
+			t.Errorf("worker.Run: %v", err)
+		}
+	}()
+
+	// The worker is stopped before the daemon (t.Cleanup is LIFO and this
+	// registers later), so it is never left claiming against a closed store.
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Error("worker did not shut down")
+		}
+	})
+	return base
 }
 
 func TestHealthEndpoint(t *testing.T) {
@@ -331,7 +384,7 @@ func collectStream(t *testing.T, base string, runID int64) ([]string, string) {
 }
 
 func TestRunTriggeredAndStreamedOverHTTP(t *testing.T) {
-	base := startDaemon(t, "talker", `echo one; echo two; echo three`)
+	base := startDaemonWithWorker(t, "talker", `echo one; echo two; echo three`)
 
 	id := triggerRun(t, base, "talker")
 	lines, status := collectStream(t, base, id)
@@ -356,7 +409,7 @@ func TestRunTriggeredAndStreamedOverHTTP(t *testing.T) {
 // stored lines before following live ones is what makes that safe, and getting
 // it backwards would lose exactly the first lines of a fast job.
 func TestStreamAttachedLateStillSeesEverything(t *testing.T) {
-	base := startDaemon(t, "quick", `echo alpha; echo beta`)
+	base := startDaemonWithWorker(t, "quick", `echo alpha; echo beta`)
 
 	id := triggerRun(t, base, "quick")
 
@@ -373,7 +426,7 @@ func TestStreamAttachedLateStillSeesEverything(t *testing.T) {
 }
 
 func TestStreamDoesNotDuplicateReplayedLines(t *testing.T) {
-	base := startDaemon(t, "slowish", `echo first; sleep 1; echo second`)
+	base := startDaemonWithWorker(t, "slowish", `echo first; sleep 1; echo second`)
 
 	id := triggerRun(t, base, "slowish")
 	// Attach mid-run: "first" is already stored, "second" is still to come.
