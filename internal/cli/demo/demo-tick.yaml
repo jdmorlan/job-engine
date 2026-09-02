@@ -1,0 +1,8 @@
+name: Tick
+description: Runs every minute, so you can watch the scheduler work.
+
+command: ["/bin/sh", "-c", "echo \"tick at $(date +%H:%M:%S)\""]
+
+on:
+  - every: 1m
+    catch_up: skip

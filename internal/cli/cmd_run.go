@@ -10,6 +10,7 @@ import (
 
 	"github.com/jdmorlan/job-engine/internal/engine"
 	"github.com/jdmorlan/job-engine/internal/model"
+	"github.com/jdmorlan/job-engine/internal/store"
 )
 
 func init() {
@@ -172,10 +173,17 @@ func printRunDetail(env *Env, d engine.RunDetail) {
 	case d.StateOut != nil && d.StateIn != nil:
 		fmt.Fprintf(env.Stdout, "    cursor  %s  %s -> %s  (v%d)\n",
 			cursor, d.StateIn.Summary(cursor), d.StateOut.Summary(cursor), d.StateOut.Version)
-	case d.StateIn != nil && d.Run.Status == model.StatusSucceeded:
-		// Worth saying out loud. A job that succeeds without moving its cursor
-		// is either stateless or quietly broken, and silence cannot tell you
-		// which.
+	case d.StateIn != nil && d.Run.Status == model.StatusSucceeded &&
+		d.StateIn.SetByActor != store.ActorEngine:
+		// Worth saying out loud for a job that uses a cursor: succeeding
+		// without moving it means either the job is idle or it is quietly
+		// broken, and silence cannot tell you which.
+		//
+		// Suppressed when the only version is the engine's seed. Every job
+		// gets a seed so JE_STATE is never empty, but a job that has never
+		// written a cursor of its own does not have one worth reporting, and
+		// saying so on `je run demo-hello` is noise on the first command
+		// anybody types.
 		fmt.Fprintf(env.Stdout, "    cursor  %s unchanged at %s\n",
 			cursor, d.StateIn.Summary(cursor))
 	}

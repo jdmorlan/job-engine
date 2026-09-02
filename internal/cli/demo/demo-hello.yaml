@@ -1,0 +1,4 @@
+name: Hello
+description: The simplest job there is. Prints a line and exits zero.
+
+command: ["/bin/sh", "-c", "echo 'Hello from je. This job did nothing else.'"]

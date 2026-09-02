@@ -10,11 +10,56 @@ See [`PITCH.md`](PITCH.md) for why, and [`PROPOSAL.md`](PROPOSAL.md) for the
 design decisions. Comments in the code cite those decisions by number (`D14`,
 `P1`) rather than restating them.
 
+## Try it in two minutes
+
+```console
+$ go build ./cmd/je && ./je demo
+wrote 7 files to /Users/you/.je/jobs
+
+  demo-hello    prints a line and exits           the smallest job that exists
+  demo-counter  keeps a cursor and advances it    what other schedulers leave to you
+  demo-flaky    fails about one run in three      watch the cursor NOT move
+  demo-tick     runs every minute                 gives the daemon something to do
+```
+
+They are ordinary files. Read them, change them, break them, `je demo --remove`
+when you are done.
+
+The tour that matters is `demo-flaky`. Run it eight times and look at what
+happened:
+
+```console
+$ je runs demo-flaky
+RUN  JOB         STATUS     STARTED              DURATION
+8    demo-flaky  succeeded  2026-09-02 14:13:20  11ms
+7    demo-flaky  succeeded  2026-09-02 14:13:19  14ms
+6    demo-flaky  failed     2026-09-02 14:13:18  15ms
+5    demo-flaky  succeeded  2026-09-02 14:13:17  11ms
+...
+
+$ je state history demo-flaky
+v6  2026-09-02 14:13:20  run 8          processed -> 5
+v5  2026-09-02 14:13:19  run 7          processed -> 4
+v4  2026-09-02 14:13:17  run 5          processed -> 3
+v3  2026-09-02 14:13:16  run 4          processed -> 2
+v2  2026-09-02 14:13:13  run 2          processed -> 1
+v1  2026-09-02 14:13:12  engine (seed)  processed -> 2026-09-02T19:13:12Z
+```
+
+Eight runs, three failures, and **five cursor versions** — runs 1, 3 and 6 are
+missing from the history. The script advances its cursor *before* it knows
+whether the work succeeded, which is the bug every hand-written watermark has;
+the engine holds it until the exit code says the work actually happened, so a
+failure reprocesses that batch instead of silently skipping it.
+
+That is the entire pitch, and it is four commands.
+
 ## Status
 
 Early, but it runs jobs on a schedule, unattended.
 
 ```
+je demo           write four example jobs and a tour
 je serve          run the daemon: schedules fire, jobs run
 je waiting        what has not happened yet, and what is stuck
 je run <job>      run a job now, in the foreground

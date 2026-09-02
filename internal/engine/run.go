@@ -242,7 +242,7 @@ func (e *Engine) execute(ctx context.Context, p Prepared, opts RunOptions) (*Run
 		return nil, err
 	}
 
-	workdir, err := expandHome(p.Def.Workdir)
+	workdir, err := e.resolveWorkdir(p.Def.Workdir)
 	if err != nil {
 		return nil, err
 	}
@@ -599,6 +599,37 @@ func readEvents(path string) ([]model.Event, error) {
 		return nil, fmt.Errorf("reading events channel: %w", err)
 	}
 	return out, nil
+}
+
+// resolveWorkdir decides where the command runs.
+//
+// An unset workdir means the directory the definitions came from, not the
+// daemon's own working directory. That default is what makes
+// `command: ["python3", "scripts/ingest.py"]` work at all -- the script lives
+// beside the job file, and under launchd the daemon's cwd is somewhere nobody
+// chose.
+//
+// A relative workdir resolves against the same root, which is D22's rule: a
+// source carries definitions and the code they run, so "relative to the source"
+// is the only interpretation that survives the repo being checked out
+// somewhere else.
+//
+// Resolved here rather than baked into the definition on purpose. An absolute
+// machine-specific path inside the snapshot would change the definition hash
+// per machine, breaking D11's provenance and D22's portability at once.
+func (e *Engine) resolveWorkdir(workdir string) (string, error) {
+	expanded, err := expandHome(workdir)
+	if err != nil {
+		return "", err
+	}
+	switch {
+	case expanded == "":
+		return e.opts.Layout.Jobs, nil
+	case filepath.IsAbs(expanded):
+		return expanded, nil
+	default:
+		return filepath.Join(e.opts.Layout.Jobs, expanded), nil
+	}
 }
 
 // expandHome resolves a leading ~ in a configured path.

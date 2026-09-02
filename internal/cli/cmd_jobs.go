@@ -22,6 +22,7 @@ func init() {
 func runJobs(ctx context.Context, env *Env, args []string) error {
 	cmd := commands["jobs"]
 	fs := newFlagSet(cmd, env)
+	all := fs.Bool("all", false, "include jobs whose definition file has been removed")
 	if extra, err := parseArgs(fs, args); err != nil {
 		return err
 	} else if len(extra) > 0 {
@@ -29,10 +30,25 @@ func runJobs(ctx context.Context, env *Env, args []string) error {
 	}
 
 	return withReader(ctx, env, func(ctx context.Context, rd Reader) error {
-		jobs, err := rd.Jobs(ctx)
+		loaded, err := rd.Jobs(ctx)
 		if err != nil {
 			return err
 		}
+
+		// Tombstoned jobs keep their history but are not part of "what is
+		// loaded". Listing them by default would mean a jobs directory you
+		// have tidied up reads as a wall of broken jobs -- the same reason P2
+		// keeps system jobs out of the default view.
+		var jobs []store.Job
+		var hidden int
+		for _, j := range loaded {
+			if j.Removed() && !*all {
+				hidden++
+				continue
+			}
+			jobs = append(jobs, j)
+		}
+
 		if len(jobs) == 0 {
 			fmt.Fprintf(env.Stdout, "no jobs in %s\n", env.Layout.Jobs)
 			return nil
@@ -59,12 +75,18 @@ func runJobs(ctx context.Context, env *Env, args []string) error {
 				fmt.Fprintf(env.Stdout, "\n%s: %s\n", j.Slug, reason)
 			}
 		}
+		if hidden > 0 {
+			fmt.Fprintf(env.Stdout,
+				"\n%d removed job(s) hidden; their history is intact. je jobs --all\n", hidden)
+		}
 		return nil
 	})
 }
 
 func jobStatus(j store.Job) string {
 	switch {
+	case j.Removed():
+		return "removed"
 	case j.LoadError != "":
 		return "load error"
 	case j.ConfigError != "":
@@ -77,6 +99,10 @@ func jobStatus(j store.Job) string {
 }
 
 func brokenReason(j store.Job) string {
+	if j.Removed() {
+		// Not broken. Deliberately deleted, and its history is still here.
+		return ""
+	}
 	if j.LoadError != "" {
 		return j.LoadError
 	}

@@ -19,11 +19,18 @@ type Job struct {
 	LoadedAt       time.Time       `json:"loaded_at"`
 	LoadError      string          `json:"load_error,omitempty"`
 	ConfigError    string          `json:"config_error,omitempty"`
+
+	// RemovedAt is set when the definition file disappeared. The job keeps its
+	// history and stops being schedulable (D19).
+	RemovedAt *time.Time `json:"removed_at,omitempty"`
 }
+
+// Removed reports whether this job's definition file is gone.
+func (j Job) Removed() bool { return j.RemovedAt != nil }
 
 // Runnable reports whether this job may start a run.
 func (j Job) Runnable() bool {
-	return j.Enabled && j.LoadError == "" && j.ConfigError == ""
+	return j.Enabled && !j.Removed() && j.LoadError == "" && j.ConfigError == ""
 }
 
 // UpsertJob records a definition and its snapshot, returning the job row.
@@ -58,7 +65,11 @@ func (s *Store) UpsertJob(ctx context.Context, j Job) (Job, error) {
 			enabled         = excluded.enabled,
 			loaded_at       = excluded.loaded_at,
 			load_error      = excluded.load_error,
-			config_error    = excluded.config_error
+			config_error    = excluded.config_error,
+			-- A file that reappears un-tombstones the job, keeping its id and
+			-- therefore its whole history and cursor. Reverting a revert has
+			-- to be as safe as the revert was.
+			removed_at      = NULL
 		RETURNING id`,
 		j.Slug, j.DefinitionHash, j.FilePath, j.Enabled,
 		formatTime(time.Now()), nullString(j.LoadError), nullString(j.ConfigError),
@@ -71,7 +82,7 @@ func (s *Store) UpsertJob(ctx context.Context, j Job) (Job, error) {
 
 const selectJob = `
 	SELECT j.id, j.name, j.definition_hash, v.definition, j.file_path,
-	       j.enabled, j.loaded_at, j.load_error, j.config_error
+	       j.enabled, j.loaded_at, j.load_error, j.config_error, j.removed_at
 	FROM jobs j
 	JOIN job_versions v ON v.definition_hash = j.definition_hash`
 
@@ -115,8 +126,9 @@ func (s *Store) DeleteJobsExcept(ctx context.Context, keep []string) (int64, err
 	// A NOT IN with a variable list needs generated placeholders; with an empty
 	// keep set the clause collapses to "disable everything", which is correct
 	// when every job file has been removed.
-	query := `UPDATE jobs SET enabled = 0, load_error = 'definition file removed' WHERE enabled = 1`
-	args := make([]any, 0, len(keep))
+	query := `UPDATE jobs SET removed_at = ? WHERE removed_at IS NULL`
+	args := make([]any, 0, len(keep)+1)
+	args = append(args, formatTime(time.Now()))
 	if len(keep) > 0 {
 		query += ` AND name NOT IN (?` + repeatComma(len(keep)-1) + `)`
 		for _, slug := range keep {
@@ -145,19 +157,22 @@ func scanJob(sc scanner) (Job, error) {
 		loadedAt   string
 		loadErr    sql.NullString
 		configErr  sql.NullString
+		removedAt  sql.NullString
 	)
 	if err := sc.Scan(&j.ID, &j.Slug, &j.DefinitionHash, &definition, &j.FilePath,
-		&j.Enabled, &loadedAt, &loadErr, &configErr); err != nil {
+		&j.Enabled, &loadedAt, &loadErr, &configErr, &removedAt); err != nil {
 		return Job{}, err
 	}
 	j.Definition = json.RawMessage(definition)
 	j.LoadError = loadErr.String
 	j.ConfigError = configErr.String
 
-	t, err := parseTime(loadedAt)
-	if err != nil {
+	var err error
+	if j.RemovedAt, err = parseNullTime(removedAt); err != nil {
+		return Job{}, fmt.Errorf("job %s: %w", j.Slug, err)
+	}
+	if j.LoadedAt, err = parseTime(loadedAt); err != nil {
 		return Job{}, fmt.Errorf("job %s has unparseable loaded_at %q: %w", j.Slug, loadedAt, err)
 	}
-	j.LoadedAt = t
 	return j, nil
 }

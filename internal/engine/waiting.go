@@ -49,6 +49,12 @@ func (e *Engine) Waiting(ctx context.Context) (Waiting, error) {
 	}
 
 	for _, job := range jobs {
+		if job.Removed() {
+			// Deliberately gone, not stuck. Reporting a deleted job as
+			// needing attention would make `je waiting` exit 3 forever after
+			// any tidy-up, which trains people to ignore the exit code.
+			continue
+		}
 		if !job.Runnable() {
 			w.Blocked = append(w.Blocked, job)
 			continue
