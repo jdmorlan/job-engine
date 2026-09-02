@@ -56,6 +56,7 @@ type Engine struct {
 	store   *store.Store
 	secrets *secrets.Store
 	lock    *lockfile.Lock
+	broker  *logBroker
 
 	// started records whether Start ran. A one-shot `je run` with no daemon
 	// (D19 stage 0) opens the engine without claiming to be one, and must not
@@ -114,6 +115,7 @@ func New(opts Options) (*Engine, error) {
 		store:   st,
 		secrets: secrets.Open(opts.Layout.Data),
 		lock:    lock,
+		broker:  newLogBroker(),
 	}, nil
 }
 

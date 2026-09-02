@@ -34,18 +34,18 @@ type Run struct {
 // Attempt is one execution of a run. It carries its own causation so the
 // history can distinguish an automatic retry from a human intervening (D7).
 type Attempt struct {
-	ID                int64
-	RunID             int64
-	Number            int
-	TriggeringEventID *int64
-	Actor             string
-	Status            model.Status
-	StartedAt         *time.Time
-	EndedAt           *time.Time
-	ExitCode          *int
-	Executor          string
-	ContainerID       string
-	Error             string
+	ID                int64        `json:"id"`
+	RunID             int64        `json:"run_id"`
+	Number            int          `json:"number"`
+	TriggeringEventID *int64       `json:"triggering_event_id,omitempty"`
+	Actor             string       `json:"actor,omitempty"`
+	Status            model.Status `json:"status"`
+	StartedAt         *time.Time   `json:"started_at,omitempty"`
+	EndedAt           *time.Time   `json:"ended_at,omitempty"`
+	ExitCode          *int         `json:"exit_code,omitempty"`
+	Executor          string       `json:"executor,omitempty"`
+	ContainerID       string       `json:"container_id,omitempty"`
+	Error             string       `json:"error,omitempty"`
 }
 
 // CreateRun inserts a queued run.
@@ -134,6 +134,52 @@ func (s *Store) FinishAttempt(ctx context.Context, id int64, status model.Status
 		UPDATE attempts SET status = ?, ended_at = ?, exit_code = ?, error = ? WHERE id = ?`,
 		string(status), formatTime(at), exitCode, nullString(attemptErr), id)
 	return err
+}
+
+// AttemptsForRun lists a run's attempts in order.
+//
+// D7 makes this worth showing: the attempt list is where "did a human have to
+// intervene?" is answerable, because attempt 3 says it was a manual retry
+// while 1 and 2 say they were automatic.
+func (s *Store) AttemptsForRun(ctx context.Context, runID int64) ([]Attempt, error) {
+	rows, err := s.state.QueryContext(ctx, `
+		SELECT id, run_id, attempt_number, triggering_event_id, actor, status,
+		       started_at, ended_at, exit_code, executor, container_id, error
+		FROM attempts WHERE run_id = ? ORDER BY attempt_number`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []Attempt
+	for rows.Next() {
+		var (
+			a           Attempt
+			actor       sql.NullString
+			status      string
+			startedAt   sql.NullString
+			endedAt     sql.NullString
+			executor    sql.NullString
+			containerID sql.NullString
+			attemptErr  sql.NullString
+		)
+		if err := rows.Scan(&a.ID, &a.RunID, &a.Number, &a.TriggeringEventID, &actor,
+			&status, &startedAt, &endedAt, &a.ExitCode, &executor, &containerID, &attemptErr); err != nil {
+			return nil, err
+		}
+		a.Actor, a.Status = actor.String, model.Status(status)
+		a.Executor, a.ContainerID, a.Error = executor.String, containerID.String, attemptErr.String
+
+		var err error
+		if a.StartedAt, err = parseNullTime(startedAt); err != nil {
+			return nil, err
+		}
+		if a.EndedAt, err = parseNullTime(endedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
 }
 
 // RunByID loads one run.

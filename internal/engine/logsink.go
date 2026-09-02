@@ -109,6 +109,7 @@ func (s *logSink) WriteLine(stream executor.Stream, ts time.Time, line string) {
 
 	s.mu.Lock()
 	s.seq++
+	seq := s.seq
 	s.buf = append(s.buf, store.LogLine{
 		RunID:   s.runID,
 		Attempt: s.attempt,
@@ -119,6 +120,19 @@ func (s *logSink) WriteLine(stream executor.Stream, ts time.Time, line string) {
 	})
 	full := len(s.buf) >= logFlushSize
 	s.mu.Unlock()
+
+	// Published after the buffer append, so a subscriber can never see a line
+	// the engine has not yet accepted. Storage remains the record; this is the
+	// courtesy channel that makes `je run` against the daemon feel like running
+	// the command yourself.
+	s.engine.broker.Publish(s.runID, StreamEvent{
+		Kind:    StreamLog,
+		Seq:     seq,
+		Attempt: s.attempt,
+		Stream:  string(stream),
+		TS:      ts,
+		Line:    line,
+	})
 
 	if full {
 		s.flush()

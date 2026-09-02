@@ -28,8 +28,22 @@ je status         is the daemon up, and how long was it down
 je emit <type>    put an event into the engine (D16's single ingress)
 ```
 
-Every read command works the same whether or not a daemon is running: it talks
-to the daemon when one is listening and opens the database itself when not.
+Every command works the same whether or not a daemon is running: it talks to
+the daemon when one is listening and opens the database itself when not. `je
+run` against a live daemon queues the run there and streams its output back, so
+you never have to stop the scheduler to run something by hand.
+
+```console
+$ je run weather-ingest       # daemon running; output streams live
+ingested 41 readings
+
+ok  run 12 succeeded in 1.2s
+    cursor  since  2026-08-13T04:00 -> 2026-09-02T11:15  (v41)
+    emitted weather.ingested (event 88)
+```
+
+Ctrl-C detaches rather than cancelling: the run belongs to the daemon, and it
+tells you how to follow it again.
 
 ### Schedules
 
@@ -151,10 +165,9 @@ the log file later cannot leak them. There is no `je secret get`.
 ### Not built yet
 
 Retries, chains, job sources (D22), container executor, the TypeScript shim
-(D21), `je install` for launchd, and triggering a run through the daemon API
-(`je run` still executes in-process, so it needs the daemon stopped). A job
-declaring `language:` loads but is marked misconfigured and will not run,
-rather than running without what it asked for.
+(D21), `je install` for launchd, and retention. A job declaring `language:`
+loads but is marked misconfigured and will not run, rather than running without
+what it asked for.
 
 ## Layout
 

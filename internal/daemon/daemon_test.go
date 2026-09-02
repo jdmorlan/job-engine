@@ -1,12 +1,17 @@
 package daemon_test
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,11 +21,25 @@ import (
 
 // startDaemon runs a daemon on an ephemeral port and returns its base URL.
 // It blocks until the daemon is listening, so tests never poll.
-func startDaemon(t *testing.T) string {
+func startDaemon(t *testing.T, jobs ...string) string {
 	t.Helper()
 
 	dir := t.TempDir()
 	layout := paths.Layout{Data: dir, Jobs: dir + "/jobs"}
+
+	// Optional job fixtures, given as alternating name and shell script.
+	if len(jobs) > 0 {
+		if err := os.MkdirAll(layout.Jobs, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i+1 < len(jobs); i += 2 {
+			body := fmt.Sprintf("command: [\"/bin/sh\", \"-c\", %q]\n", jobs[i+1])
+			if err := os.WriteFile(
+				filepath.Join(layout.Jobs, jobs[i]+".yaml"), []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	ready := make(chan struct{})
@@ -227,5 +246,183 @@ func TestMissingResourcesAre404(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("GET /v1/runs/abc = %s, want 400", resp.Status)
+	}
+}
+
+// triggerRun posts a run and returns its id.
+func triggerRun(t *testing.T, base, job string) int64 {
+	t.Helper()
+	resp, err := http.Post(base+"/v1/runs", "application/json",
+		strings.NewReader(`{"job":"`+job+`"}`))
+	if err != nil {
+		t.Fatalf("POST /v1/runs: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("POST /v1/runs: %s: %s", resp.Status, body)
+	}
+	var run struct {
+		ID     int64  `json:"id"`
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&run); err != nil {
+		t.Fatal(err)
+	}
+	// Accepted, not completed: the request queues work and returns, so a job
+	// may run for its full hour without tying up a connection.
+	if run.Status != "queued" {
+		t.Errorf("status = %q, want queued", run.Status)
+	}
+	return run.ID
+}
+
+// collectStream follows a run to completion, returning its log lines and final
+// status.
+func collectStream(t *testing.T, base string, runID int64) ([]string, string) {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		fmt.Sprintf("%s/v1/runs/%d/stream", base, runID), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET stream: %v", err)
+	}
+	defer resp.Body.Close()
+	if got := resp.Header.Get("Content-Type"); got != "text/event-stream" {
+		t.Errorf("Content-Type = %q, want text/event-stream", got)
+	}
+
+	var (
+		lines  []string
+		status string
+	)
+	sc := bufio.NewScanner(resp.Body)
+	for sc.Scan() {
+		line := sc.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		var ev struct {
+			Kind   string `json:"kind"`
+			Line   string `json:"line"`
+			Status string `json:"status"`
+		}
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &ev); err != nil {
+			t.Fatalf("parsing stream event: %v", err)
+		}
+		switch ev.Kind {
+		case "log":
+			lines = append(lines, ev.Line)
+		case "done":
+			return lines, ev.Status
+		}
+	}
+	if status == "" {
+		t.Fatal("stream ended without a done event")
+	}
+	return lines, status
+}
+
+func TestRunTriggeredAndStreamedOverHTTP(t *testing.T) {
+	base := startDaemon(t, "talker", `echo one; echo two; echo three`)
+
+	id := triggerRun(t, base, "talker")
+	lines, status := collectStream(t, base, id)
+
+	if status != "succeeded" {
+		t.Errorf("status = %q", status)
+	}
+	want := []string{"one", "two", "three"}
+	if len(lines) != len(want) {
+		t.Fatalf("got %d lines, want %d: %q", len(lines), len(want), lines)
+	}
+	for i := range want {
+		if lines[i] != want[i] {
+			t.Errorf("line %d = %q, want %q", i, lines[i], want[i])
+		}
+	}
+}
+
+// TestStreamAttachedLateStillSeesEverything is the race the endpoint exists to
+// avoid. The POST returns before the client can open the stream, so a fast job
+// may already have produced -- or finished producing -- its output. Replaying
+// stored lines before following live ones is what makes that safe, and getting
+// it backwards would lose exactly the first lines of a fast job.
+func TestStreamAttachedLateStillSeesEverything(t *testing.T) {
+	base := startDaemon(t, "quick", `echo alpha; echo beta`)
+
+	id := triggerRun(t, base, "quick")
+
+	// Deliberately late: by now the run has almost certainly finished.
+	time.Sleep(1500 * time.Millisecond)
+
+	lines, status := collectStream(t, base, id)
+	if status != "succeeded" {
+		t.Errorf("status = %q", status)
+	}
+	if len(lines) != 2 || lines[0] != "alpha" || lines[1] != "beta" {
+		t.Errorf("a late subscriber saw %q, want both lines replayed from storage", lines)
+	}
+}
+
+func TestStreamDoesNotDuplicateReplayedLines(t *testing.T) {
+	base := startDaemon(t, "slowish", `echo first; sleep 1; echo second`)
+
+	id := triggerRun(t, base, "slowish")
+	// Attach mid-run: "first" is already stored, "second" is still to come.
+	time.Sleep(600 * time.Millisecond)
+
+	lines, _ := collectStream(t, base, id)
+	seen := map[string]int{}
+	for _, l := range lines {
+		seen[l]++
+	}
+	for line, n := range seen {
+		if n > 1 {
+			t.Errorf("line %q was delivered %d times; replay and live overlapped", line, n)
+		}
+	}
+	if seen["first"] != 1 || seen["second"] != 1 {
+		t.Errorf("lines = %q, want first and second exactly once each", lines)
+	}
+}
+
+func TestOverlapSkipIsAConflict(t *testing.T) {
+	base := startDaemon(t, "hog", `sleep 5`)
+
+	triggerRun(t, base, "hog")
+	time.Sleep(500 * time.Millisecond)
+
+	resp, err := http.Post(base+"/v1/runs", "application/json",
+		strings.NewReader(`{"job":"hog"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	// 409 rather than 400: the request was well formed and the engine declined
+	// for a reason the caller can understand and act on.
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("second trigger = %s, want 409", resp.Status)
+	}
+}
+
+func TestTriggerUnknownJobIs404(t *testing.T) {
+	base := startDaemon(t)
+
+	resp, err := http.Post(base+"/v1/runs", "application/json",
+		strings.NewReader(`{"job":"nope"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %s, want 404", resp.Status)
 	}
 }

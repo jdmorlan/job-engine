@@ -241,3 +241,11 @@ func newFlagSet(cmd *Command, env *Env) *flag.FlagSet {
 	}
 	return fs
 }
+
+// truncate shortens a string for a table cell, marking that it was cut.
+func truncate(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max-1] + "…"
+}

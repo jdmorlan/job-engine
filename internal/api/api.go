@@ -42,6 +42,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/events", s.handleListEvents)
 	mux.HandleFunc("POST /v1/events", s.handleEmitEvent)
 	s.registerReads(mux)
+	s.registerRuns(mux)
 	return mux
 }
 

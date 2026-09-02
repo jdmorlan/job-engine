@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -89,9 +90,31 @@ func (e *Engine) RunJob(ctx context.Context, slug string, opts RunOptions) (*Run
 		return nil, err
 	}
 	if prepared == nil {
-		return nil, fmt.Errorf("job %s is already running (overlap: skip)", slug)
+		return nil, fmt.Errorf("job %s: %w", slug, ErrOverlapSkipped)
 	}
 	return e.execute(ctx, *prepared, opts)
+}
+
+// ErrOverlapSkipped means the job's overlap policy declined to start a run.
+// It is a normal outcome recorded as an event, not a failure, but a caller
+// that asked for a run needs to know it did not get one.
+var ErrOverlapSkipped = errors.New("the previous run has not finished (overlap: skip)")
+
+// TriggerRun queues a run for the worker pool and returns immediately.
+//
+// This is the daemon's path: `je run` against a running engine posts here, gets
+// a run id, and follows the live stream. It exists separately from RunJob
+// because the caller is not the executor -- the worker pool is -- so blocking
+// until completion would tie a job's lifetime to an HTTP request.
+func (e *Engine) TriggerRun(ctx context.Context, slug string, opts RunOptions) (store.Run, error) {
+	prepared, err := e.Enqueue(ctx, slug, opts)
+	if err != nil {
+		return store.Run{}, err
+	}
+	if prepared == nil {
+		return store.Run{}, ErrOverlapSkipped
+	}
+	return prepared.Run, nil
 }
 
 // Prepared is a run that exists in the database and is waiting to execute.
@@ -184,6 +207,9 @@ func (e *Engine) execute(ctx context.Context, p Prepared, opts RunOptions) (*Run
 	// every duration renders as zero.
 	p.Run.StartedAt = &startedAt
 	p.Run.Status = model.StatusRunning
+	e.broker.Publish(p.Run.ID, StreamEvent{
+		Kind: StreamStatus, Status: model.StatusRunning, TS: startedAt,
+	})
 
 	attempt, err := e.store.CreateAttempt(ctx, store.Attempt{
 		RunID:             p.Run.ID,
@@ -443,6 +469,10 @@ func (e *Engine) finish(ctx context.Context, result *RunResult, status model.Sta
 	}); err != nil {
 		return fmt.Errorf("recording %s: %w", eventType, err)
 	}
+
+	// Published last, after everything is durable, so a client that stops
+	// reading on `done` cannot miss a line that was still in flight.
+	e.broker.Publish(result.Run.ID, StreamEvent{Kind: StreamDone, Status: status, TS: at})
 
 	result.Run.Status = status
 	result.Run.EndedAt = &at

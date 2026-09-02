@@ -73,6 +73,26 @@ func (s *Store) LastEventOfType(ctx context.Context, eventType string) (model.Ev
 		WHERE type = ? ORDER BY id DESC LIMIT 1`, eventType))
 }
 
+// EventsCausedByRun returns everything a run emitted, oldest first.
+func (s *Store) EventsCausedByRun(ctx context.Context, runID int64) ([]model.Event, error) {
+	rows, err := s.state.QueryContext(ctx,
+		selectEvent+` WHERE caused_by_run_id = ? ORDER BY id`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []model.Event
+	for rows.Next() {
+		e, err := s.scanEvent(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
 // EventByID returns one event.
 func (s *Store) EventByID(ctx context.Context, id int64) (model.Event, error) {
 	return s.scanEvent(s.state.QueryRowContext(ctx, selectEvent+` WHERE id = ?`, id))
