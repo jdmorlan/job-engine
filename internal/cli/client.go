@@ -267,3 +267,8 @@ func (c *Client) Workers(ctx context.Context) ([]engine.WorkerView, error) {
 	}](ctx, c, http.MethodGet, "/v1/workers", nil)
 	return out.Workers, err
 }
+
+// Sync reloads definitions on the control plane (D2, D19).
+func (c *Client) Sync(ctx context.Context) (engine.LoadResult, error) {
+	return do[engine.LoadResult](ctx, c, http.MethodPost, "/v1/sync", nil)
+}

@@ -2,6 +2,8 @@ package engine_test
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -384,5 +386,130 @@ func TestDispatchOmitsTheChannelPathsTheWorkerOwns(t *testing.T) {
 		if !strings.Contains(env, name) {
 			t.Errorf("%s is missing from the dispatch", name)
 		}
+	}
+}
+
+// TestSyncPicksUpANewJobWithoutARestart is the gap the split made painful.
+//
+// Restarting to pick up a YAML edit was tolerable when the engine ran in your
+// terminal. Once it is a container somewhere else, a restart costs every
+// in-flight run for a change that touches none of them.
+func TestSyncPicksUpANewJobWithoutARestart(t *testing.T) {
+	ctx := context.Background()
+	e, layout := jobFixture(t, "first", `echo one`)
+
+	jobs, err := e.Jobs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("started with %d jobs, want 1", len(jobs))
+	}
+
+	writeJob(t, layout.Jobs, "second", `echo two`)
+
+	result, err := e.Sync(ctx)
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if result.Loaded != 2 {
+		t.Errorf("loaded = %d, want 2", result.Loaded)
+	}
+
+	if jobs, err = e.Jobs(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 2 {
+		t.Errorf("after sync there are %d jobs, want 2", len(jobs))
+	}
+
+	// P1: the reload is in the timeline, so "why did this job appear at 3am?"
+	// has an answer without a log file somebody has to still have.
+	events, err := e.RecentEvents(ctx, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var synced bool
+	for _, ev := range events {
+		if ev.Type == engine.EventDefinitionsSynced {
+			synced = true
+		}
+	}
+	if !synced {
+		t.Error("a sync left no event")
+	}
+}
+
+// TestSyncIsAtomic is D19's rule: one unparseable file rejects the whole sync
+// and the last good state keeps serving.
+//
+// The alternative -- applying the files that happened to parse -- leaves the
+// engine running a configuration that exists in no commit and that no file
+// describes, which is the state you cannot reason about at 2am.
+func TestSyncIsAtomic(t *testing.T) {
+	ctx := context.Background()
+	e, layout := jobFixture(t, "good", `echo fine`)
+
+	// A new valid job and a broken one land together.
+	writeJob(t, layout.Jobs, "alsogood", `echo also fine`)
+	if err := os.WriteFile(
+		filepath.Join(layout.Jobs, "broken.yaml"),
+		[]byte("command: [\"/bin/sh\"]\nthis_is: not a field\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := e.Sync(ctx); err == nil {
+		t.Fatal("a sync containing an unparseable file succeeded")
+	}
+
+	jobs, err := e.Jobs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 1 || jobs[0].Slug != "good" {
+		t.Errorf("jobs = %+v, want only the previously loaded one", jobs)
+	}
+}
+
+// TestSyncTombstonesRatherThanDeletes is D19: deleting a file stops future runs
+// and never erases history, because reverting a commit must not lose the
+// timeline.
+func TestSyncTombstonesRatherThanDeletes(t *testing.T) {
+	ctx := context.Background()
+	e, layout := jobFixture(t, "doomed", `echo hi`)
+
+	if _, err := runJob(t, e, "doomed", engine.RunOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	job, err := e.Job(ctx, "doomed")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.Remove(filepath.Join(layout.Jobs, "doomed.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	result, err := e.Sync(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Removed != 1 {
+		t.Errorf("removed = %d, want 1", result.Removed)
+	}
+
+	runs, err := e.Runs(ctx, job.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 {
+		t.Errorf("a deleted job lost its history: %d runs remain", len(runs))
+	}
+}
+
+func writeJob(t *testing.T, dir, name, script string) {
+	t.Helper()
+	body := "command: [\"/bin/sh\", \"-c\", \"" + script + "\"]\n"
+	if err := os.WriteFile(filepath.Join(dir, name+".yaml"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }

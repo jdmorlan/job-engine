@@ -108,6 +108,20 @@ func (e *Engine) RunScheduler(ctx context.Context) error {
 			if _, err := e.ExpireLeases(ctx); err != nil {
 				e.log.Error("expiring leases", "error", err)
 			}
+		case reply := <-e.scheduleReloads:
+			// A sync landed new definitions. Rebuilding here rather than in
+			// Sync keeps the entries map owned by the one goroutine that reads
+			// it, so the schedule table needs no lock of its own.
+			err := s.reload(ctx)
+			if err != nil {
+				// The definitions are already committed, so this is a
+				// scheduler problem rather than a sync failure. Keep serving
+				// the old table; the next reload gets another chance.
+				e.log.Error("rebuilding the schedule table", "error", err)
+			} else {
+				e.log.Info("schedule table rebuilt", "schedules", len(s.entries))
+			}
+			reply <- err
 		}
 	}
 }

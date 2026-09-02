@@ -218,6 +218,7 @@ je quickstart     a control plane and a worker, in this terminal
 je serve          run the control plane: schedules fire, API serves
 je worker         run a worker: this is what actually executes jobs
 je workers        what is attached, and what it can run
+je sync           reload job definitions, atomically
 je waiting        what has not happened yet, and what is stuck
 je run <job>      run a job now and follow its output
 je jobs           what is loaded, and what is broken
@@ -371,12 +372,11 @@ the log file later cannot leak them. There is no `je secret get`.
 Retries, chains, job sources (D22), container executor, the TypeScript shim
 (D21), and retention.
 
-**The control plane reads job definitions only at startup.** Adding or editing a
-job file needs a restart before it takes effect. Watching the jobs directory —
-or a sync endpoint, which is what the split makes the more obvious answer — is a
-v1 item and the largest remaining gap. A job declaring `language:` loads but is
-marked misconfigured and will not run, rather than running without what it asked
-for.
+**Definitions are reloaded on request, not watched.** `je sync` re-reads the
+source and rebuilds the schedule table, so an edit takes effect without dropping
+in-flight runs. Watching the directory automatically is still open. A job
+declaring `language:` loads but is marked misconfigured and will not run, rather
+than running without what it asked for.
 
 **Secrets reach a worker in the dispatch.** That is correct for a trusted
 network and wrong for anything else, and it is the real work item behind putting

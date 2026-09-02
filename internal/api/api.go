@@ -41,6 +41,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/health", s.handleHealth)
 	mux.HandleFunc("GET /v1/events", s.handleListEvents)
 	mux.HandleFunc("POST /v1/events", s.handleEmitEvent)
+	mux.HandleFunc("POST /v1/sync", s.handleSync)
 	s.registerReads(mux)
 	s.registerSecrets(mux)
 	s.registerWorkers(mux)
@@ -141,4 +142,26 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	// cannot be reported to the client. Encoding into a buffer first would let
 	// us 500 instead -- worth doing once a response is big enough to fail.
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// handleSync reloads definitions from the source (D2, D19, D22).
+//
+// A POST because it changes what the engine will do, even though the argument
+// is "read the files again". The alternative -- restarting the control plane to
+// pick up a one-line YAML edit -- costs every in-flight run, which was a fair
+// trade when the engine ran in your terminal and stopped being one when it
+// became a container somewhere else.
+//
+// Atomic, per D19: a source that will not parse leaves the last good state
+// serving and returns the error naming the file.
+func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
+	result, err := s.engine.Sync(r.Context())
+	if err != nil {
+		// 422 rather than 500: the request was well-formed and the engine is
+		// fine. What is wrong is the content of a file, and that distinction is
+		// the difference between "fix your YAML" and "the engine is broken".
+		s.writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }

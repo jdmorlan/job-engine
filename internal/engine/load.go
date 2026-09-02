@@ -12,11 +12,21 @@ import (
 
 // LoadResult summarises one definition load.
 type LoadResult struct {
-	Loaded    int
-	Removed   int64
-	Revision  string
-	Source    string
-	Misconfig []string // slugs that parsed but cannot run (D10)
+	Loaded    int      `json:"loaded"`
+	Removed   int64    `json:"removed"`
+	Revision  string   `json:"revision,omitempty"`
+	Source    string   `json:"source"`
+	Misconfig []string `json:"misconfigured,omitempty"` // parsed but cannot run (D10)
+
+	// SchedulesApplied reports whether a running scheduler rebuilt its table
+	// from these definitions.
+	//
+	// When it is false the definitions are in force but the clock has not
+	// caught up, so a newly added schedule is loaded and not yet firing. That
+	// is a normal, brief state and it is reported rather than hidden, because
+	// "loaded but not scheduled" looks exactly like "loaded" from every other
+	// view (P1).
+	SchedulesApplied bool `json:"schedules_applied"`
 }
 
 // Load reads every definition from the source and projects it into the store.

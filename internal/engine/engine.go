@@ -66,6 +66,12 @@ type Engine struct {
 	inflightMu sync.Mutex
 	inflight   map[int64]*inflight
 
+	// scheduleReloads carries a request from Sync to a running scheduler, and
+	// a channel to answer on. Unbuffered on purpose: a send that finds nobody
+	// listening means no scheduler is running, which Sync needs to be able to
+	// tell from one that is merely slow.
+	scheduleReloads chan chan error
+
 	// started records whether Start ran. A tool that opens the engine to read
 	// (a migration check, a test) must not litter the timeline with an
 	// engine.started/stopped pair.
@@ -124,6 +130,8 @@ func New(opts Options) (*Engine, error) {
 		secrets: secrets.Open(opts.Layout.Data),
 		lock:    lock,
 		broker:  newLogBroker(),
+
+		scheduleReloads: make(chan chan error),
 	}, nil
 }
 
