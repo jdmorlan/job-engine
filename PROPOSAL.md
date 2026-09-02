@@ -1,10 +1,56 @@
-# Job Engine — Design Proposal v0.4
+# Job Engine — Design Proposal v0.5
 
-**Date:** 2026-08-13
-**Status:** 20 items locked. **Nothing blocks starting.** 5 items still want your
+**Date:** 2026-09-02
+**Status:** 21 items locked, and **the skeleton is built** — daemon, store, API,
+CLI, and the engine's own lifecycle events, under test. 5 items still want your
 input, none of them on the critical path for job #1.
 
 ---
+
+## Changelog since v0.4
+
+**This round is entirely about the job author's experience**, and it started with
+you reacting badly to the first real job I wrote against D6:
+
+> *"That whole writeFileSync/appendFileSync stuff just seems labourious... as a
+> developer I think I'm writing history to a file, but I'm like where is that
+> file — when in reality it's just the medium. The actual history and metadata is
+> in the job-engine system itself."*
+
+That's a precise complaint and it produced three changes and one withdrawal:
+
+- **D21 (new) — shim injection.** Your idea, and it corrects an over-reach in D6.
+  We banned SDKs because publishing them to five package managers is a
+  maintenance disaster. But that cost is about *distribution*, not abstraction —
+  a shim embedded in the binary and materialised at run time pays none of it, and
+  is strictly better than a published SDK on version skew.
+- **D14 — the engine seeds the cursor.** Your point that a first run shouldn't
+  hand the author an empty object. Adopted, with one sharp constraint: it is a
+  *seed*, never a maintained value, or we rebuild the exact dragon D14 exists to
+  kill. Also added `lastSuccessAt`, which we can serve for free and which makes
+  the two facts that must not be confused impossible to confuse.
+- **D6 — state arrives in the environment, not a file.** The only surviving piece
+  of a larger change I proposed and withdrew (below).
+
+**A proposal I made and withdrew, recorded because the reasoning matters.** I
+proposed collapsing the four job-protocol channels into one tagged JSONL file, to
+make jobs less laborious to write. You asked the right question:
+
+> *"Is the only reason we initially reduced them to benefit dev experience? Do we
+> gain something from going back to 4 channels? It seems like if we do, it's
+> better to keep that as is, and utilize the shims sugar to help developers."*
+
+Ergonomics was the *only* reason, and with D21 available it was the wrong layer to
+pay at. Withdrawn; the four channels stand unchanged. The general rule that fell
+out of it is stated in D21 and is the most useful thing in this round:
+
+> **The protocol is shaped by mechanism. The shim is shaped by ergonomics.**
+
+Before a sugar layer existed, the protocol was the only lever I had for developer
+experience — so I reached for it, and started encoding a convenience concern into
+a contract that every language, every container, and D20's node relay would have
+to honour forever. Worth watching for: it is the same mistake in a different
+costume every time.
 
 ## Changelog since v0.3
 
@@ -83,7 +129,7 @@ architecture), **D16** (daemon lifecycle and generic event ingress).
 | D17 | Chains and topology | AGREED (revised) — one open sub-question |
 | D4 | SQLite | AGREED |
 | D5 | Crash recovery | AGREED |
-| D6 | Job protocol | AGREED |
+| D6 | Job protocol | AGREED (revised v0.5) |
 | D7 | Retries and re-runs | AGREED |
 | D8 | Timeouts / concurrency | AGREED |
 | D9 | Schedules | AGREED |
@@ -91,23 +137,29 @@ architecture), **D16** (daemon lifecycle and generic event ingress).
 | D11 | Definition versioning | AGREED |
 | D12 | Observability surface | AGREED |
 | D13 | Retention | AGREED |
-| D14 | Job state / cursors | AGREED as proposed — **3 small questions open** |
+| D14 | Job state / cursors | AGREED (revised v0.5) — **2 questions open** |
 | D15 | Daemon + API + CLI (`je`) | AGREED |
 | D16 | Daemon lifecycle + event ingress | AGREED |
 | D18 | Embedding / Almanac | **NEW — react** |
 | D19 | Kubernetes deployment / local-to-cluster | **NEW — react** |
 | D20 | Control plane + nodes / placement | **NEW — react** |
+| D21 | Shim injection | **NEW (v0.5) — one open question** |
 | N1 | Non-goals | AGREED |
 | N2 | v1 done | AGREED |
 | Q1 | Storage adapters | AGREED — SQLite only, no adapter |
 | Q2 | First three jobs | PARTIAL — see D18 |
 | Q3 | Working style | AGREED — option (a) |
 
-**Nothing here blocks starting.** D14's three open questions have defaults I'm
-comfortable building against, and D3 is v1.1 anyway. The five items wanting input
-— P3, D17's sub-question, D18, D19, D20 — can be answered while code is being
-written. **One caveat on D20:** its constraint list should be agreed before any
-node code exists, since the constraints are the design rather than a detail of it.
+**Nothing here blocks continuing.** D14's remaining questions have defaults I'm
+comfortable building against, and D3 is v1.1 anyway. The items wanting input —
+P3, D17's sub-question, D18, D19, D20, D21 — can be answered while code is being
+written, with two exceptions worth naming:
+
+- **D20's constraint list should be agreed before any node code exists**, since
+  the constraints are the design rather than a detail of it.
+- **D6's state-size cap is on the critical path for job #1.** Passing state in the
+  environment caps it at 64KB; keeping it in a file allows 1MB. It is one line
+  either way today and a protocol change once the weather job depends on it.
 
 Same protocol: type in the `Your response` blocks, save, hand it back. Items marked
 AGREED with no block are locked; type under one to reopen it.
@@ -763,7 +815,8 @@ documented contract with the author.
 
 ### D6. The job protocol
 
-**Status:** AGREED (revised in v0.3 — `JOB_EVENTS_FILE` added)
+**Status:** AGREED (revised in v0.5 — state arrives in the environment; the
+"no SDK" rule is narrowed by D21)
 
 Exit code is the verdict. stdout/stderr captured line-by-line, timestamped,
 streamed, stored, no format required. `JOB_OUTPUT_FILE` for structured output that
@@ -779,6 +832,14 @@ naming as a small design principle in its own right: **the filesystem is our SDK
 Any language that can write a file can participate fully — no client library, no
 protocol, nothing to version.
 
+**Narrowed in v0.5 by D21.** That last clause was too strong. What we cannot
+afford is *published* client libraries — five package managers, five release
+processes, and a compatibility matrix between engine versions and client
+versions. A shim embedded in the binary pays none of that. The rule as it should
+have been written: **the filesystem is the contract, and any language that can
+write a file participates fully.** Sugar on top of that contract is fine, and D21
+specifies it.
+
 **Added in v0.3 (from D17): `JOB_EVENTS_FILE`.** A job may emit events by appending
 JSONL to this path — one event per line, `{"type": "...", "payload": {...}}` —
 committed on success like state. This closes a hole: `je emit` (D16) can't be used
@@ -787,9 +848,226 @@ access back to the daemon. Without this, container jobs couldn't participate in
 chaining or routing at all. Emitted events inherit the run's causation, so the
 chain stays intact automatically.
 
+**Revised in v0.5: state arrives in the environment, not a file.** `JOB_STATE_FILE`
+becomes `JE_STATE`, holding the JSON directly. The three *output* channels are
+unchanged.
+
+The justification has to be mechanical rather than ergonomic, or it is the same
+mistake the withdrawn channel-merge made. It is:
+
+> Outputs are files **because of commit-on-success**. The engine must be able to
+> read them *after* the process has exited, and to discard them if it failed.
+> Inputs carry no such requirement, so the reason does not apply to them.
+
+It also deletes a file the engine must create, populate, and clean up on every
+attempt, and it removes the most confusing member of the set — the one that looks
+like storage but is a handoff.
+
+**The cost is a size cap, and it is your call.** A single environment variable is
+safe to about 64KB (Linux caps one at 128KB via `MAX_ARG_STRLEN`; macOS caps the
+whole environment plus arguments at 1MB). A file allows the 1MB this item
+originally specified. 64KB is roughly a thousand hashes, so it comfortably covers
+a timestamp, a record id, a page token or an ETag, and starts to strain on "a set
+of seen hashes" — which D14 does list as a legitimate cursor. My lean is 64KB and
+an engine opinion that a cursor larger than that wants a real table in your own
+store, but this is a door that is cheap to close now and awkward to reopen.
+
+**Four channels, and they stay four.** Recorded because I proposed merging them
+and withdrew it: separate channels are not ceremony, they carry information.
+
+| Channel | Direction | Shape | Semantics |
+|---|---|---|---|
+| `JE_STATE` | in | JSON object in the env | the cursor as of run start (D14) |
+| `JOB_STATE_OUT_FILE` | out | one JSON object | last write wins; commits on exit 0 |
+| `JOB_OUTPUT_FILE` | out | one JSON object | structured output, flows to chained jobs |
+| `JOB_EVENTS_FILE` | out | JSONL, append-only | ordered stream, all preserved |
+
+What the separation buys, all of it lost by merging:
+
+- **The file's shape encodes its semantics.** A single JSON object is visibly
+  last-write-wins; an append-only JSONL file is visibly a stream. Merged, that
+  becomes a *rule you have to know* rather than something the structure tells you.
+- **Failure isolation and better errors.** A malformed line in a merged channel
+  forces an incoherent choice: commit the state that parsed and drop the events,
+  or fail a correct cursor advance because of a typo in an event. Separate files
+  let the error name the channel, and keep the atomicity boundary defensible.
+- **Three destinations, three tables.** State commits to `job_state`, output flows
+  to chained jobs, events enter routing. Merging adds a demux step that exists
+  only because we merged.
+- **Volume asymmetry.** Events can be thousands of lines and a cursor is one small
+  object. Reading megabytes to find a timestamp is silly.
+
 Full v1 environment: `JOB_ID`, `RUN_ID`, `ATTEMPT`, `TRIGGERED_BY`,
-`EVENT_PAYLOAD`, `JOB_OUTPUT_FILE`, `JOB_WORKDIR`, `JOB_STATE_FILE`,
-`JOB_STATE_OUT_FILE` (D14), and `JOB_EVENTS_FILE` (D17).
+`EVENT_PAYLOAD`, `JOB_WORKDIR`, `JE_STATE` (D14), `JE_LAST_SUCCESS_AT` (D14),
+`JOB_STATE_OUT_FILE` (D14), `JOB_OUTPUT_FILE`, and `JOB_EVENTS_FILE` (D17).
+
+**Your response (v0.5, on the state size cap):**
+
+```
+
+
+
+```
+
+---
+
+### D21. Shim injection — NEW
+
+**Status:** NEW (v0.5) — one open question
+
+*(Numbered last, placed here by topic: it sits directly on top of D6 and makes no
+sense apart from it.)*
+
+**Your observation:**
+
+> *"I wish we could just understand the language we were writing in. That would be
+> hard with docker though. But if we could know the language we could inject
+> helper functions, which gives us a nice abstraction like an SDK — but we could
+> manage them internally instead of having to have a bunch of packages in
+> different package managers for each language."*
+
+**This corrects a real over-reach in D6, and the correction is worth stating
+precisely.** D6 banned SDKs. The cost it was actually avoiding was *distribution*:
+publishing to npm and PyPI means release processes, semver, registry accounts,
+lockfiles, and a compatibility matrix between engine versions and client versions.
+That is what makes SDKs rot, and it is a real reason to refuse them.
+
+An embedded shim pays none of it. The engine carries the shim in its binary and
+materialises it at run time. So the fear was correct and the prohibition was too
+broad — it banned the abstraction because of a cost that a different delivery
+mechanism does not have.
+
+And it is *better* than a published SDK on the thing SDKs are worst at:
+**version skew becomes impossible.** The shim that runs your job is compiled into
+the binary running your job. There is no version pair to be wrong. That is the
+same argument D19 already makes for keeping the k8s generator inside the binary
+rather than shipping it separately.
+
+#### The rule this exposes, which is bigger than the feature
+
+> **The protocol is shaped by mechanism. The shim is shaped by ergonomics.**
+
+This is worth holding onto because it explains a mistake I made in the same round.
+Before a sugar layer existed, the protocol was the only lever available for
+developer experience — so I reached for it and proposed merging the four channels
+into one, which would have encoded a convenience concern into a contract that
+every language, every container, and D20's node relay must honour forever. With
+two layers, each gets optimised for its own concern and neither compromises.
+
+It is the same shape as P3 (files hold intent, the tool renders truth): a
+separation that stops one artefact from being asked to do two jobs badly. If it
+surfaces a third time, it should be promoted to a principle in Part 0 — which is
+how P3 got there.
+
+#### The three rules that keep this from eating D6
+
+**R1. The protocol is the floor; the shim is sugar.** `JE_STATE` and the three
+output files remain the contract. The shim reads one environment variable and
+writes the same files any other language writes. A language we ship no shim for
+participates exactly as fully as one we do — which is what D6 was protecting, and
+it stays true.
+
+**R2. The shim may never do anything the protocol cannot.** This is the
+load-bearing rule. The moment `je.progress()` exists in the TypeScript shim and
+nowhere else, "any language participates fully" is quietly false and the shim has
+become the real API with the protocol as its legacy fallback. Convenience only,
+never capability. If a shim wants to do something new, the protocol grows first
+and every language gets it.
+
+**R3. Declare the language; never detect it.** Inferring TypeScript from
+`["npx", "tsx", "scripts/x.ts"]` is a heuristic, and it will be wrong on
+`["bash", "-c", "python foo.py | jq"]`, on `["./run.sh"]`, and on
+`["make", "ingest"]` — *silently* wrong, surfacing at 3am as a confusing
+module-not-found. One declared line instead:
+
+```yaml
+command: ["npx", "tsx", "scripts/ingest-weather.ts"]
+language: typescript      # opts into shim injection
+```
+
+P3 applies directly: a config file contains what you decided, and "this is a
+TypeScript job" is a decision, not a default. Omit the line and you get the raw
+protocol with no magic at all, so the whole feature is additive and no existing
+job changes. It also fails at load time rather than at run time, which is the
+same pit-of-success shape D10 uses for missing secrets.
+
+#### What the shim exposes
+
+Five things, each mapping one-to-one onto the protocol. That is the entire surface,
+and R2 says it stays that way.
+
+```typescript
+je.state           // your cursor, seeded on first run (D14)
+je.lastSuccessAt   // when this job last succeeded — read-only (D14)
+je.event           // the payload of the event that triggered this run
+je.setState(obj)   // last write wins; commits only on exit 0
+je.emit(type, payload)
+je.output(obj)
+```
+
+```typescript
+import je from "./.je/je.mjs";      // written by the engine, gitignored
+
+const readings = await fetchReadings(je.state.since);
+console.log(`ingested ${readings.length} readings`);
+
+je.setState({ since: readings.at(-1)!.ts });
+je.emit("weather.ingested", { count: readings.length });
+```
+
+#### Docker, which you correctly flagged as the hard case
+
+Less hard than it looks. A container job already needs a bind mount for the output
+channels — `JOB_STATE_OUT_FILE` has to be a path the container can write and the
+engine can read after exit. The shim rides that same mount, read-only. The
+incremental cost is one more file in a directory we are already mounting, not new
+machinery.
+
+The genuine limits: an image with no runtime for the declared language cannot use
+the shim, and a read-only root filesystem needs the mount to be somewhere writable
+anyway for the output channels. Both fail loudly at start, and both have the same
+remedy — drop `language:` and use the protocol.
+
+#### The costs, honestly
+
+- **Node's module resolution is the fiddly one.** Python is trivial (`PYTHONPATH`
+  → `import je`), Ruby is trivial (`RUBYOPT=-r`). Node ESM resolves `node_modules`
+  by walking up from the importing file, so a bare `from "je"` means either
+  polluting your repo or preloading a global via `NODE_OPTIONS="--import ..."`.
+  The relative `./.je/je.mjs` above is the boring option: no resolution magic, and
+  identical inside a container.
+- **Shims rot, just quietly instead of publicly.** You will use the TypeScript one
+  daily; a Python one would sit untested for a year and be broken when someone
+  needs it. There is no clever fix, only a CI job that runs a real job through
+  every shim we ship.
+- **It is one more thing in the binary.** Small — each shim is tens of lines — but
+  it is surface that did not exist.
+
+#### Sequencing
+
+**Ship exactly one shim — TypeScript — and add a language when a real job needs
+one.** Same reasoning as N2 preferring one real job to three invented ones, and
+D20 refusing to build node infrastructure before a job demands it. Building a
+five-language shim framework before one job has run in one language is how the
+tail starts wagging the dog.
+
+**Open question for you:**
+
+1. Is `language:` the right key? It reads well but it is adjacent to D1's
+   `runtime: process | container`, and having both `runtime` and `language` in one
+   file invites confusion about which is which. Alternatives: `shim: typescript`
+   (names the mechanism, so it cannot be mistaken for the executor, but leaks an
+   implementation word into your file), or nesting it as `runtime.language`. I
+   lean `language:` and documenting the pair, but you are the one who will read
+   these files.
+
+**Your response (v0.5):**
+
+```
+
+
+
+```
 
 ---
 
@@ -927,15 +1205,15 @@ prevent.
 
 ### D14. Job state / cursors
 
-**Status:** AGREED as proposed — 3 small questions still open, none blocking.
-*(You left this block empty. Since weather ingest is a cursor job, this is on the
-critical path for job #1, so I'm proceeding with the defaults below and we can
-adjust — all three are cheap to change later.)*
+**Status:** AGREED (revised in v0.5 — the engine seeds the cursor, and serves
+`lastSuccessAt`). 2 small questions still open, none blocking.
 
 **Defaults I'll build against unless you say otherwise:**
 
 1. **Opaque JSON with a display hint** — `state.primary_cursor: last_record_ts`
    tells the tool which key to show in status views. Full flexibility, still legible.
+   *(v0.5: half-answered by the seeding decision below — state stays opaque, but
+   the engine now guarantees one key is populated on a first run.)*
 2. **Private per job.** Cross-job state reads make it a shared database, and shared
    mutable state between jobs is the thing that makes systems inexplicable. Jobs
    that need to hand data to each other already have `JOB_OUTPUT_FILE` (D6), which
@@ -1012,6 +1290,82 @@ Minimum: the history view above, plus the run detail showing state-in and state-
 for that specific run. "The cursor stopped moving on Tuesday even though runs kept
 succeeding" is a bug class that is invisible everywhere else and obvious here.
 
+**Added in v0.5: the engine seeds the cursor, so a first run is never handed an
+empty object.**
+
+> *"I think we should provide the last timestamp always — it's just now if we
+> don't have one. I just think it's fairly simple to do, and if the job author
+> doesn't like it they can still just override it. It's just one of those things
+> that seems like we are helping them out a bit, if they need the timestamp."* — you
+
+Adopted. It is the same argument that justified this item in the first place: the
+author picks *what* to store, not where, and "there is nothing there yet" is a
+case the engine can absorb instead of every job writing its own
+`?? "2026-01-01"` fallback.
+
+**`now` is also the right default value, and the reason is asymmetry.** Seeding
+with the epoch means a first run tries to pull all of history — hammering the
+source API, running for hours, quite possibly failing halfway and leaving a mess.
+Seeding with the run's start time means the first run processes nothing and the
+second run processes fifteen minutes. The recovery from "I actually wanted
+history" is `je state set` backwards, which this item already makes first-class
+and prints a warning for. There is no recovery from having already hammered your
+weather station.
+
+**The one trap, and it is this item's own dragon wearing a helpful hat.** There is
+a sharp fork inside "always provide the last timestamp":
+
+- **Seed** — the engine writes it once, on first run. Thereafter it changes only
+  when the job sets it.
+- **Maintained** — the engine keeps it current, advancing it on every successful
+  run.
+
+The second is *precisely* the bug this item exists to eliminate: the job that
+records "I ran at 04:00", fails at 04:03, and leaves the next run to start from
+04:00 and silently skip everything in between. Except now the engine would be
+doing it, on every job, by default — and an author who reads the cursor and never
+calls `setState` would get something that tracks *run time* while looking exactly
+like something that tracks *data*.
+
+**So: seed only. Set once, never auto-advanced.** It is a one-word difference in
+the spec and the wrong word is invisible until it costs a day of data.
+
+**What falls out of that, and it is a real improvement.** Once the seed is
+strictly hands-off, the *other* fact is still missing — and we already have it,
+because "when did this job last succeed?" is a query against `runs`. So provide
+both, under names that cannot be mistaken for each other:
+
+| | Meaning | Who owns it |
+|---|---|---|
+| `je.state` / `JE_STATE` | the watermark: what you last processed | the job |
+| `je.lastSuccessAt` / `JE_LAST_SUCCESS_AT` | when this job last succeeded | the engine, read-only |
+
+This item's whole thesis is that these two diverge the instant anything fails,
+retries, runs late, or is skipped while the machine is asleep — and that
+conflating them is the classic bug. Giving them different names and making one
+unwritable means an author who wants the wrong one has to *type* the wrong one.
+That is cheaper and far more durable than documenting the distinction. It costs
+nothing: `lastSuccessAt` is a `SELECT`, not new stored state.
+
+**Two details that carry real weight:**
+
+- **"Now" is the run's start time, frozen — not the clock read inside the job.**
+  This item already requires every attempt within a run to see the same input
+  state; if attempt 1 fails at 04:00 and attempt 2 runs at 04:05, a re-evaluated
+  "now" opens a five-minute hole. The same rule makes `je retry` of an old run
+  replay its original seed for free.
+- **The seed is stored as state v1, not computed on the fly**, so the cursor's
+  origin is visible rather than magical:
+
+```
+$ je state history weather-ingest
+  v2  2026-09-02 11:30  run 2          since → 2026-09-02T11:29:04Z
+  v1  2026-09-02 11:15  engine (seed)  since → 2026-09-02T11:15:00Z
+```
+
+Magic that appears in the history is behaviour. Magic that doesn't is the thing
+you cannot explain at 2am (P1).
+
 **Options I'd offer:**
 
 - `state_commit: on_success` (default) | `always` — `always` for jobs that make
@@ -1020,11 +1374,13 @@ succeeding" is a bug class that is invisible everywhere else and obvious here.
 
 **Open questions for you:**
 
-1. Is opaque JSON the right shape, or do you want the engine to understand a
-   *typed* cursor (e.g. a declared `cursor: timestamp` field) so it can render it
-   nicely, validate it, and warn on backwards movement? Typed is friendlier and
-   more visible; opaque is more flexible. I lean opaque-with-a-hint: store JSON,
-   let the job declare which key is the "primary cursor" for display purposes.
+1. ~~Opaque vs typed cursor~~ — **half-settled in v0.5.** State stays opaque JSON;
+   the engine only guarantees the `primary_cursor` key is populated on a first
+   run. Still open, and cheap either way: should the engine *warn* when a cursor
+   that has always held a timestamp suddenly moves backwards, or is that too
+   clever for something it is supposed to treat as opaque? I lean warn — it is
+   the same "tell me before it costs me a day" instinct behind `je state set`
+   already printing a backwards-movement warning.
 2. Should state be readable by *other* jobs (`je state get X` from inside another
    job), or strictly private per job? Private is safer; shared makes it a tiny
    shared database, which invites misuse but is undeniably handy.
@@ -1834,9 +2190,11 @@ invented ones — see Q2. Feature set:
 - **chain files + `JOB_EVENTS_FILE`, with load-time cycle checking, `je chains`
   and `je routes` (D17)**
 - **engine core as a library, daemon as a thin wrapper (D18)**
+- **the TypeScript shim, and only that one (D21)**
 
 Not in v1: web UI, fan-in triggers (v1.1, schema-ready), TUI, webhook listener,
-notifications beyond a shell hook, secrets beyond the local store.
+notifications beyond a shell hook, secrets beyond the local store, shims for any
+language a real job hasn't asked for yet (D21).
 
 > *"I have my mac app (Almanac) on this machine — one of the things it does is
 > weather data that it pulls from my local weather station. I wonder if that
@@ -2040,7 +2398,7 @@ obvious when wrong, and the highest learning-per-hour in the codebase.
 
 ---
 
-## Appendix A — Data model (v0.4)
+## Appendix A — Data model (v0.5)
 
 Still illustrative, but close to what we'll actually create.
 
@@ -2084,6 +2442,9 @@ attempts
 job_state                    -- D14, current cursor per job
   job_id, version, value (json), set_by_run_id, set_by_actor, created_at
   -- append-only; current = max(version); trimmed to last 100
+  -- v1 is written by the engine at first run (v0.5 seeding): set_by_actor
+  --   'engine', value = { <primary_cursor>: <run start time> }. Stored rather
+  --   than computed so `je state history` shows where the cursor came from.
 
 trigger_state                -- D3, schema present in v1, used in v1.1
   id, route_id, correlation_key,
@@ -2094,7 +2455,7 @@ logs                         -- separate DB file
   run_id, attempt_number, seq, stream (stdout|stderr), ts, line
 ```
 
-## Appendix B — Job and chain definitions (v0.4)
+## Appendix B — Job and chain definitions (v0.5)
 
 **What `je new weather-ingest` actually writes**, per P3 — only what you decided:
 
@@ -2103,7 +2464,8 @@ logs                         -- separate DB file
 name: Weather Ingest
 description: Pulls readings from the local station into Almanac's store
 
-command: ["python", "scripts/ingest_weather.py"]
+command: ["npx", "tsx", "scripts/ingest-weather.ts"]
+language: typescript          # D21: opt into the shim. Omit for the raw protocol.
 workdir: ~/code/almanac
 
 on:
@@ -2111,7 +2473,7 @@ on:
     catch_up: once
 
 state:
-  primary_cursor: last_record_ts
+  primary_cursor: since
 
 secrets: [STATION_API_KEY]
 ```
@@ -2122,16 +2484,51 @@ in the engine, not a line in your file. To see the full picture:
 
 ```
 $ je explain weather-ingest
-  command        python scripts/ingest_weather.py    (jobs/weather-ingest.yaml:5)
+  command        npx tsx scripts/ingest-weather.ts   (jobs/weather-ingest.yaml:5)
   runtime        process                             (default)
-  every          15m                                 (jobs/weather-ingest.yaml:9)
-  catch_up       once                                (jobs/weather-ingest.yaml:10)
+  language       typescript                          (jobs/weather-ingest.yaml:6)
+  every          15m                                 (jobs/weather-ingest.yaml:10)
+  catch_up       once                                (jobs/weather-ingest.yaml:11)
   timeout        1h                                  (default)
   overlap        skip                                (default)
   retry          none                                (default)
   on_interrupt   fail                                (default)
   state.commit   on_success                          (default)
   secrets        STATION_API_KEY                      ✓ set 3d ago
+```
+
+**The job itself, with the shim (D21):**
+
+```typescript
+// scripts/ingest-weather.ts
+import je from "./.je/je.mjs";        // written by the engine, gitignored
+
+// Seeded with this run's start time on a first run, so it is never undefined.
+const readings = await fetchReadings(je.state.since, process.env.STATION_API_KEY!);
+
+console.log(`ingested ${readings.length} readings`);   // captured and stored
+
+je.setState({ since: readings.at(-1)?.ts ?? je.state.since });
+je.emit("weather.ingested", { count: readings.length });
+```
+
+**And the same job without it**, because R1 says the protocol is the floor and
+every language reaches it — this is what `language:` is sugar over:
+
+```python
+# scripts/ingest_weather.py — no shim, no SDK, nothing imported
+import json, os
+
+state = json.loads(os.environ["JE_STATE"])
+readings = fetch_readings(state["since"], os.environ["STATION_API_KEY"])
+print(f"ingested {len(readings)} readings")
+
+with open(os.environ["JOB_STATE_OUT_FILE"], "w") as f:
+    json.dump({"since": readings[-1]["ts"] if readings else state["since"]}, f)
+
+with open(os.environ["JOB_EVENTS_FILE"], "a") as f:
+    f.write(json.dumps({"type": "weather.ingested",
+                        "payload": {"count": len(readings)}}) + "\n")
 ```
 
 The v0.2 version of this file had 24 lines and 8 of them were restating defaults.
@@ -2199,7 +2596,7 @@ timeout: 30s
 ```
 
 ```python
-# scripts/route_weather.py — the whole router protocol, no SDK
+# scripts/route_weather.py — the whole router protocol, no shim, no SDK
 import json, os
 
 event = json.loads(os.environ["EVENT_PAYLOAD"])
@@ -2208,6 +2605,10 @@ out   = "weather.anomalous" if event["temp_f"] < -20 else "weather.normal"
 with open(os.environ["JOB_EVENTS_FILE"], "a") as f:
     f.write(json.dumps({"type": out, "payload": event}) + "\n")
 ```
+
+The same router with the TypeScript shim is two lines, and does exactly the same
+thing to exactly the same file — which is R2 working: the shim saves typing, not
+capability.
 
 **Your response** (reactions to either appendix):
 
