@@ -38,7 +38,7 @@ var demoJobs = []struct {
 	{"demo-hello", "prints a line and exits", "the smallest job that exists"},
 	{"demo-counter", "keeps a cursor and advances it", "what other schedulers leave to you"},
 	{"demo-flaky", "fails about one run in three", "watch the cursor NOT move"},
-	{"demo-tick", "runs every minute", "gives the daemon something to do"},
+	{"demo-tick", "runs every minute", "gives the scheduler something to do"},
 }
 
 func runDemo(ctx context.Context, env *Env, args []string) error {
@@ -86,8 +86,18 @@ func writeDemo(env *Env, force bool) error {
 	// The tour matters as much as the files. Somebody who just ran this does
 	// not yet know which command shows the thing the examples were written to
 	// show, and making them go looking is how onboarding fails.
+	// Starting the engine comes FIRST now, which is a change worth being
+	// deliberate about. Under D20 the control plane does not execute, so every
+	// command below needs something running -- and a tour whose first step
+	// fails with "no control plane" would teach the wrong first lesson about a
+	// tool whose whole claim is that it explains itself.
 	fmt.Fprint(env.Stdout, `
-Try this, in order:
+First, start the engine. It is two components -- a control plane that decides
+what runs, and a worker that runs it -- so this starts both, in this terminal:
+
+  je quickstart
+
+Then, in another terminal, try this in order:
 
   je run demo-hello              the loop: a command, its output, an exit code
   je run demo-counter            then run it again, and watch the cursor move
@@ -95,12 +105,11 @@ Try this, in order:
   je state history demo-flaky    the cursor moved only on the runs that worked
   je runs                        what happened, and when
   je waiting                     what has not happened yet
+  je workers                     what is attached, and what it can run
 
-Then start the daemon and leave it alone for a couple of minutes:
+Leave it alone for a couple of minutes, then:
 
-  je serve &
-  je waiting
-  je runs demo-tick
+  je runs demo-tick              the scheduler fired it without you
 
 Remove all of it with: je demo --remove
 `)
