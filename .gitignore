@@ -2,6 +2,9 @@
 /je
 /dist/
 
+# The secret store, in case JE_DATA_DIR is ever pointed at the repo.
+secrets.json
+
 # A local data directory, if someone points JE_DATA_DIR here while developing.
 # The real one lives in ~/.je and contains the secret store (D10).
 /data/

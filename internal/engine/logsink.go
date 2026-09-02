@@ -3,12 +3,46 @@ package engine
 import (
 	"context"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/jdmorlan/job-engine/internal/executor"
+	"github.com/jdmorlan/job-engine/internal/secrets"
 	"github.com/jdmorlan/job-engine/internal/store"
 )
+
+// newRedactor builds a replacer that strips secret values from log lines.
+//
+// D10 redacts on write rather than at render: the value never reaches the
+// database, so copying the log file later cannot leak it. This is imperfect by
+// construction -- a job that base64s its token defeats it -- and it is aimed at
+// the common case of a tool echoing its own configuration.
+//
+// Longest values are replaced first, so a secret that contains another secret
+// as a prefix does not leave a fragment behind.
+func newRedactor(values map[string]string) *strings.Replacer {
+	if len(values) == 0 {
+		return nil
+	}
+	ordered := make([]string, 0, len(values))
+	for _, v := range values {
+		if len(v) >= secrets.MinRedactableLength {
+			ordered = append(ordered, v)
+		}
+	}
+	if len(ordered) == 0 {
+		return nil
+	}
+	sort.Slice(ordered, func(i, j int) bool { return len(ordered[i]) > len(ordered[j]) })
+
+	pairs := make([]string, 0, len(ordered)*2)
+	for _, v := range ordered {
+		pairs = append(pairs, v, "***")
+	}
+	return strings.NewReplacer(pairs...)
+}
 
 func filepathDir(path string) string { return filepath.Dir(path) }
 
@@ -31,6 +65,7 @@ type logSink struct {
 	runID   int64
 	attempt int
 	live    func(stream string, ts time.Time, line string)
+	redact  *strings.Replacer
 
 	mu     sync.Mutex
 	buf    []store.LogLine
@@ -42,12 +77,13 @@ type logSink struct {
 	once sync.Once
 }
 
-func newLogSink(e *Engine, runID int64, attempt int, live func(string, time.Time, string)) *logSink {
+func newLogSink(e *Engine, runID int64, attempt int, live func(string, time.Time, string), redact *strings.Replacer) *logSink {
 	s := &logSink{
 		engine:  e,
 		runID:   runID,
 		attempt: attempt,
 		live:    live,
+		redact:  redact,
 		done:    make(chan struct{}),
 		stop:    make(chan struct{}),
 	}
@@ -58,6 +94,13 @@ func newLogSink(e *Engine, runID int64, attempt int, live func(string, time.Time
 // WriteLine records one line. It is called from the executor's two scanner
 // goroutines, so it must be safe for concurrent use.
 func (s *logSink) WriteLine(stream executor.Stream, ts time.Time, line string) {
+	// Redacted before anything sees it, including the terminal. A value that is
+	// stripped from storage but printed to your screen -- and into your
+	// scrollback, and any tmux logfile -- is not redacted.
+	if s.redact != nil {
+		line = s.redact.Replace(line)
+	}
+
 	if s.live != nil {
 		// Called before taking the lock so that terminal output stays
 		// immediate even while a flush is in progress.

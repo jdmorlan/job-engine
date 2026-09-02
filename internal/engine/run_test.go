@@ -364,3 +364,96 @@ func TestCancellationIsInterruptedNotFailed(t *testing.T) {
 		t.Error("a cancelled run was reported as timed out")
 	}
 }
+
+func TestDeclaredSecretIsInjectedAndRedacted(t *testing.T) {
+	ctx := context.Background()
+	e, _ := jobFixture(t, "tokenuser",
+		`echo "token is $STATION_API_KEY"; echo "and nothing else: ${OTHER_TOKEN:-absent}"`,
+		"secrets: [STATION_API_KEY]")
+
+	if err := e.Secrets().Set("STATION_API_KEY", "sk-live-abcdef123456"); err != nil {
+		t.Fatal(err)
+	}
+	// A second secret the job did NOT declare. It must not leak in.
+	if err := e.Secrets().Set("OTHER_TOKEN", "sk-other-999999"); err != nil {
+		t.Fatal(err)
+	}
+	// Reload so the load-time secret check sees the new values.
+	if _, err := e.LoadFromDisk(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := e.RunJob(ctx, "tokenuser", engine.RunOptions{})
+	if err != nil {
+		t.Fatalf("RunJob: %v", err)
+	}
+	if result.Run.Status != model.StatusSucceeded {
+		t.Fatalf("status = %s: %s", result.Run.Status, result.Run.Error)
+	}
+
+	logged := logText(t, e, result.Run.ID, 1)
+
+	// D10: redaction happens on write, so the value never reaches the database.
+	if strings.Contains(logged, "sk-live-abcdef123456") {
+		t.Errorf("the secret value was stored in the logs: %q", logged)
+	}
+	if !strings.Contains(logged, "token is ***") {
+		t.Errorf("the secret was not redacted: %q", logged)
+	}
+	// Only declared secrets are injected.
+	if !strings.Contains(logged, "and nothing else: absent") {
+		t.Errorf("an undeclared secret reached the job: %q", logged)
+	}
+}
+
+func TestMissingSecretIsALoadTimeError(t *testing.T) {
+	ctx := context.Background()
+	// D10's whole point: you find out when the file is loaded, not at 3am.
+	e, _ := jobFixture(t, "needstoken", `echo hi`, "secrets: [NEVER_SET]")
+
+	jobs, err := e.Jobs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("got %d jobs", len(jobs))
+	}
+	if jobs[0].Runnable() {
+		t.Fatal("a job with an unset secret is marked runnable")
+	}
+	// The error has to say which secret and how to fix it, or it is just a
+	// different flavour of confusion.
+	if !strings.Contains(jobs[0].ConfigError, "NEVER_SET") {
+		t.Errorf("config error does not name the secret: %q", jobs[0].ConfigError)
+	}
+	if !strings.Contains(jobs[0].ConfigError, "je secret set") {
+		t.Errorf("config error does not say how to fix it: %q", jobs[0].ConfigError)
+	}
+
+	if _, err := e.RunJob(ctx, "needstoken", engine.RunOptions{}); err == nil {
+		t.Error("a job with an unset secret ran anyway")
+	}
+}
+
+func TestSecretBecomingAvailableClearsTheError(t *testing.T) {
+	ctx := context.Background()
+	e, _ := jobFixture(t, "eventually", `echo "$LATE_TOKEN"`, "secrets: [LATE_TOKEN]")
+
+	if err := e.Secrets().Set("LATE_TOKEN", "value-goes-here"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.LoadFromDisk(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	jobs, err := e.Jobs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !jobs[0].Runnable() {
+		t.Fatalf("job still misconfigured after the secret was set: %q", jobs[0].ConfigError)
+	}
+	if _, err := e.RunJob(ctx, "eventually", engine.RunOptions{}); err != nil {
+		t.Errorf("RunJob: %v", err)
+	}
+}

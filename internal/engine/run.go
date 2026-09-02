@@ -152,7 +152,13 @@ func (e *Engine) RunJob(ctx context.Context, slug string, opts RunOptions) (*Run
 		return nil, err
 	}
 
-	sink := newLogSink(e, run.ID, attempt.Number, opts.Live)
+	// The same resolved values that went into the environment drive redaction,
+	// so the two cannot drift (D10).
+	resolved, err := e.secrets.Resolve(def.Secrets)
+	if err != nil {
+		return nil, fmt.Errorf("job %s: %w", job.Slug, err)
+	}
+	sink := newLogSink(e, run.ID, attempt.Number, opts.Live, newRedactor(resolved))
 	execResult, execErr := executor.Process{}.Run(ctx, executor.Spec{
 		Command: def.Command,
 		Workdir: workdir,

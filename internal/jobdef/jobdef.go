@@ -245,15 +245,12 @@ func (s Schedule) validate() error {
 // file parsed correctly. It populates jobs.config_error, so the job is listed
 // and visibly broken rather than silently absent (D10's pit of success).
 //
+// It covers only what the definition itself can know. A declared secret that
+// is not set is also a config error, but this package cannot see the secret
+// store, so the engine adds that check at load time (D10).
+//
 // Returning "" means the job is runnable.
 func (d *Definition) ConfigError() string {
-	if len(d.Secrets) > 0 {
-		// Honest placeholder. The field is already the right shape for D10, so
-		// no job file needs editing when the secret store lands -- but silently
-		// running a job without the credentials it declared would be worse than
-		// refusing to run it.
-		return "secrets are not implemented yet (D10); this job will not run"
-	}
 	if d.Language != "" {
 		return fmt.Sprintf("language: %s -- shim injection is not implemented yet (D21)", d.Language)
 	}

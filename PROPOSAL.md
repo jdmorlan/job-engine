@@ -32,6 +32,12 @@ That's a precise complaint and it produced three changes and one withdrawal:
 - **D6 — state arrives in the environment, not a file.** The only surviving piece
   of a larger change I proposed and withdrew (below).
 
+- **D22 (new) — job sources.** Definitions and their code arrive from
+  registered sources, several at once, each logically separate but all feeding
+  one engine and one timeline. This is D19's git source arriving early, for a
+  local reason rather than a cluster one, and the multi-source shape improves on
+  D19's global local-or-git mode switch.
+
 **A proposal I made and withdrew, recorded because the reasoning matters.** I
 proposed collapsing the four job-protocol channels into one tagged JSONL file, to
 make jobs less laborious to write. You asked the right question:
@@ -144,6 +150,7 @@ architecture), **D16** (daemon lifecycle and generic event ingress).
 | D19 | Kubernetes deployment / local-to-cluster | **NEW — react** |
 | D20 | Control plane + nodes / placement | **NEW — react** |
 | D21 | Shim injection | **NEW (v0.5) — one open question** |
+| D22 | Job sources | **NEW (v0.5) — two open questions** |
 | N1 | Non-goals | AGREED |
 | N2 | v1 done | AGREED |
 | Q1 | Storage adapters | AGREED — SQLite only, no adapter |
@@ -1881,6 +1888,158 @@ sources pluggable**.
    is a real coupling to take on deliberately.
 
 **Your response:**
+
+```
+
+
+
+```
+
+---
+
+### D22. Job sources — NEW
+
+**Status:** NEW (v0.5) — two open questions
+
+**Your observation:**
+
+> *"I want in a job definition to be able to reference a github repo or file
+> location, that way I could have a repo of jobs or multiple repos, and I could
+> run them from anywhere... I could have a collection of all jobs in a repo or I
+> can have many repos and je can just run all of them, but I get to keep them
+> logically separated."*
+
+**Adopted, and it lands on machinery that already exists.** D19 specified
+definition loading as a pluggable source rather than "read this directory," and
+called that one of exactly two things v1 owed its future. The `Source` interface
+is already built. This item is what plugs into it.
+
+What is new here is the *plural*. D19 imagined one source at a time and framed
+authority as a global mode: *"Git and the API can't both be authoritative. Make
+it a mode: local or git."* Several registered sources is better, and the
+improvement is concrete: **authority becomes per-source rather than global**, so
+a scratch job on local disk and a fleet of git-managed jobs can coexist. You get
+`je new` for experiments without giving up the repo being the truth for
+everything that matters.
+
+#### The shape
+
+A source is a named place definitions come from. Registering one is a CLI
+command that edits config, per D2:
+
+```
+$ je source add weather github.com/you/weather-jobs --path jobs
+$ je source add home    github.com/you/home-automation
+$ je source list
+NAME     KIND    REF   REVISION   JOBS  SYNCED
+local    dir     -     -          2     -
+weather  github  main  a3f81c2    5     4m ago
+home     github  v1.4  91be07d    3     2h ago
+```
+
+**Code travels with definitions.** A source is a whole tree, not just YAML: the
+scripts a job runs live beside it in the same repo and arrive in the same fetch.
+That is what makes "run them from anywhere" true, and it is why a *relative*
+`workdir` resolves against the source root. A job that works in your repo works
+on any machine that registers the repo, unmodified — the same promise R1 makes
+about the cluster, pointed at your other laptop.
+
+#### Identity, which is the part that needs deciding carefully
+
+Two repos will eventually both contain a `sync.yaml`, and you may not own either
+of them. So a job's identity is **qualified by its source** — `weather/ingest` —
+and the short form resolves when it is unambiguous:
+
+```
+je run ingest              # fine while only one source has it
+je run weather/ingest      # always works
+je run sync                # error: ambiguous, naming home/sync and weather/sync
+```
+
+The qualified name is what the database stores, what events carry, and what
+chains reference. The short form is a CLI convenience that resolves at the edge,
+the same way P3 has the tool render truth while you type intent. The local
+directory is a source named `local`, so nothing is a special case.
+
+**A chain resolves job names within its own source first.** That keeps a repo
+self-contained: a chain file in the weather repo referring to `normalize` means
+*that* repo's normalize, and the repo stays portable rather than depending on
+what else you happen to have registered.
+
+#### Fetching, and why not `git`
+
+Not by shelling out to `git`: it breaks the single-static-binary property and
+there is no git in a `FROM scratch` image (D19 ships one). Not by vendoring a
+pure-Go git implementation either — a large dependency for a small need.
+
+**Fetch a tarball over HTTPS.** For a public GitHub repo that is
+`codeload.github.com/<owner>/<repo>/tar.gz/<sha>`, which is `net/http`,
+`archive/tar` and `compress/gzip` — all standard library, nothing added to the
+dependency list, works anywhere the binary works.
+
+It also has a property worth having on purpose: **fetching by SHA forces the
+pinning question to be answered.** A `ref:` of a branch or tag resolves to a
+commit once, visibly, and the fetch is then of something immutable, cached
+content-addressed at `<data>/sources/<sha>/` and reusable forever.
+
+That matters more than it sounds:
+
+> Without a recorded SHA, "what ran?" is unanswerable for a job whose code came
+> from a moving branch, and D11 quietly stops being true for every remote job.
+
+So a run records the source revision alongside the definition hash, and
+`je explain` shows the resolved commit. D19 anticipated exactly this — *"the
+commit SHA is the definition version."*
+
+#### What it forces
+
+- **One authority per job name.** Two sources offering the same qualified name
+  is a load error. Ambiguity in the *short* form is a resolution error at the
+  CLI, which is a different and much friendlier failure.
+- **Sync is a visible job.** P2: the engine's own work is jobs, so this is
+  `system.sync`, emitting `source.synced` with the old and new revisions. Code
+  fetched from a moving branch changing what runs tonight is precisely the thing
+  that must never be silent.
+- **Sync stays atomic.** One unparseable file rejects that source's sync and its
+  last good tree keeps serving. Unchanged from D19, now scoped per source rather
+  than globally — a broken weather repo must not stop the home jobs.
+- **Definition-writing commands target `local` only.** `je new` and `je set`
+  refuse on a git-sourced job and say to edit the repo, because the checkout is
+  a cache rather than a working copy. This is D19's mode switch, made per-source.
+- **Deleting a source never deletes history.** Same rule as a removed file: jobs
+  tombstone, runs and cursors stay (D19, P1).
+
+#### The security shape, stated plainly
+
+This is scheduled execution of code fetched from the internet, running with your
+`PATH` and your `HOME`. That is the same trust model as a CI runner and it is
+fine for repos you own, but three things follow and none are optional:
+
+- Pinning to a tag or SHA must be as easy as tracking a branch.
+- An update from a moving ref is a logged event with both revisions, never a
+  surprise discovered afterwards.
+- Extraction must reject entries that escape the destination directory. A
+  tarball containing `../../.ssh/authorized_keys` is the oldest trick there is,
+  and the fetch code is the only place in this project that will ever unpack an
+  archive from outside.
+
+Public repos only for v1, which sidesteps credentials entirely and keeps this
+from waiting on D10's cluster-side story.
+
+**Open questions for you:**
+
+1. **Sync cadence.** Manual `je source sync` plus a sync on daemon start is the
+   honest v1, with a scheduled `system.sync` once the scheduler exists. Or do
+   you want a per-source `interval:` from the start? I lean manual first — an
+   engine that silently pulls new code on a timer before you have watched it do
+   so once is a lot of trust to extend up front.
+2. **Default ref.** Track `main` by default, or require an explicit `ref:` so
+   that pinning is a decision rather than something you forget? I lean requiring
+   it for tags and allowing a bare branch, but there is a real argument that
+   defaulting to a moving branch is the wrong default for something that runs
+   unattended.
+
+**Your response (v0.5):**
 
 ```
 

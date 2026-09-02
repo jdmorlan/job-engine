@@ -81,17 +81,29 @@ func (e *Engine) buildEnv(
 		"JOB_EVENTS_FILE="+ch.events,
 	)
 
+	// D10: only declared secrets, and the whole store is never handed over.
+	// Resolve fails loudly if one is missing, but load-time validation should
+	// have caught that already -- this is the backstop for a secret deleted
+	// between load and run.
+	resolved, err := e.secrets.Resolve(def.Secrets)
+	if err != nil {
+		return nil, fmt.Errorf("job %s: %w", job.Slug, err)
+	}
+	for _, name := range def.Secrets {
+		env = append(env, name+"="+resolved[name])
+	}
+
 	// D14: engine-owned and read-only, so the two facts that must not be
 	// confused -- what you processed, and when you last ran -- cannot be.
-	lastSuccess, err := e.store.LastSuccessAt(ctx, job.ID)
+	lastSuccess, lastErr := e.store.LastSuccessAt(ctx, job.ID)
 	switch {
-	case err == nil:
+	case lastErr == nil:
 		env = append(env, "JE_LAST_SUCCESS_AT="+lastSuccess.UTC().Format(time.RFC3339))
-	case isNoRows(err):
+	case isNoRows(lastErr):
 		// Never succeeded. The variable is absent rather than empty, so a job
 		// can tell "never" from "at the zero time".
 	default:
-		return nil, err
+		return nil, lastErr
 	}
 
 	return env, nil

@@ -22,6 +22,7 @@ import (
 	"github.com/jdmorlan/job-engine/internal/lockfile"
 	"github.com/jdmorlan/job-engine/internal/model"
 	"github.com/jdmorlan/job-engine/internal/paths"
+	"github.com/jdmorlan/job-engine/internal/secrets"
 	"github.com/jdmorlan/job-engine/internal/store"
 )
 
@@ -44,11 +45,12 @@ type Options struct {
 // Engine owns the database and, once the scheduler exists, the run loop.
 // It is the sole writer (D20 C1).
 type Engine struct {
-	opts  Options
-	log   *slog.Logger
-	now   func() time.Time
-	store *store.Store
-	lock  *lockfile.Lock
+	opts    Options
+	log     *slog.Logger
+	now     func() time.Time
+	store   *store.Store
+	secrets *secrets.Store
+	lock    *lockfile.Lock
 
 	// started records whether Start ran. A one-shot `je run` with no daemon
 	// (D19 stage 0) opens the engine without claiming to be one, and must not
@@ -101,11 +103,12 @@ func New(opts Options) (*Engine, error) {
 	}
 
 	return &Engine{
-		opts:  opts,
-		log:   opts.Logger,
-		now:   opts.Now,
-		store: st,
-		lock:  lock,
+		opts:    opts,
+		log:     opts.Logger,
+		now:     opts.Now,
+		store:   st,
+		secrets: secrets.Open(opts.Layout.Data),
+		lock:    lock,
 	}, nil
 }
 
@@ -210,6 +213,13 @@ func (e *Engine) RecentEvents(ctx context.Context, limit int) ([]model.Event, er
 	}
 	return e.store.RecentEvents(ctx, limit)
 }
+
+// Secrets exposes the secret store for the CLI's `je secret` commands.
+//
+// The store deliberately has no Get on the CLI path (D10): this returns the
+// type, and the type offers naming and listing to callers while reserving value
+// access for the engine building a job's environment.
+func (e *Engine) Secrets() *secrets.Store { return e.secrets }
 
 // Health is the answer to "is everything OK?", which P1 insists must be a
 // query with an exit code rather than a vibe.

@@ -23,6 +23,7 @@ je runs           recent runs
 je logs <run>     what a run printed
 je state get|history <job>    the cursor, and how it has moved
 je events         the raw timeline with causation
+je secret set|list|rm         values jobs declare and the engine injects
 je serve          run the daemon
 je status         is the daemon up, and how long was it down
 je emit <type>    put an event into the engine (D16's single ingress)
@@ -83,10 +84,31 @@ Also set: `JOB_ID`, `RUN_ID`, `ATTEMPT`, `TRIGGERED_BY`, `EVENT_PAYLOAD`,
 except `PATH`, `HOME`, `TZ` and a few other essentials — a job does not inherit
 credentials by accident (D10).
 
+### Secrets
+
+Declared per job, injected per job, never printed.
+
+```console
+$ je secret set STATION_API_KEY
+Value for STATION_API_KEY (not echoed):
+set STATION_API_KEY
+
+$ je jobs
+JOB             STATUS         COMMAND                        FILE
+weather-ingest  ok             python3 scripts/ingest.py      weather-ingest.yaml
+```
+
+Before the secret was set, that row read `misconfigured` and the job refused to
+run, naming the secret and the command to fix it. **A missing secret is a
+definition error, not a 3am exit code** — which is the whole of D10.
+
+Values are stripped from log lines *before* they reach the database, so copying
+the log file later cannot leak them. There is no `je secret get`.
+
 ### Not built yet
 
-Scheduler, retries, chains, secrets, container executor, the TypeScript shim
-(D21), and the daemon-side run API. A job declaring `secrets:` or `language:`
+Scheduler, retries, chains, job sources (D22), container executor, the
+TypeScript shim (D21), and the daemon-side run API. A job declaring `language:`
 loads but is marked misconfigured and will not run, rather than running without
 what it asked for.
 
@@ -109,6 +131,7 @@ is a thin wrapper around it and the CLI is a client of the daemon, so nothing in
 | `internal/lockfile` | the single-writer guarantee (D18). |
 | `internal/jobdef` | parsing, validation, defaults, and D11 hashing. |
 | `internal/executor` | running a command. Process today, container later (D1). |
+| `internal/secrets` | the local secret store, and log redaction values (D10). |
 
 ## Building
 
@@ -130,6 +153,7 @@ app (D18).
   state.db        runs, events, definitions, cursors
   logs.db         captured job output, separately (D4)
   lock            the single-writer flock
+  secrets.json    the local secret store, mode 0600 (D10)
   daemon.json     the running daemon's address, so the CLI can find it
   jobs/           job and chain definitions (override with JE_JOBS_DIR)
 ```

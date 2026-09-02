@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/jdmorlan/job-engine/internal/jobdef"
 	"github.com/jdmorlan/job-engine/internal/store"
@@ -45,6 +46,21 @@ func (e *Engine) Load(ctx context.Context, src jobdef.Source) (LoadResult, error
 		}
 
 		configErr := def.ConfigError()
+		if configErr == "" {
+			// D10's pit of success. A job that declares a secret it cannot be
+			// given is visibly misconfigured the moment its file is loaded,
+			// rather than failing with a cryptic non-zero exit eight hours
+			// later. The check lives here because only the engine can see the
+			// secret store.
+			missing, err := e.secrets.Missing(def.Secrets)
+			if err != nil {
+				return LoadResult{}, err
+			}
+			if len(missing) > 0 {
+				configErr = fmt.Sprintf("secret not set: %s (set it with: je secret set %s)",
+					strings.Join(missing, ", "), missing[0])
+			}
+		}
 		if _, err := e.store.UpsertJob(ctx, store.Job{
 			Slug:           def.Slug,
 			DefinitionHash: hash,
