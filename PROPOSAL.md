@@ -1,9 +1,54 @@
-# Job Engine — Design Proposal v0.5
+# Job Engine — Design Proposal v0.6
 
 **Date:** 2026-09-02
-**Status:** 21 items locked, and **the skeleton is built** — daemon, store, API,
-CLI, and the engine's own lifecycle events, under test. 5 items still want your
-input, none of them on the critical path for job #1.
+**Status:** 21 items locked, and **the skeleton is built** — control plane, store,
+API, CLI, and the engine's own lifecycle events, under test. D20 is now agreed in
+shape and partially on the critical path, which is the first time the deployment
+model has affected v1 scope.
+
+---
+
+## Changelog since v0.5
+
+**This round is about deployment, and it started from a question about the word
+*daemon*:**
+
+> *"Why though have a daemon if it runs without a daemon? That just seems off to
+> me... they're going to be like what the hell is the daemon for? Oh, it's the
+> core... well, no, not really... but it is core to some things. That's just
+> really weird, and seems like a lot of complexity for what reason?"*
+
+The complexity was real and the reason was thin. Tracing it produced one decision
+and three withdrawals:
+
+- **D20 — the control plane never executes (C11).** The change that carries the
+  round. v0.5 kept an in-process executor and added nodes beside it, which would
+  have left two execution paths forever, with the remote one under-exercised.
+  Universal execution means every run takes the same path. **Worker** and
+  **control plane** are now the two components; *daemon* is demoted to a
+  deployment form, per your note that *"daemon is a worker, but it doesn't have to
+  be — it can be Docker, so we shouldn't oversell on the word daemon."*
+- **D20/C12 — a control plane ships with a system worker**, your suggestion, which
+  keeps P2 intact: the engine's own jobs go through the same dispatch and log path
+  as everyone else's rather than getting an exemption from C11.
+- **`je service install` withdrawn**, and `internal/service` with it — 604 lines
+  of launchd/systemd platform matrix that was registering the wrong component. It
+  returns later, smaller, around the worker.
+- **The daemonless CLI path withdrawn.** `Reader`, `embedded.go`, and the silent
+  fallback go. The fallback bought exactly one saved command and cost a second
+  implementation of every read — and it hid a dead scheduler, since `Source()` was
+  defined on both implementations and called by nothing.
+- **D19's four stages collapse to two.** Dev is `docker compose up`; prod is the
+  same image in a cluster. R1 stops being a discipline and becomes true by
+  construction.
+
+**One rule fell out of it**, and like v0.5's protocol/shim rule it is the reusable
+part:
+
+> **A capability is not a reason.** The embedded path existed because the engine
+> *could* be a library, not because anyone needed it to be one. Both retired
+> paths — daemonless reads and native service registration — were built from what
+> was easy to reach rather than from a stated need.
 
 ---
 
@@ -131,8 +176,8 @@ architecture), **D16** (daemon lifecycle and generic event ingress).
 |---|---|---|
 | P1, P2 | Visibility Rule, engine work is jobs | AGREED (your words) |
 | P3 | Files hold intent, tool renders truth | **NEW — react** |
-| F1 | Vocabulary | AGREED |
-| D1 | Executor interface | AGREED |
+| F1 | Vocabulary | AGREED (revised v0.6 — control plane / worker / CLI) |
+| D1 | Executor interface | AGREED (revised v0.6 — hosted in the worker) |
 | D2 | Definitions on disk + CLI | AGREED (revised) |
 | D3 | Chaining / stateful triggers | AGREED — v1.1, schema-ready |
 | D17 | Chains and topology | AGREED (revised) — one open sub-question |
@@ -150,8 +195,8 @@ architecture), **D16** (daemon lifecycle and generic event ingress).
 | D15 | Daemon + API + CLI (`je`) | AGREED |
 | D16 | Daemon lifecycle + event ingress | AGREED (renamed v0.5) |
 | D18 | Embedding / Almanac | **NEW — react** |
-| D19 | Kubernetes deployment / local-to-cluster | **NEW — react** |
-| D20 | Control plane + nodes / placement | **NEW — react** |
+| D19 | Kubernetes deployment / local-to-cluster | **REVISED v0.6 — two stages, `je service install` withdrawn** |
+| D20 | Control plane + workers / universal execution | **AGREED in shape (v0.6) — 3 questions open, partly v1** |
 | D21 | Shim injection | **NEW (v0.5) — one open question** |
 | D22 | Job sources | **NEW (v0.5) — two open questions** |
 | N1 | Non-goals | AGREED |
@@ -165,8 +210,11 @@ comfortable building against, and D3 is v1.1 anyway. The items wanting input —
 P3, D17's sub-question, D18, D19, D20, D21 — can be answered while code is being
 written, with two exceptions worth naming:
 
-- **D20's constraint list should be agreed before any node code exists**, since
-  the constraints are the design rather than a detail of it.
+- ~~D20's constraint list should be agreed before any node code exists~~ —
+  **settled in v0.6.** C1–C12 are agreed in shape, and three questions remain
+  (C6's default, duplicate labels, and whether `runs_on` is a selector). Note the
+  consequence: D20 is no longer entirely post-v1, because C11 removes the
+  non-distributed path that v1 would otherwise have shipped on.
 - ~~D6's state-size cap~~ — **settled: 64KB**, state arrives in the environment.
 
 Same protocol: type in the `Your response` blocks, save, hand it back. Items marked
@@ -309,6 +357,17 @@ having a network connection rather than a privilege of being a node.
 One machine commonly wears several hats: your phone is a Source always, and a Node
 only while the app is foregrounded. That's why the two concepts stay separate.
 
+**Tenth noun, added in v0.6 from D20: Control plane** — and with it a distinction
+that v0.5 blurred. The system has exactly **three components**: the *control plane*
+(history, scheduling, triggers, state, API; the only writer), the *worker* (runs
+job processes; holds no state), and the *CLI* (renders, and calls the API).
+
+**"Daemon" is not one of them.** It is a *deployment form* — one way a component is
+kept alive on a machine, alongside "container" and "foreground process". Using it
+as a component name is what produced the v0.5 confusion where the daemon was
+simultaneously the core of the system and optional to it. Say which component you
+mean, and separately how it is deployed.
+
 *Naming note:* **node** collides with Kubernetes' node, and D19 puts this project
 next to a cluster. When ambiguous, say *engine node* vs *cluster node*. The
 alternative was *device*, rejected because a container acting as an executor is not
@@ -332,6 +391,12 @@ mitigated.
 > *"I like the concept of an executor interface. That means we can grow into what
 > we need... initially testing of jobs can be really fast... I think other job
 > engines often lack this workflow benefit."*
+
+**One correction from D20 (v0.6): the executor is hosted in the worker, not in the
+control plane.** The interface is unchanged and so is everything above — what
+changes is which process calls it. D20/C11 makes this absolute: the control plane
+has no executor at all, so there is exactly one place a job process is ever
+started.
 
 ---
 
@@ -1720,9 +1785,21 @@ the other. Too early to design, but worth writing down so it isn't rediscovered.
 
 ---
 
-### D19. Kubernetes deployment — the local-to-cluster progression — NEW
+### D19. Kubernetes deployment — the local-to-cluster progression — REVISED
 
-**Status:** NEW — react
+**Status:** REVISED (v0.6) — the four-stage progression below collapses to two.
+
+> **v0.6 amendment, read this first.** D20 splits the system into a control plane
+> that never executes and workers that do. That removes the reason stages 0 and 1
+> existed: they treated the laptop as a deployment target. Dev is now `docker
+> compose up`, prod is the same image in a cluster, and **`je service install` is
+> withdrawn** — it registered the control plane natively on a Mac, which is the
+> wrong component to make native. Everything below about *cluster* invariants
+> (`replicas: 1`, RWO storage, explicit `TZ`), git-sourced definitions, and
+> operator visibility stands unchanged and is if anything strengthened, since the
+> local and cluster runtimes are now the same artifact. Open questions 1, 2, 3 and
+> 5 below remain live; **question 4 is superseded by D22**, which answers where
+> definitions come from more generally than a git-or-local mode switch.
 
 **Your observation:**
 
@@ -2076,186 +2153,234 @@ from waiting on D10's cluster-side story.
 
 ---
 
-### D20. Control plane and nodes — capability-based placement — NEW
+### D20. Control plane and workers — universal execution — REVISED
 
-**Status:** NEW — react. **This item must be agreed before any of it is built**;
-the constraints below are the design, not an implementation detail of it.
+**Status:** REVISED (v0.6) — **AGREED in shape**, three questions open. Partially
+on the v1 critical path, which is a change from v0.5.
 
-**Your position:**
+**Your position (v0.6), which is the change:**
 
-> *"I think you should have one control plane for JE...and multiple data planes
-> (workers). One source of truth...or at least the ability to find the truth in one
-> place... we just have to define the constraints of the system up front and figure
-> out which ones we are willing to accept."*
+> *"The control plane is job history, scheduling, triggers... all those things. But
+> it feels like a runner should be another thing... we set up the control plane...
+> but then we have workers that talk to the control plane. The workers are the
+> things that I set up on my Mac... they know how to talk to Shortcuts, whatever.
+> If I have another set of jobs that can run on the Kube cluster, those go to a
+> worker on the Kube cluster."*
 
-**Why this opened.** D19 moves the engine off the Mac, and in doing so makes an
-entire class of job permanently impossible. Apple Shortcuts is the clean example:
-it's not a preference, a Linux container physically cannot run one. Same for
-anything touching your local weather station, your local filesystem, or a device on
-your LAN. Either that capability is gone forever, or something Mac-side executes.
+> *"The worker seems like the thing that could be deployed with either Docker or
+> launchd/systemd... but the control plane is pretty much a Docker image that runs
+> on a cluster, or locally on my machine while we are testing."*
 
-**The alternative I proposed and you rejected, recorded because the reasoning
-matters:** run a second `je` on the Mac and federate the two by `je emit`. Zero new
-architecture, works today. It fails on **P1** — two databases means two timelines,
-and "what happened last night" stops having a single answer. P1 is the founding
-constraint of this document, so it wins. Noting it here so it isn't re-proposed as a
-shortcut in six months.
+**What changed from v0.5, in one sentence: the control plane never executes.**
 
-**Vocabulary (F1, ninth noun).** The data plane members are **nodes**, and *worker*
-is a **role** a node plays, not the entity itself. This matters because the same
-machine is often two things at once: your phone is a **Source** whenever it emits
-`location.arrived` — no session, no registration, per D16 — and a **Node** only
-while the app is foregrounded and holding a connection. Emission must never require
-a session; an iOS app can't hold one in the background, so coupling the two would
-break the location case outright. See F1 for the full distinction.
+v0.5 kept the engine's in-process executor and added nodes *alongside* it, as an
+optional capability for Mac-only work. That was the mistake. It leaves two
+execution paths — in-process and remote — with separate behaviour for logs,
+timeouts, cancellation, and failure, forever. The remote one would be the rare,
+under-exercised path, which is to say the one that breaks at 3am.
 
-**Second, a correction to something in the discussion: node liveness is not
-consensus.** Consensus is required when several parties must agree on a value with
-no trusted authority. Here there *is* one — the control plane is the sole writer to
-SQLite and is correct by definition. No election, no quorum, no Raft. Liveness is a
-lease with a timeout, decided unilaterally.
+Making execution universal means there is **one** path, exercised by every run, by
+every user, from the first day. The distributed path is never the exotic one
+because there is no other kind.
 
-There is exactly one genuinely hard problem, and no algorithm solves it: **when a
-node stops heartbeating, "it died" and "it's partitioned and still running your job"
-are indistinguishable.** That ambiguity is inherent to the network, not to our
-design. It gets resolved by policy — C6 — and that is the constraint that actually
-requires your consent.
+#### The three components
+
+This replaces "daemon" as the organising noun. That word is a **deployment form,
+not a component**, and v0.5 oversold it:
+
+> *"Daemon is a worker... but it doesn't have to be (it can be Docker), so we
+> shouldn't oversell on the word daemon."*
+
+| Component | What it is | Holds state? | Form factor |
+|---|---|---|---|
+| **Control plane** | history, scheduling, triggers, state, the API | yes — the SQLite file, and it is the only writer | one Docker image, everywhere |
+| **Worker** | runs job processes, relays logs and protocol channels | no | container, launchd/systemd service, or foreground process |
+| **CLI** | renders, and calls the API | no | a binary on whatever machine you're typing at |
+
+"Daemon" survives only as an adjective for *how* a worker or control plane happens
+to be kept alive on a particular machine. `je serve` in a terminal, a launchd
+agent, and a container are three deployment forms of the same component, and none
+of them is a fourth concept.
+
+**Why the control plane has exactly one form factor.** It is a database, a
+scheduler, and an HTTP API. Nothing about it cares which OS it is on, so nothing
+about it justifies the launchd/systemd platform matrix v0.5 built. The worker is
+the component that must live where the work is — that is its entire purpose — so
+it is the component that legitimately earns a deployment matrix.
+
+**This also resolves the `FROM scratch` tension in D19.** A control plane image
+with no Python, no Node, no shell is now *correct* rather than a limitation,
+because it never runs your code. The job runtime belongs in the worker image,
+which is the job author's concern, which is where it should have been.
 
 #### The constraints
 
-**C1. One writer.** Nodes never touch the database, never schedule, never decide.
-Everything goes through the API. The control plane is a single point of failure —
-but it already is (one SQLite file, `replicas: 1` per D19), so this introduces no
-new failure mode.
+C1–C10 stand as agreed in v0.5. Universal execution changes the weight of four of
+them and adds two.
 
-**C2. Nodes are stateless and disposable.** All durable state lives in the control
-plane. A restarting node loses nothing but its in-flight runs. No node-side
-database, no sync protocol, no reconciliation. This is the constraint that keeps
-this from becoming a distributed system.
+**C1. One writer.** Unchanged, and strengthened: workers never touch the database,
+never schedule, never decide. Everything goes through the API.
 
-**C3. Jobs are pinned, not placed.** A job declares a capability label —
-`runs_on: macos` — and runs go to a node advertising it *and* carrying the execute
-role. No work stealing, no rebalancing, no load-aware scheduling. Every expensive
-piece of distributed execution machinery exists because work is *fungible*; here it
-isn't, so none of it is needed.
+**C2. Workers are stateless and disposable.** All durable state lives in the
+control plane. A restarting worker loses nothing but its in-flight runs. No
+worker-side database, no sync protocol, no reconciliation. This is the constraint
+that keeps this from becoming a distributed system.
 
-**C4. Nodes dial out.** The node opens a long-lived connection to the control plane
-and holds it. No inbound ports on the node, no service discovery, no registry to
-maintain, and it works from a laptop on cellular behind CGNAT. This one constraint
-deletes an entire category of infrastructure, and it's the same pull-not-push
-reasoning that made git sync the right shape in D19.
+**C3. Jobs are pinned, not placed — and `runs_on` now has a default.** A job
+declares a capability label and runs go to a worker advertising it. Under
+universal execution every job needs one, so the schema needs `runs_on: default`
+as the implicit value or the first-job experience is a validation error. Note this
+still satisfies D19's R1: `macos` is a *capability*, not a Kubernetes-shaped field,
+and it means the same thing on a laptop and in a cluster.
 
-**C5. Liveness is a lease, not an election.** The node heartbeats on the open
-stream; the control plane expires the lease on its own clock. Note that liveness
-governs *roles*, not emission — a node going offline stops job dispatch and
-attention delivery, and has no effect whatsoever on that machine's ability to emit
-events as a Source (F1, D16).
+**C4. Workers dial out.** The worker opens a long-lived connection to the control
+plane and holds it. No inbound ports, no service discovery, no registry, and it
+works from a laptop on cellular behind CGNAT. **The colocated system worker (C12)
+dials out too**, rather than getting a private in-process shortcut — that is what
+keeps C4 to one code path instead of two.
 
-**C6. The uncertainty window is a per-job policy.** Since dead and partitioned
-cannot be distinguished, the job declares its tolerance:
+**C5. Liveness is a lease, not an election.** Unchanged in design, but **now on the
+v1 critical path**, because there is no longer a non-distributed fallback to ship
+without it.
 
-- `on_node_lost: fail` — **at-most-once.** Run marked lost, surfaced in
-  `--attention`, a human decides. Correct for anything non-idempotent.
-- `on_node_lost: retry` — **at-least-once.** Handed to D7's retry logic, may
-  execute twice. Correct for idempotent work.
+**C6. The uncertainty window is a per-job policy.** `on_node_lost: fail`
+(at-most-once, correct for anything non-idempotent) or `retry` (at-least-once,
+correct for idempotent work). Universal execution raises the stakes here: this
+policy now applies to *every* job rather than to the Mac-only ones. The default
+must be `fail`, since a silent double-execution is the surprising failure and a
+surfaced stuck run is the safe one.
 
-There is no third option. Any system claiming otherwise is hiding the choice rather
-than solving it; making it explicit per job is the honest version, and it's
-consistent with D7 already treating re-runs as a declared policy rather than a
-default.
+**C7. Fencing on reconnect.** A worker whose lease expired is told on reconnect
+that its claim was revoked; it kills the process and discards results. Bounds C6's
+window to the partition duration; does not eliminate it, because nothing can.
 
-**C7. Fencing on reconnect.** A node whose lease expired is told on reconnect that
-its claim was revoked; it kills the process and discards results. This doesn't
-eliminate the C6 window — nothing can — but it bounds it to the partition duration
-and prevents a late result from writing state after the control plane has moved on.
-
-**C8. An offline node produces a visible waiting state, never a silent backlog.**
-`waiting for node: macos (offline 4h)` in `je status --attention` (P1). And a
-schedule that fires while no node advertises the label follows **D9's existing
-catch-up policy** — a closed laptop is precisely the sleep problem D9 already
-solves, simply relocated. No new semantics required, which is a good sign the model
-is right.
+**C8. An idle control plane is loud, not quiet.** v0.5 required a visible waiting
+state for an offline node. Universal execution makes this the single most important
+diagnostic in the system: **a control plane with no worker attached runs nothing at
+all**, and it must say so at the top of `je status`, not as a subtle row. This is
+P1's most direct application in the whole document — the failure it prevents is
+exactly the one we found in the CLI's silent daemonless fallback, which reported
+history cheerfully while nothing had fired since midnight.
 
 **C9. Everything streams through the control plane.** Logs, events, run state. One
-place to look; D12 is unchanged from your side. The cost is a network hop and
-buffering when a stream drops.
+place to look. The cost is a network hop and buffering when a stream drops — and
+under universal execution that hop is now in the local development loop, so its
+latency is a developer-experience concern rather than a remote-debugging one.
 
-**C10. Version skew is refused, loudly.** A node whose version doesn't match the
-control plane refuses to register and says why. Cheaper than protocol negotiation
-and more honest than silent incompatibility. **This applies to the session, not to
-emission** — an old phone build can always still emit, because a Source has no
-version to skew (F1).
+**C10. Version skew is refused, loudly.** Unchanged, and cheaper than it looks in
+practice: `je worker` shipping in the same binary as `je serve` means dev has no
+skew to manage.
 
-#### What a node looks like
+**C11 — NEW. The control plane never executes.** No in-process executor, no
+"just this once" local path, no `--local` escape hatch. The moment one exists,
+every semantic in C5–C9 acquires a second implementation and the guarantees stop
+being guarantees. This is the constraint the rest of the item rests on, and it is
+the one that must not be relaxed later for convenience.
 
-```
-$ je nodes
-NAME      ROLES              LABELS       SESSION
-macbook   execute, receive   macos        online 4d
-imac      execute            macos        offline 4h
-iphone    receive            ios          online (foreground)
-```
+**C12 — NEW. A control plane ships with a system worker.**
 
-The phone appears here only while foregrounded — and its location events keep
-arriving regardless, because those come in as a Source. Two facts about one device,
-which is exactly why *worker* was the wrong name for the row.
+> *"No reason why we can't have the Docker Compose or Kube setup spin up the
+> control plane and a system worker."*
 
-#### What remains a non-goal
+Correct, and it solves the P2 problem cleanly. The engine's own work is jobs
+(retention, compaction) — but if the control plane cannot execute, a deployment
+with no worker would slowly stop maintaining itself. So the `compose.yaml` and the
+Kubernetes manifests ship a worker advertising `default` alongside the control
+plane, as one unit. It is an ordinary worker with no privileges, not a carve-out in
+C11: P2 stays intact, the engine's own jobs go through the same dispatch, lease,
+and log path as everyone else's, and they are visible in the same timeline.
 
-Work stealing, autoscaling, node-to-node communication, multi-region placement,
-and — stated explicitly because it's the one people assume — **control plane HA.**
-No failover, no leader election, no standby. If the control plane is down, nothing
-runs and you can see that it's down. Accepting that is precisely what keeps C5 from
-becoming consensus.
+The alternative — exempting engine-internal work from the executor — was rejected
+because it reintroduces C11's second path through the back door, for the jobs
+least likely to be watched.
 
-#### The two things that are still real work
+#### Deployment, and what it costs the first five minutes
 
-These are not hidden by the constraints above, and they're where the time will go:
+The honest cost of universal execution is that **two things must be running before
+anything happens**, immediately after we spent a design round reducing first-run
+friction. Three mitigations, and you named the third:
 
-- **Secrets reaching the node (D10).** The same unsolved problem D19 flagged for
-  the cluster, and the harder half of it. A job referencing a secret by name must
-  work in both places without the definition changing (D19's R1).
-- **D6's job protocol over a network.** `JOB_EVENTS_FILE` is a local file. The node
-  should relay it — the job's contract stays byte-identical whether it runs locally
-  or remotely — rather than the protocol growing a network path. That keeps D6
-  unchanged, which is worth some implementation awkwardness in the node.
+1. **One artifact.** `je serve` and `je worker` are subcommands of the same binary.
+   One thing to download, one version, C10 satisfied for free in development.
+2. **One command in the normal case.** `compose.yaml` brings up the control plane
+   and its system worker together (C12). `docker compose up` is still one command.
+3. **The CLI bootstraps a trial.**
 
-Everything else on the constraint list is a table, a timeout, and a long-lived
-HTTP stream.
+> *"#2 can still be easy in a trying-out phase, where the CLI could help us set up
+> both real quick on our current environment."*
 
-#### Sequencing
+So `je quickstart` (name open) starts a control plane and a worker appropriate to
+the machine it is run on and prints where they are. **This does not contradict the
+dumb-CLI rule from D15**, and the distinction is worth stating because it will come
+up again: the CLI is *provisioning* components, not *operating* the system. Once
+they are up it goes back to being a pure client, and there is no CLI path that
+reads or writes the database. Setup is not control.
 
-Not v1. **N2's definition of done doesn't move**, and job #1 must not need a node.
-The failure mode to avoid is building node infrastructure before a real job demands
-it, then shaping jobs around the infrastructure. Write the first genuinely Mac-only
-job, feel the gap, then build this against a concrete case.
+#### What v1 owes this, revised
 
-What v1 owes it is small and mostly already true: the control plane owns all state
-(C1) and the engine core is a library with the daemon as a thin wrapper (D18) — the
-execute role is then largely the same executor code with a different source of work.
+v0.5 said "not v1" and that no longer holds. Universal execution means the session
+protocol is v1 scope: **dispatch, heartbeat, and log streaming (C4, C5, C9) must
+work before v1 ships**, because nothing runs without them.
 
-**Open questions for you:**
+What can still be deferred, and should be:
 
-1. C6 is the one requiring real consent: are you comfortable with per-job
-   `on_node_lost`, defaulting to `fail` (at-most-once) since it's the safe default
-   and the surprising failure is a silent double-execution?
-2. What happens when **two nodes advertise the same label**? Options: pick either
-   (simplest, and fine when they're genuinely equivalent), or refuse to start with
-   an error (safest, catches the accidental second laptop). I lean refuse — an
-   unintended duplicate node is far more likely than a deliberate pair.
-3. Is `runs_on` a single label or a selector (`runs_on: [macos, has-gpu]`)? Single
-   is simpler and covers everything you've described; a selector is hard to remove
-   later.
-4. Is the command `je node` in the same binary, or a separate small binary? Same
-   binary means one artifact and no version-skew ambiguity (C10); separate means the
-   thing on your laptop is smaller and can't accidentally be started as a daemon.
-   (Note the iOS case doesn't get a choice — that's app code either way, which is an
-   argument for the session protocol being simple enough to reimplement.)
-5. **Is `node` the right word**, given it collides with Kubernetes and D19 puts this
-   next to a cluster? Alternatives considered and rejected: *worker* (names only one
-   role), *device* (wrong for a container), *agent* (badly overloaded now), *peer*
-   (implies equality that C1 denies). F1 records the reasoning; easy to change now
-   and hard once it's in the CLI and the iOS app.
+- **C6's `retry` policy.** Ship `fail` only. It is the safe default and the second
+  option is additive.
+- **Multi-worker placement.** One worker per label, refuse duplicates (see open
+  question 2). Work stealing and rebalancing remain non-goals permanently.
+- **The Mac worker itself.** Still driven by a real Mac-only job, not built ahead
+  of one. The difference from v0.5 is that adding it becomes a deployment step
+  rather than an architectural change, because the protocol it speaks is already
+  the one every run uses.
+
+#### Impacts on existing items
+
+- **D19's four-stage table collapses to two.** Stage 0 (bare binary) and stage 1
+  (launchd daemon) existed because the laptop was treated as a deployment target.
+  Dev is `docker compose up`; prod is the same image in a cluster. R1 stops being
+  a discipline we maintain and becomes true by construction, because the local and
+  cluster runtimes are the same artifact.
+- **`je service install` is withdrawn from v1**, and `internal/service` with it.
+  It registered the *control plane* on a laptop, which under this model is the
+  wrong component to make native. The code is not wasted — it moves to the worker
+  and shrinks, because it will be registering a stateless dialer rather than an
+  engine.
+- **D1 needs one correction:** the process executor runs *in the worker*, not in
+  the engine. The interface is unchanged; its host moves.
+- **D18 (embedding) is unaffected** and slightly improved: the control plane is a
+  smaller library when it carries no executor.
+- **D10 (secrets) gets harder and more urgent**, which was already true and is now
+  on the critical path — a secret must reach a worker on another machine without
+  the job definition changing (R1). Still the largest unsolved item in Part 5.
+- **D6 is unchanged**, per the v0.5 rule: the worker relays `JOB_EVENTS_FILE`
+  locally so the job's contract stays byte-identical wherever it runs.
+
+#### The one thing that would invalidate this
+
+If jobs touching your Mac are a **v1** requirement rather than v1.x, then the Mac
+is a deployment target and native-first is right — Docker becomes the secondary
+path and D19's stages come back. Everything above assumes the Mac is where you
+*develop and debug*, and the cluster is where things run. Worth confirming
+explicitly, because it is the assumption the whole item stands on.
+
+**Open questions for you (v0.5 questions 1, 2, 3 still stand; 4 and 5 are now
+answered):**
+
+1. **C6:** comfortable with per-job `on_node_lost` defaulting to `fail`, now that
+   it applies to every job rather than only the remote ones?
+2. **Two workers advertising the same label** — pick either, or refuse and error?
+   I still lean refuse: an accidental second laptop is far likelier than a
+   deliberate pair, and C1 gives us no reason to want two.
+3. **Is `runs_on` a single label or a selector** (`runs_on: [macos, has-gpu]`)?
+   Single covers everything described so far and is hard to add to later; a
+   selector is hard to remove later.
+4. ~~Same binary or separate?~~ **Answered: same binary** (C10, and one artifact
+   for the trial path).
+5. ~~Is `node` the right word?~~ **Answered: worker**, for the execute role, with
+   *node* retained for a machine holding a session — your phone is a node with the
+   `receive` role and runs nothing. Both words survive with that relationship; the
+   v0.5 objection that *worker* names only one role is handled by keeping *node*
+   for the row in `je nodes`.
 
 **Your response:**
 
@@ -2345,6 +2470,10 @@ control plane stays the sole writer. Terminology also moved on: the entity is a
   **capability-based placement**: a job pinned to a node because only that machine
   can run it at all (Apple Shortcuts, a device on your LAN). That needs a lease and
   a heartbeat, but not consensus, because one control plane remains the sole writer.
+  *(v0.6: "not v1" no longer holds for the mechanism. D20/C11 makes every run go to
+  a worker, so dispatch, lease and log streaming are v1 scope. What stays post-v1 is
+  the **Mac** worker specifically, and every fungible-scale item above stays out
+  permanently.)*
 - **Multi-user / auth / RBAC.** Binds to localhost — or, per D19, to a trusted
   network. (Revisit if Q1 changes.)
 - **Durable/replayable workflows.** No execution replay. (D5.)
@@ -2371,16 +2500,26 @@ invented ones — see Q2. Feature set:
 - retries, timeouts, overlap policy, concurrency cap
 - SQLite state + logs, with retention
 - **job state / cursors (D14)**
-- **CLI over a local API; daemon registered via `je service install` (D15, D16)**
+- **CLI as a pure API client, with no path to the database of its own (D15, D20)**
+- **control plane + system worker brought up together by `compose.yaml` (D20/C12)**
+- **worker session: dispatch, lease/heartbeat, log streaming (D20/C4, C5, C9)**
 - job definitions as watched YAML files, CLI-editable (D2)
 - **chain files + `JOB_EVENTS_FILE`, with load-time cycle checking, `je chains`
   and `je routes` (D17)**
-- **engine core as a library, daemon as a thin wrapper (D18)**
+- **engine core as a library, the control plane as a thin wrapper (D18)**
 - **the TypeScript shim, and only that one (D21)**
 
 Not in v1: web UI, fan-in triggers (v1.1, schema-ready), TUI, webhook listener,
 notifications beyond a shell hook, secrets beyond the local store, shims for any
-language a real job hasn't asked for yet (D21).
+language a real job hasn't asked for yet (D21), the **Mac worker** and `on_node_lost:
+retry` (D20), and **native service registration** — `je service install` is withdrawn
+in v0.6 and returns around the worker, not the control plane.
+
+**The v1 bar is unchanged**, and it is worth saying plainly that D20 does not move
+it: weather ingest still has to run unattended for two weeks. What changed is that
+it now runs on the system worker rather than inside the control plane, which is a
+deployment detail from the job's point of view and no change at all to its
+definition (D19/R1).
 
 > *"I have my mac app (Almanac) on this machine — one of the things it does is
 > weather data that it pulls from my local weather station. I wonder if that
