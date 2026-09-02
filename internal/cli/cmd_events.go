@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"text/tabwriter"
 	"time"
+
+	"github.com/jdmorlan/job-engine/internal/engine"
+	"github.com/jdmorlan/job-engine/internal/model"
 )
 
 func init() {
@@ -28,31 +31,44 @@ func runEvents(ctx context.Context, env *Env, args []string) error {
 		return usagef("unexpected argument %q", extra[0])
 	}
 
-	client, err := Connect(env.Layout)
-	if err != nil {
-		return adviseNoDaemon(err)
-	}
-	ctx, cancel := withTimeout(ctx)
-	defer cancel()
-
-	events, err := client.Events(ctx, *limit)
-	if err != nil {
-		return adviseNoDaemon(err)
-	}
-	if len(events) == 0 {
-		fmt.Fprintln(env.Stdout, "no events yet")
-		return nil
-	}
-
-	tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tWHEN\tTYPE\tSOURCE\tPAYLOAD")
-	for _, e := range events {
-		payload := string(e.Payload)
-		if payload == "" {
-			payload = "-"
+	// Reads go through the embedded engine in stage 0, the same as `je jobs`,
+	// `je runs` and `je state`. See the note on withEngine: once the API has
+	// endpoints for these, every read routes through the daemon when one is
+	// running and falls back to embedded when it is not.
+	return withEngine(ctx, env, func(ctx context.Context, eng *engine.Engine) error {
+		events, err := eng.RecentEvents(ctx, *limit)
+		if err != nil {
+			return err
 		}
-		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\n",
-			e.ID, e.CreatedAt.Local().Format(time.DateTime), e.Type, e.Source, payload)
+		if len(events) == 0 {
+			fmt.Fprintln(env.Stdout, "no events yet")
+			return nil
+		}
+
+		tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(tw, "ID\tWHEN\tTYPE\tSOURCE\tCAUSE\tPAYLOAD")
+		for _, e := range events {
+			payload := string(e.Payload)
+			if payload == "" {
+				payload = "-"
+			}
+			fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\n",
+				e.ID, e.CreatedAt.Local().Format(time.DateTime), e.Type, e.Source,
+				causeOf(e), truncate(payload, 40))
+		}
+		return tw.Flush()
+	})
+}
+
+// causeOf renders what an event came from, which is the first hop of the
+// causation chain `je why` will later print in full (D12).
+func causeOf(e model.Event) string {
+	switch {
+	case e.CausedByRunID != nil:
+		return fmt.Sprintf("run %d", *e.CausedByRunID)
+	case e.CausedByEventID != nil:
+		return fmt.Sprintf("event %d", *e.CausedByEventID)
+	default:
+		return "-"
 	}
-	return tw.Flush()
 }

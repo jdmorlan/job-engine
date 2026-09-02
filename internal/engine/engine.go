@@ -50,6 +50,10 @@ type Engine struct {
 	store *store.Store
 	lock  *lockfile.Lock
 
+	// started records whether Start ran. A one-shot `je run` with no daemon
+	// (D19 stage 0) opens the engine without claiming to be one, and must not
+	// litter the timeline with an engine.started/stopped pair per command.
+	started   bool
 	startedAt time.Time
 	// downtime is how long the engine was stopped before this start, derived
 	// from the last engine.stopped event. Zero on a first-ever start.
@@ -115,6 +119,7 @@ func New(opts Options) (*Engine, error) {
 // catch-up policy needs to decide what to do about the windows we missed.
 func (e *Engine) Start(ctx context.Context) error {
 	e.startedAt = e.now()
+	e.started = true
 
 	lastStop, err := e.store.LastEventOfType(ctx, model.EventEngineStopped)
 	lastStart, startErr := e.store.LastEventOfType(ctx, model.EventEngineStarted)
@@ -140,10 +145,19 @@ func (e *Engine) Start(ctx context.Context) error {
 		return fmt.Errorf("recording engine.started: %w", err)
 	}
 
+	// D5: anything still running or queued in the database is a run we were
+	// killed in the middle of. It becomes `interrupted`, a distinct state from
+	// `failed`, because the job did not fail -- we did.
+	interrupted, err := e.store.InterruptRunning(ctx, e.startedAt)
+	if err != nil {
+		return fmt.Errorf("recovering in-flight runs: %w", err)
+	}
+
 	e.log.Info("engine started",
 		"data_dir", e.opts.Layout.Data,
 		"downtime", e.downtime.Round(time.Second),
-		"unclean_stop", e.uncleanStop)
+		"unclean_stop", e.uncleanStop,
+		"interrupted_runs", interrupted)
 	return nil
 }
 
@@ -153,21 +167,23 @@ func (e *Engine) Start(ctx context.Context) error {
 // still needs to write, and writing with an already-cancelled context would
 // leave exactly the hole in the timeline this event exists to prevent.
 func (e *Engine) Close(ctx context.Context) error {
-	if _, _, err := e.store.AppendEvent(ctx, model.Event{
-		Type:      model.EventEngineStopped,
-		Source:    model.SourceEngine,
-		CreatedAt: e.now(),
-	}); err != nil {
-		// Log and keep going. Failing to record the stop is bad for the
-		// timeline, but refusing to release the lock would be worse.
-		e.log.Error("recording engine.stopped", "error", err)
+	if e.started {
+		if _, _, err := e.store.AppendEvent(ctx, model.Event{
+			Type:      model.EventEngineStopped,
+			Source:    model.SourceEngine,
+			CreatedAt: e.now(),
+		}); err != nil {
+			// Log and keep going. Failing to record the stop is bad for the
+			// timeline, but refusing to release the lock would be worse.
+			e.log.Error("recording engine.stopped", "error", err)
+		}
+		e.log.Info("engine stopped")
 	}
 
 	err := e.store.Close()
 	if lockErr := e.lock.Release(); err == nil {
 		err = lockErr
 	}
-	e.log.Info("engine stopped")
 	return err
 }
 

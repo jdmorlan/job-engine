@@ -129,7 +129,7 @@ architecture), **D16** (daemon lifecycle and generic event ingress).
 | D17 | Chains and topology | AGREED (revised) — one open sub-question |
 | D4 | SQLite | AGREED |
 | D5 | Crash recovery | AGREED |
-| D6 | Job protocol | AGREED (revised v0.5) |
+| D6 | Job protocol | AGREED (revised v0.5, cap settled) |
 | D7 | Retries and re-runs | AGREED |
 | D8 | Timeouts / concurrency | AGREED |
 | D9 | Schedules | AGREED |
@@ -157,9 +157,7 @@ written, with two exceptions worth naming:
 
 - **D20's constraint list should be agreed before any node code exists**, since
   the constraints are the design rather than a detail of it.
-- **D6's state-size cap is on the critical path for job #1.** Passing state in the
-  environment caps it at 64KB; keeping it in a file allows 1MB. It is one line
-  either way today and a protocol change once the weather job depends on it.
+- ~~D6's state-size cap~~ — **settled: 64KB**, state arrives in the environment.
 
 Same protocol: type in the `Your response` blocks, save, hand it back. Items marked
 AGREED with no block are locked; type under one to reopen it.
@@ -904,10 +902,12 @@ Full v1 environment: `JOB_ID`, `RUN_ID`, `ATTEMPT`, `TRIGGERED_BY`,
 **Your response (v0.5, on the state size cap):**
 
 ```
-
-
-
+64kb is fine
 ```
+
+**Resolution.** Locked at 64KB. State arrives in `JE_STATE`; there is no state
+input file. A cursor that outgrows 64KB wants a real table in the job's own
+store, and the engine will say so rather than silently truncating.
 
 ---
 

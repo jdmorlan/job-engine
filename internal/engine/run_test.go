@@ -1,0 +1,366 @@
+package engine_test
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/jdmorlan/job-engine/internal/engine"
+	"github.com/jdmorlan/job-engine/internal/model"
+	"github.com/jdmorlan/job-engine/internal/paths"
+)
+
+// jobFixture writes a job file into a fresh data directory and returns an
+// engine with it loaded.
+//
+// Jobs are /bin/sh scripts rather than Python or Node so the tests depend on
+// nothing that might be missing from a build machine.
+func jobFixture(t *testing.T, name, script string, extra ...string) (*engine.Engine, paths.Layout) {
+	t.Helper()
+
+	dir := t.TempDir()
+	layout := paths.Layout{Data: dir, Jobs: filepath.Join(dir, "jobs")}
+	if err := os.MkdirAll(layout.Jobs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	body := fmt.Sprintf("command: [\"/bin/sh\", \"-c\", %q]\n", script)
+	for _, line := range extra {
+		body += line + "\n"
+	}
+	if err := os.WriteFile(filepath.Join(layout.Jobs, name+".yaml"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	e := newEngine(t, layout, nil)
+	t.Cleanup(func() { e.Close(context.Background()) })
+
+	if _, err := e.LoadFromDisk(context.Background()); err != nil {
+		t.Fatalf("loading definitions: %v", err)
+	}
+	return e, layout
+}
+
+func TestSuccessfulRunCommitsEverything(t *testing.T) {
+	ctx := context.Background()
+	script := `
+		echo "hello from the job"
+		echo '{"since":"2026-09-02T10:00:00Z"}' > "$JOB_STATE_OUT_FILE"
+		echo '{"rows":41}' > "$JOB_OUTPUT_FILE"
+		echo '{"type":"weather.ingested","payload":{"count":41}}' >> "$JOB_EVENTS_FILE"
+	`
+	e, _ := jobFixture(t, "ingest", script)
+
+	result, err := e.RunJob(ctx, "ingest", engine.RunOptions{Actor: "tester"})
+	if err != nil {
+		t.Fatalf("RunJob: %v", err)
+	}
+	if result.Run.Status != model.StatusSucceeded {
+		t.Fatalf("status = %s, error = %s", result.Run.Status, result.Run.Error)
+	}
+
+	if result.StateOut == nil {
+		t.Fatal("cursor did not move on a successful run")
+	}
+	if got := result.StateOut.Summary("since"); got != "2026-09-02T10:00:00Z" {
+		t.Errorf("cursor = %q", got)
+	}
+	if string(result.Output) != `{"rows":41}` {
+		t.Errorf("output = %s", result.Output)
+	}
+	if len(result.Emitted) != 1 || result.Emitted[0].Type != "weather.ingested" {
+		t.Fatalf("emitted = %+v", result.Emitted)
+	}
+	// An emitted event inherits the run's causation, so the chain stays intact
+	// without the job doing anything (D17).
+	if result.Emitted[0].CausedByRunID == nil || *result.Emitted[0].CausedByRunID != result.Run.ID {
+		t.Error("emitted event is not attributed to the run that emitted it")
+	}
+
+	lines, err := e.Logs(ctx, result.Run.ID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lines) != 1 || lines[0].Line != "hello from the job" {
+		t.Errorf("logs = %+v", lines)
+	}
+}
+
+func TestFailedRunCommitsNothing(t *testing.T) {
+	ctx := context.Background()
+	// The job does all three things and then fails. None may survive. This is
+	// the bug class D14 exists to eliminate: a failure that still advances the
+	// cursor silently skips every record in between.
+	script := `
+		echo '{"since":"2099-01-01T00:00:00Z"}' > "$JOB_STATE_OUT_FILE"
+		echo '{"rows":1}' > "$JOB_OUTPUT_FILE"
+		echo '{"type":"should.not.exist","payload":{}}' >> "$JOB_EVENTS_FILE"
+		exit 3
+	`
+	e, _ := jobFixture(t, "flaky", script)
+
+	result, err := e.RunJob(ctx, "flaky", engine.RunOptions{})
+	if err != nil {
+		t.Fatalf("RunJob: %v", err)
+	}
+	if result.Run.Status != model.StatusFailed {
+		t.Fatalf("status = %s, want failed", result.Run.Status)
+	}
+	if result.StateOut != nil {
+		t.Errorf("cursor advanced on a failed run to %s", result.StateOut.Value)
+	}
+	if len(result.Output) != 0 {
+		t.Errorf("output was kept from a failed run: %s", result.Output)
+	}
+	if len(result.Emitted) != 0 {
+		t.Errorf("events were emitted from a failed run: %+v", result.Emitted)
+	}
+
+	// The cursor in the database is still only the seed.
+	history, err := e.StateHistory(ctx, result.Job.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history) != 1 {
+		t.Fatalf("state has %d versions after a failed run, want only the seed", len(history))
+	}
+
+	events, err := e.RecentEvents(ctx, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ev := range events {
+		if ev.Type == "should.not.exist" {
+			t.Fatal("an event from a failed run reached the log")
+		}
+	}
+}
+
+func TestCursorIsSeededOnFirstRun(t *testing.T) {
+	ctx := context.Background()
+	// The job just echoes what it was given, and never sets state.
+	e, _ := jobFixture(t, "seeded", `echo "$JE_STATE"`,
+		"state:", "  primary_cursor: watermark")
+
+	result, err := e.RunJob(ctx, "seeded", engine.RunOptions{})
+	if err != nil {
+		t.Fatalf("RunJob: %v", err)
+	}
+	if result.StateIn == nil {
+		t.Fatal("no state was supplied to the job")
+	}
+
+	var seeded map[string]string
+	if err := json.Unmarshal(result.StateIn.Value, &seeded); err != nil {
+		t.Fatal(err)
+	}
+	ts, ok := seeded["watermark"]
+	if !ok {
+		t.Fatalf("seed does not use the declared primary cursor: %s", result.StateIn.Value)
+	}
+	if _, err := time.Parse(time.RFC3339, ts); err != nil {
+		t.Errorf("seed %q is not a timestamp: %v", ts, err)
+	}
+
+	// The seed is a seed, never a maintained value: a run that does not set
+	// state leaves the cursor exactly where it was.
+	if result.StateOut != nil {
+		t.Error("the engine advanced the cursor by itself")
+	}
+
+	second, err := e.RunJob(ctx, "seeded", engine.RunOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(second.StateIn.Value) != string(result.StateIn.Value) {
+		t.Errorf("the seed moved between runs: %s then %s",
+			result.StateIn.Value, second.StateIn.Value)
+	}
+
+	// And it is stored, so its origin is visible in the history rather than
+	// being magic (P1).
+	history, err := e.StateHistory(ctx, result.Job.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history) != 1 || history[0].SetByActor != "engine" {
+		t.Errorf("seed is not recorded as an engine commit: %+v", history)
+	}
+}
+
+func TestLastSuccessAtIsServedButNotOnTheFirstRun(t *testing.T) {
+	ctx := context.Background()
+	e, _ := jobFixture(t, "reporter", `echo "last=${JE_LAST_SUCCESS_AT:-never}"`)
+
+	first, err := e.RunJob(ctx, "reporter", engine.RunOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := logText(t, e, first.Run.ID, 1); got != "last=never" {
+		t.Errorf("first run saw %q, want last=never", got)
+	}
+
+	second, err := e.RunJob(ctx, "reporter", engine.RunOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := logText(t, e, second.Run.ID, 1)
+	if !strings.HasPrefix(got, "last=2") {
+		t.Errorf("second run saw %q, want a timestamp", got)
+	}
+}
+
+func TestTimeoutIsDistinctFromFailure(t *testing.T) {
+	ctx := context.Background()
+	// D8 keeps timed_out separate from failed because they call for different
+	// responses: one is a slow job, the other is a broken one.
+	e, _ := jobFixture(t, "slow", `sleep 30`, "timeout: 300ms")
+
+	start := time.Now()
+	result, err := e.RunJob(ctx, "slow", engine.RunOptions{})
+	if err != nil {
+		t.Fatalf("RunJob: %v", err)
+	}
+	elapsed := time.Since(start)
+
+	if result.Run.Status != model.StatusTimedOut {
+		t.Errorf("status = %s, want timed_out", result.Run.Status)
+	}
+	if !result.TimedOut {
+		t.Error("result does not report the timeout")
+	}
+	// Generous, but it must be nowhere near the 30s the job asked to sleep for.
+	if elapsed > 15*time.Second {
+		t.Errorf("timeout took %s to take effect", elapsed)
+	}
+}
+
+func TestMalformedEventsFileFailsTheRunWithoutCommitting(t *testing.T) {
+	ctx := context.Background()
+	// Everything is parsed before anything is written, so a bad events line
+	// cannot leave a committed cursor behind. This is the atomicity that
+	// separate channels make possible.
+	script := `
+		echo '{"since":"2026-09-02T10:00:00Z"}' > "$JOB_STATE_OUT_FILE"
+		echo '{"type":"fine","payload":{}}' >> "$JOB_EVENTS_FILE"
+		echo 'not json at all' >> "$JOB_EVENTS_FILE"
+	`
+	e, _ := jobFixture(t, "badevents", script)
+
+	result, err := e.RunJob(ctx, "badevents", engine.RunOptions{})
+	if err != nil {
+		t.Fatalf("RunJob: %v", err)
+	}
+	if result.Run.Status != model.StatusFailed {
+		t.Fatalf("status = %s, want failed", result.Run.Status)
+	}
+	// P1: the error must name the line, not just the file.
+	if !strings.Contains(result.Run.Error, "line 2") {
+		t.Errorf("error does not name the offending line: %q", result.Run.Error)
+	}
+	if result.StateOut != nil {
+		t.Error("the cursor was committed despite a malformed events channel")
+	}
+}
+
+func TestOversizedStateIsRejected(t *testing.T) {
+	ctx := context.Background()
+	// 64KB is the cap, because state travels in the environment.
+	script := `
+		printf '{"blob":"' > "$JOB_STATE_OUT_FILE"
+		for i in $(seq 1 700); do printf '%0100d' 0 >> "$JOB_STATE_OUT_FILE"; done
+		printf '"}' >> "$JOB_STATE_OUT_FILE"
+	`
+	e, _ := jobFixture(t, "fat", script)
+
+	result, err := e.RunJob(ctx, "fat", engine.RunOptions{})
+	if err != nil {
+		t.Fatalf("RunJob: %v", err)
+	}
+	if result.Run.Status != model.StatusFailed {
+		t.Fatalf("status = %s, want failed", result.Run.Status)
+	}
+	if !strings.Contains(result.Run.Error, "limit") {
+		t.Errorf("error does not explain the cap: %q", result.Run.Error)
+	}
+}
+
+func TestJobEnvironmentIsExactlyTheProtocol(t *testing.T) {
+	ctx := context.Background()
+	// D10: a job must not inherit the engine's environment by accident.
+	t.Setenv("A_SECRET_THE_JOB_MUST_NOT_SEE", "hunter2")
+	e, _ := jobFixture(t, "env", `echo "${A_SECRET_THE_JOB_MUST_NOT_SEE:-absent}"; echo "job=$JOB_ID attempt=$ATTEMPT by=$TRIGGERED_BY"`)
+
+	result, err := e.RunJob(ctx, "env", engine.RunOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines, err := e.Logs(ctx, result.Run.ID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lines) != 2 {
+		t.Fatalf("got %d log lines: %+v", len(lines), lines)
+	}
+	if lines[0].Line != "absent" {
+		t.Errorf("the job inherited an unrelated environment variable: %q", lines[0].Line)
+	}
+	if want := "job=env attempt=1 by=run.requested"; lines[1].Line != want {
+		t.Errorf("protocol variables = %q, want %q", lines[1].Line, want)
+	}
+}
+
+func TestMisconfiguredJobWillNotRun(t *testing.T) {
+	ctx := context.Background()
+	// D10's pit of success: a job declaring a secret that cannot be supplied is
+	// visibly broken rather than failing cryptically at 3am.
+	e, _ := jobFixture(t, "needy", `echo hi`, "secrets: [SOME_TOKEN]")
+
+	if _, err := e.RunJob(ctx, "needy", engine.RunOptions{}); err == nil {
+		t.Fatal("a misconfigured job ran")
+	} else if !strings.Contains(err.Error(), "misconfigured") {
+		t.Errorf("error = %v", err)
+	}
+}
+
+func logText(t *testing.T, e *engine.Engine, runID int64, attempt int) string {
+	t.Helper()
+	lines, err := e.Logs(context.Background(), runID, attempt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts := make([]string, len(lines))
+	for i, l := range lines {
+		parts[i] = l.Line
+	}
+	return strings.Join(parts, "\n")
+}
+
+func TestCancellationIsInterruptedNotFailed(t *testing.T) {
+	// D5 makes `interrupted` a distinct state from `failed` because the job did
+	// not fail -- we did, and those want different responses. It is also what
+	// on_interrupt keys off.
+	e, _ := jobFixture(t, "longrunner", `sleep 30`)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		cancel()
+	}()
+
+	result, err := e.RunJob(ctx, "longrunner", engine.RunOptions{})
+	if err != nil {
+		t.Fatalf("RunJob: %v", err)
+	}
+	if result.Run.Status != model.StatusInterrupted {
+		t.Errorf("status = %s, want interrupted", result.Run.Status)
+	}
+	if result.TimedOut {
+		t.Error("a cancelled run was reported as timed out")
+	}
+}
