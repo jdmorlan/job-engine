@@ -40,6 +40,11 @@ type Options struct {
 
 	// Now exists so tests can control time. Nil means time.Now.
 	Now func() time.Time
+
+	// Concurrency caps how many runs execute at once (D8). Zero means
+	// DefaultConcurrency. It bounds the worker pool, so excess work waits in
+	// the queue rather than being dropped or running anyway.
+	Concurrency int
 }
 
 // Engine owns the database and, once the scheduler exists, the run loop.

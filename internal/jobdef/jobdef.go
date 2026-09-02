@@ -215,6 +215,19 @@ func (d *Definition) Validate() error {
 		if err := s.validate(); err != nil {
 			return fmt.Errorf("on[%d]: %w", i, err)
 		}
+		// These two policies contradict each other, and the contradiction is
+		// silent rather than loud: `all` queues every missed window, and `skip`
+		// then drops all but the first, so `all` quietly behaves like `once`.
+		// Since `skip` is the default overlap, an author writing `catch_up:
+		// all` gets the opposite of what they asked for and no indication.
+		//
+		// Said at load time, where it can still be fixed (D10's pit of
+		// success), rather than discovered from a thin timeline at 3am.
+		if s.CatchUp == CatchUpAll && d.Overlap == OverlapSkip {
+			return fmt.Errorf(
+				"on[%d]: catch_up: all needs overlap: queue -- with overlap: skip "+
+					"(the default) only the first missed window would run", i)
+		}
 	}
 	return nil
 }

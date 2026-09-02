@@ -79,6 +79,12 @@ func (s *Store) JobBySlug(ctx context.Context, slug string) (Job, error) {
 	return scanJob(s.state.QueryRowContext(ctx, selectJob+` WHERE j.name = ?`, slug))
 }
 
+// JobByID looks up one job. Used when executing a claimed run, which knows the
+// id rather than the slug.
+func (s *Store) JobByID(ctx context.Context, id int64) (Job, error) {
+	return scanJob(s.state.QueryRowContext(ctx, selectJob+` WHERE j.id = ?`, id))
+}
+
 // ListJobs returns every loaded job, by slug.
 func (s *Store) ListJobs(ctx context.Context) ([]Job, error) {
 	rows, err := s.state.QueryContext(ctx, selectJob+` ORDER BY j.name`)

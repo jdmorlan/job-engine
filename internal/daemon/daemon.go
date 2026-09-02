@@ -77,6 +77,17 @@ func Run(ctx context.Context, cfg Config) error {
 		return err
 	}
 
+	// Definitions before schedules: the scheduler builds its table from what
+	// is loaded, so an empty load would mean an empty scheduler.
+	if _, err := eng.LoadFromDisk(ctx); err != nil {
+		// A broken job file must not stop the daemon. Every other job should
+		// keep running, and `je jobs` is where the problem is visible (P1).
+		cfg.Logger.Error("loading definitions", "error", err)
+	}
+
+	schedulerDone := make(chan error, 1)
+	go func() { schedulerDone <- eng.RunScheduler(ctx) }()
+
 	// Bind before serving, so that "port already in use" is a startup error
 	// the caller sees rather than something logged after we have claimed to
 	// have started.
@@ -117,6 +128,13 @@ func Run(ctx context.Context, cfg Config) error {
 	select {
 	case err := <-serveErr:
 		return err
+	case err := <-schedulerDone:
+		// The scheduler only returns on cancellation or a failure it cannot
+		// recover from. Either way the daemon has nothing left to do.
+		if err != nil {
+			return fmt.Errorf("scheduler stopped: %w", err)
+		}
+		return nil
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
 		defer cancel()
@@ -124,6 +142,15 @@ func Run(ctx context.Context, cfg Config) error {
 			// Shutdown timed out with requests still in flight. Say so, and
 			// carry on shutting down -- the deferred engine.Close matters more.
 			cfg.Logger.Warn("graceful shutdown timed out", "error", err)
+		}
+		// Wait for in-flight jobs to finish being recorded before the deferred
+		// engine.Close releases the database. Without this, a run that was
+		// executing at shutdown could lose its terminal status -- the hole in
+		// the timeline that `interrupted` exists to fill.
+		select {
+		case <-schedulerDone:
+		case <-time.After(shutdownGrace):
+			cfg.Logger.Warn("scheduler did not stop within the grace period")
 		}
 		return nil
 	}

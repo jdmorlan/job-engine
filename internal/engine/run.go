@@ -22,6 +22,17 @@ const (
 	EventRunRequested = "run.requested"
 	EventRunSucceeded = "run.succeeded"
 	EventRunFailed    = "run.failed"
+
+	// EventRunSkipped records the overlap policy declining to start a run, and
+	// EventScheduleMissed records windows a gap swallowed. Both exist because
+	// D9 insists gaps are explained rather than silent.
+	EventRunSkipped     = "run.skipped"
+	EventScheduleFired  = "schedule.fired"
+	EventScheduleMissed = "schedule.missed"
+
+	// EventScheduleStarted records the engine anchoring a schedule it has
+	// never seen before, so "why did this not backfill?" has an answer.
+	EventScheduleStarted = "schedule.started"
 )
 
 // maxDepth is D3's loop guard: an event caused by a run caused by an event, ten
@@ -67,19 +78,64 @@ type RunResult struct {
 	causeDepth int
 }
 
-// RunJob runs one job to completion and returns what happened.
+// RunJob enqueues a job and runs it immediately, bypassing the queue.
 //
-// The ordering here is the whole of D14's contract and is worth reading as a
-// unit: state is read before the attempt starts and committed only after it
-// succeeds. Everything between those two points can fail without moving the
-// cursor, which is the bug class this engine exists to eliminate.
+// This is the foreground path -- `je run` at a terminal, D19 stage 0 -- where
+// waiting behind the concurrency cap would be surprising: you asked for it now,
+// and there is no scheduler competing for slots.
 func (e *Engine) RunJob(ctx context.Context, slug string, opts RunOptions) (*RunResult, error) {
+	prepared, err := e.Enqueue(ctx, slug, opts)
+	if err != nil {
+		return nil, err
+	}
+	if prepared == nil {
+		return nil, fmt.Errorf("job %s is already running (overlap: skip)", slug)
+	}
+	return e.execute(ctx, *prepared, opts)
+}
+
+// Prepared is a run that exists in the database and is waiting to execute.
+type Prepared struct {
+	Run     store.Run
+	Job     store.Job
+	Def     *jobdef.Definition
+	StateIn store.StateVersion
+	Cause   model.Event
+}
+
+// Enqueue validates a job, records its cause, reads its cursor, and creates a
+// queued run. It does not execute anything.
+//
+// A nil Prepared with a nil error means the overlap policy declined to start
+// this run -- a normal outcome, recorded as an event, not a failure.
+//
+// The split between this and execute exists so the scheduler and the
+// foreground path share one implementation of everything that is easy to get
+// subtly different: which event caused the run, which cursor version it starts
+// from, and what happens when the job is already running.
+func (e *Engine) Enqueue(ctx context.Context, slug string, opts RunOptions) (*Prepared, error) {
 	def, job, err := e.Definition(ctx, slug)
 	if err != nil {
 		return nil, err
 	}
 	if !job.Runnable() {
 		return nil, unrunnable(job)
+	}
+
+	// D8's overlap policy. Checked here rather than at execution time so that
+	// a skipped run never occupies a queue slot, and so the reason is recorded
+	// at the moment the decision is made.
+	if def.Overlap == jobdef.OverlapSkip {
+		active, err := e.store.JobHasActiveRun(ctx, job.ID)
+		if err != nil {
+			return nil, err
+		}
+		if active {
+			if err := e.recordSkipped(ctx, job, "the previous run has not finished (overlap: skip)"); err != nil {
+				return nil, err
+			}
+			return nil, nil
+		}
 	}
 
 	// One timestamp for the whole run. D14 requires every attempt to see the
@@ -103,67 +159,81 @@ func (e *Engine) RunJob(ctx context.Context, slug string, opts RunOptions) (*Run
 		DefinitionHash:    job.DefinitionHash,
 		TriggeringEventID: &cause.ID,
 		StateVersionIn:    &stateIn.Version,
+		Overlap:           string(def.Overlap),
 	})
 	if err != nil {
 		return nil, err
 	}
-	if err := e.store.StartRun(ctx, run.ID, startedAt); err != nil {
+
+	return &Prepared{Run: run, Job: job, Def: def, StateIn: stateIn, Cause: cause}, nil
+}
+
+// execute runs a prepared run to completion.
+//
+// The ordering here is the whole of D14's contract and is worth reading as a
+// unit: the cursor was read before the run existed, and it commits only after
+// the attempt exits zero. Everything between those two points can fail without
+// moving it, which is the bug class this engine exists to eliminate.
+func (e *Engine) execute(ctx context.Context, p Prepared, opts RunOptions) (*RunResult, error) {
+	startedAt := e.now()
+	if err := e.store.StartRun(ctx, p.Run.ID, startedAt); err != nil {
 		return nil, err
 	}
 	// Keep the in-memory copy in step with the row. StartRun writes the
 	// database; without this the returned Run still says it never started and
 	// every duration renders as zero.
-	run.StartedAt = &startedAt
-	run.Status = model.StatusRunning
+	p.Run.StartedAt = &startedAt
+	p.Run.Status = model.StatusRunning
 
 	attempt, err := e.store.CreateAttempt(ctx, store.Attempt{
-		RunID:             run.ID,
-		TriggeringEventID: &cause.ID,
+		RunID:             p.Run.ID,
+		TriggeringEventID: &p.Cause.ID,
 		Actor:             opts.Actor,
-		Executor:          string(def.Runtime),
+		Executor:          string(p.Def.Runtime),
 	})
 	if err != nil {
 		return nil, err
 	}
 
 	result := &RunResult{
-		Run: run, Attempt: attempt, Job: job,
-		StateIn: &stateIn, causeDepth: cause.Depth,
-		PrimaryCursor: def.State.PrimaryCursor,
+		Run: p.Run, Attempt: attempt, Job: p.Job,
+		StateIn: &p.StateIn, causeDepth: p.Cause.Depth,
+		PrimaryCursor: p.Def.State.PrimaryCursor,
 	}
 
 	// The scratch directory holds the three output channels. It is per-attempt
 	// and removed afterwards, which is what makes them a handoff rather than
 	// storage -- the durable copy is the one the engine promotes.
-	scratch, err := os.MkdirTemp("", fmt.Sprintf("je-%s-%d-%d-", job.Slug, run.ID, attempt.Number))
+	scratch, err := os.MkdirTemp("", fmt.Sprintf("je-%s-%d-%d-", p.Job.Slug, p.Run.ID, attempt.Number))
 	if err != nil {
 		return nil, fmt.Errorf("creating scratch directory: %w", err)
 	}
 	defer os.RemoveAll(scratch)
 
 	channels := newChannels(scratch)
-	env, err := e.buildEnv(ctx, job, def, run, attempt, cause, stateIn, channels)
+	env, err := e.buildEnv(ctx, p.Job, p.Def, p.Run, attempt, p.Cause, p.StateIn, channels)
 	if err != nil {
 		return nil, err
 	}
 
-	workdir, err := expandHome(def.Workdir)
+	workdir, err := expandHome(p.Def.Workdir)
 	if err != nil {
 		return nil, err
 	}
 
 	// The same resolved values that went into the environment drive redaction,
 	// so the two cannot drift (D10).
-	resolved, err := e.secrets.Resolve(def.Secrets)
+	resolved, err := e.secrets.Resolve(p.Def.Secrets)
 	if err != nil {
-		return nil, fmt.Errorf("job %s: %w", job.Slug, err)
+		return nil, fmt.Errorf("job %s: %w", p.Job.Slug, err)
 	}
-	sink := newLogSink(e, run.ID, attempt.Number, opts.Live, newRedactor(resolved))
+	sink := newLogSink(e, p.Run.ID, attempt.Number, opts.Live, newRedactor(resolved))
+
 	execResult, execErr := executor.Process{}.Run(ctx, executor.Spec{
-		Command: def.Command,
+		Command: p.Def.Command,
 		Workdir: workdir,
 		Env:     env,
-		Timeout: def.Timeout.D,
+		Timeout: p.Def.Timeout.D,
 		Output:  sink,
 	})
 	sink.Close()
@@ -198,10 +268,26 @@ func (e *Engine) RunJob(ctx context.Context, slug string, opts RunOptions) (*Run
 
 	// Success. Promote the three channels, in an order chosen so that a
 	// malformed file fails the run before anything is committed.
-	if err := e.promote(finishCtx, result, def, channels); err != nil {
+	if err := e.promote(finishCtx, result, p.Def, channels); err != nil {
 		return result, e.finish(finishCtx, result, model.StatusFailed, execResult, err.Error())
 	}
 	return result, e.finish(finishCtx, result, model.StatusSucceeded, execResult, "")
+}
+
+// recordSkipped notes that the overlap policy declined to start a run.
+//
+// D9 and P1 both demand this: a job that quietly does not run is the single
+// most confusing thing a scheduler can do, so the decision is an event with a
+// reason rather than an absence.
+func (e *Engine) recordSkipped(ctx context.Context, job store.Job, reason string) error {
+	payload, _ := json.Marshal(map[string]string{"job": job.Slug, "reason": reason})
+	_, _, err := e.store.AppendEvent(ctx, model.Event{
+		Type:      EventRunSkipped,
+		Source:    model.SourceEngine,
+		Payload:   payload,
+		CreatedAt: e.now(),
+	})
+	return err
 }
 
 // runCause establishes the single event that caused this run (D7).

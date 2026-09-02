@@ -25,6 +25,9 @@ type Run struct {
 	StateVersionIn    *int64
 	Output            []byte
 	Error             string
+
+	// Overlap is the policy in force when this run was queued (D8).
+	Overlap string
 }
 
 // Attempt is one execution of a run. It carries its own causation so the
@@ -51,11 +54,12 @@ func (s *Store) CreateRun(ctx context.Context, r Run) (Run, error) {
 	err := s.state.QueryRowContext(ctx, `
 		INSERT INTO runs (job_id, definition_hash, triggering_event_id,
 		                  triggering_route_id, route_hash, status, queued_at,
-		                  attempt_count, state_version_in)
-		VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)
+		                  attempt_count, state_version_in, overlap)
+		VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
 		RETURNING id`,
 		r.JobID, r.DefinitionHash, r.TriggeringEventID, r.TriggeringRouteID,
 		nullString(r.RouteHash), string(r.Status), formatTime(r.QueuedAt), r.StateVersionIn,
+		r.Overlap,
 	).Scan(&r.ID)
 	if err != nil {
 		return Run{}, fmt.Errorf("creating run: %w", err)
@@ -164,6 +168,26 @@ func (s *Store) RecentRuns(ctx context.Context, jobID int64, limit int) ([]Run, 
 	return out, rows.Err()
 }
 
+// RecentRunsWithStatus lists runs in one state, newest first.
+func (s *Store) RecentRunsWithStatus(ctx context.Context, status string, limit int) ([]Run, error) {
+	rows, err := s.state.QueryContext(ctx,
+		selectRun+` WHERE status = ? ORDER BY id DESC LIMIT ?`, status, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []Run
+	for rows.Next() {
+		r, err := scanRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 // LastSuccessAt reports when a job last succeeded.
 //
 // D14 serves this to jobs as JE_LAST_SUCCESS_AT. It is deliberately a query
@@ -212,7 +236,7 @@ func (s *Store) InterruptRunning(ctx context.Context, at time.Time) (int64, erro
 const selectRun = `
 	SELECT id, job_id, definition_hash, triggering_event_id, triggering_route_id,
 	       route_hash, status, queued_at, started_at, ended_at, attempt_count,
-	       state_version_in, output, error
+	       state_version_in, output, error, overlap
 	FROM runs`
 
 func scanRun(sc scanner) (Run, error) {
@@ -228,7 +252,7 @@ func scanRun(sc scanner) (Run, error) {
 	)
 	if err := sc.Scan(&r.ID, &r.JobID, &r.DefinitionHash, &r.TriggeringEventID,
 		&r.TriggeringRouteID, &routeHash, &status, &queuedAt, &startedAt, &endedAt,
-		&r.AttemptCount, &r.StateVersionIn, &output, &runErr); err != nil {
+		&r.AttemptCount, &r.StateVersionIn, &output, &runErr, &r.Overlap); err != nil {
 		return Run{}, err
 	}
 	r.Status = model.Status(status)

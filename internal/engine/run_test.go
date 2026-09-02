@@ -22,6 +22,17 @@ import (
 // nothing that might be missing from a build machine.
 func jobFixture(t *testing.T, name, script string, extra ...string) (*engine.Engine, paths.Layout) {
 	t.Helper()
+	return jobFixtureAt(t, name, script, nil, extra...)
+}
+
+// jobFixtureAt is jobFixture with a controllable clock.
+//
+// The scheduler computes due windows against the engine's clock rather than
+// the wall, so freezing it makes catch-up exactly testable: the gap is whatever
+// the test says it is, and no real minute boundary can slide past mid-test and
+// add a window nobody asked for.
+func jobFixtureAt(t *testing.T, name, script string, now func() time.Time, extra ...string) (*engine.Engine, paths.Layout) {
+	t.Helper()
 
 	dir := t.TempDir()
 	layout := paths.Layout{Data: dir, Jobs: filepath.Join(dir, "jobs")}
@@ -37,7 +48,7 @@ func jobFixture(t *testing.T, name, script string, extra ...string) (*engine.Eng
 		t.Fatal(err)
 	}
 
-	e := newEngine(t, layout, nil)
+	e := newEngine(t, layout, now)
 	t.Cleanup(func() { e.Close(context.Background()) })
 
 	if _, err := e.LoadFromDisk(context.Background()); err != nil {

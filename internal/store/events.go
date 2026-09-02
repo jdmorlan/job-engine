@@ -73,6 +73,11 @@ func (s *Store) LastEventOfType(ctx context.Context, eventType string) (model.Ev
 		WHERE type = ? ORDER BY id DESC LIMIT 1`, eventType))
 }
 
+// EventByID returns one event.
+func (s *Store) EventByID(ctx context.Context, id int64) (model.Event, error) {
+	return s.scanEvent(s.state.QueryRowContext(ctx, selectEvent+` WHERE id = ?`, id))
+}
+
 // RecentEvents returns the newest events, most recent first.
 func (s *Store) RecentEvents(ctx context.Context, limit int) ([]model.Event, error) {
 	rows, err := s.state.QueryContext(ctx, selectEvent+` ORDER BY id DESC LIMIT ?`, limit)

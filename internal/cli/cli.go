@@ -61,6 +61,15 @@ type Command struct {
 	Run func(ctx context.Context, env *Env, args []string) error
 }
 
+// errAttention means the command succeeded and found something a human should
+// look at. P1 asks that "does anything need my attention?" be a query with an
+// exit code, which is what makes it scriptable in a way a dashboard is not.
+var errAttention = attentionError{}
+
+type attentionError struct{}
+
+func (attentionError) Error() string { return "something needs your attention" }
+
 // usageError signals a mistake in how the command was invoked, as opposed to a
 // failure while doing what was asked. It exits 2 so scripts can tell the two
 // apart.
@@ -140,6 +149,12 @@ func Main(ctx context.Context, args []string, env *Env) int {
 		// Ctrl-C. The user knows what happened; do not lecture them about it.
 		return ExitError
 	default:
+		var ae attentionError
+		if errors.As(err, &ae) {
+			// Not printed: the command has already rendered what needs
+			// attention, and a trailing error line would just be noise.
+			return ExitAttention
+		}
 		fmt.Fprintf(env.Stderr, "je %s: %v\n", cmd.Name, err)
 		var ue usageError
 		if errors.As(err, &ue) {
