@@ -10,10 +10,50 @@ See [`PITCH.md`](PITCH.md) for why, and [`PROPOSAL.md`](PROPOSAL.md) for the
 design decisions. Comments in the code cite those decisions by number (`D14`,
 `P1`) rather than restating them.
 
+## Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/jdmorlan/job-engine/main/install.sh | sh
+```
+
+Downloads the build for your platform, verifies its SHA-256 against the
+checksums published with the release, and puts it in `~/.local/bin` (no sudo).
+It starts nothing and edits no shell config; registering the daemon is a
+separate, explicit step.
+
+```sh
+JE_INSTALL_DIR=/usr/local/bin  # where to put it
+JE_VERSION=v0.2.0              # pin a release instead of taking the latest
+```
+
+Updating is `je upgrade`, which verifies the same checksum before replacing
+itself in place:
+
+```console
+$ je upgrade
+  current  v0.1.0
+  latest   v0.2.0
+
+downloading je_0.2.0_darwin_arm64.tar.gz (4.8 MB)
+verified sha256 194902ec097ce0a4
+
+upgraded to v0.2.0 at /Users/you/.local/bin/je
+
+note: a daemon is still running v0.1.0 (pid 4821).
+      Restart it to pick up v0.2.0.
+```
+
+A running daemon keeps executing the old binary until it restarts — replacing a
+file does not replace a process — so both `je upgrade` and `je status` say so
+rather than leaving you to wonder why nothing changed.
+
+`je upgrade --check` reports without installing. Building from source is
+`go build ./cmd/je`.
+
 ## Try it in two minutes
 
 ```console
-$ go build ./cmd/je && ./je demo
+$ ./je demo
 wrote 7 files to /Users/you/.je/jobs
 
   demo-hello    prints a line and exits           the smallest job that exists
@@ -60,6 +100,7 @@ Early, but it runs jobs on a schedule, unattended.
 
 ```
 je demo           write four example jobs and a tour
+je upgrade        install the latest release, checksum-verified
 je serve          run the daemon: schedules fire, jobs run
 je waiting        what has not happened yet, and what is stuck
 je run <job>      run a job now, in the foreground
@@ -235,13 +276,15 @@ is a thin wrapper around it and the CLI is a client of the daemon, so nothing in
 | `internal/executor` | running a command. Process today, container later (D1). |
 | `internal/secrets` | the local secret store, and log redaction values (D10). |
 | `internal/schedule` | cron and interval windows, including the DST rules (D9). |
+| `internal/selfupdate` | finding, verifying and installing a new binary. |
 
 ## Building
 
 ```
-make build     # ./je
-make check     # fmt, vet, test
-make image     # a scratch container image (D19)
+make build        # ./je
+make check        # fmt, vet, test
+make image        # a scratch container image (D19)
+make release-dry  # build every release artifact locally, as CI does
 ```
 
 One direct dependency: `modernc.org/sqlite`, the pure-Go driver. That is what

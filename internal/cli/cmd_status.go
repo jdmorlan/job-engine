@@ -55,6 +55,17 @@ func runStatus(ctx context.Context, env *Env, args []string) error {
 	if health.UncleanStop {
 		fmt.Fprintf(tw, "note\tprevious run ended without a clean shutdown\n")
 	}
+
+	// The daemon runs whatever binary started it, and `je upgrade` replaces a
+	// file rather than a process. Without saying so, the next thing that
+	// happens is somebody upgrading, seeing no change, and concluding the
+	// upgrade failed. A visible mismatch beats a mystery (P1), and it is the
+	// same reasoning behind D20 C10 refusing node version skew loudly.
+	if !sameVersion(health.Version, env.Version) {
+		fmt.Fprintf(tw, "version\tdaemon is running %s, this binary is %s\n",
+			health.Version, env.Version)
+		fmt.Fprintf(tw, "\trestart the daemon to pick up %s\n", env.Version)
+	}
 	return tw.Flush()
 }
 

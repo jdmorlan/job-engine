@@ -1,0 +1,49 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "these files are not gofmt'd:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - run: go vet ./...
+
+      # The scheduler and the log broker are concurrent, so the race detector
+      # is the point of running tests in CI at all rather than a nicety.
+      - run: go test -race ./...
+
+  # A release that fails to build is discovered at tag time, which is the worst
+  # moment. Building every target on every push makes that impossible.
+  cross-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: build every release target
+        run: |
+          for target in darwin/arm64 darwin/amd64 linux/amd64 linux/arm64; do
+            echo "building $target"
+            GOOS="${target%/*}" GOARCH="${target#*/}" CGO_ENABLED=0 \
+              go build -o /dev/null ./cmd/je
+          done
