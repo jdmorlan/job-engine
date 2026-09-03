@@ -122,3 +122,45 @@ func jobBySlug(t *testing.T, e *engine.Engine, slug string) store.Job {
 	t.Fatalf("no job %q was loaded; got %d jobs", slug, len(jobs))
 	return store.Job{}
 }
+
+// The C11 half: the control plane dispatches the *name* of a secret it cannot
+// read, and puts no value in the environment (D25).
+func TestDispatchCarriesNamesForSecretsTheControlPlaneCannotRead(t *testing.T) {
+	ctx := context.Background()
+	e, layout := chainFixture(t, nil, nil)
+
+	writeSecretsFile(t, layout.Jobs, "WEATHER_API_KEY", "sk-live-value")
+	writeJobFile(t, layout.Jobs, "ingest",
+		"command: [\"/bin/sh\", \"-c\", \"true\"]\nsecrets: [WEATHER_API_KEY]\n")
+	if _, err := e.Sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := e.RegisterWorker(ctx, store.Worker{
+		ID: "w1", Name: "w1", Labels: []string{store.DefaultLabel},
+		Roles: []string{store.RoleExecute}, Version: e.Health(ctx).Version,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.TriggerRun(ctx, "ingest", engine.RunOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	d, err := e.Claim(ctx, "w1")
+	if err != nil || d == nil {
+		t.Fatalf("claim: %v, dispatch %v", err, d)
+	}
+
+	if len(d.Secrets) != 1 || d.Secrets[0] != "WEATHER_API_KEY" {
+		t.Errorf("Secrets = %v, want [WEATHER_API_KEY] for the worker to resolve", d.Secrets)
+	}
+	// The value must appear nowhere in what crosses the wire.
+	for _, kv := range d.Env {
+		if strings.Contains(kv, "sk-live-value") {
+			t.Fatalf("the control plane put a secret it cannot read into the environment: %q", kv)
+		}
+		if strings.HasPrefix(kv, "WEATHER_API_KEY=") {
+			t.Fatalf("the control plane injected WEATHER_API_KEY itself: %q", kv)
+		}
+	}
+}

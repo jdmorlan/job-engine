@@ -2,9 +2,11 @@ package cli
 
 import (
 	"context"
+	"filippo.io/age"
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"text/tabwriter"
 
@@ -17,7 +19,7 @@ import (
 func init() {
 	register(&Command{
 		Name:  "worker",
-		Args:  "run|join|status|remove",
+		Args:  "run|join|status|remove|keygen",
 		Usage: "a worker: the thing that actually executes jobs",
 		Long: "A worker executes jobs. The control plane never does (D20/C11), so a\n" +
 			"deployment with no worker runs nothing at all -- `je status` says so.\n\n" +
@@ -30,7 +32,8 @@ func init() {
 			"  run       run it in the foreground, in this terminal\n" +
 			"  join      register it with launchd or systemd, attached to a control plane\n" +
 			"  status    is it registered, and is it up\n" +
-			"  remove    unregister it; nothing else on this machine is touched\n\n" +
+			"  remove    unregister it; nothing else on this machine is touched\n" +
+			"  keygen    create this machine's key for reading encrypted secrets\n\n" +
 			"`join` rather than `install` because a worker attaches to a control plane\n" +
 			"that already exists -- with no argument it joins the one this data\n" +
 			"directory records, which is the local case.\n\n" +
@@ -64,6 +67,11 @@ func runWorker(ctx context.Context, env *Env, args []string) error {
 	}
 
 	switch positional[0] {
+	case "keygen":
+		if len(positional) != 1 {
+			return usagef("unexpected argument %q", positional[1])
+		}
+		return runWorkerKeygen(env)
 	case "run", "join":
 		if len(positional) != 1 {
 			return usagef("unexpected argument %q", positional[1])
@@ -124,14 +132,15 @@ func runWorker(ctx context.Context, env *Env, args []string) error {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 
 	w, err := worker.New(worker.Options{
-		Name:        *name,
-		Labels:      splitLabels(*labels),
-		Concurrency: *concurrency,
-		JobsDir:     env.Layout.Jobs,
-		CacheDir:    env.Layout.Data,
-		Version:     env.Version,
-		Client:      client,
-		Logger:      logger,
+		Name:         *name,
+		Labels:       splitLabels(*labels),
+		Concurrency:  *concurrency,
+		JobsDir:      env.Layout.Jobs,
+		CacheDir:     env.Layout.Data,
+		IdentityFile: filepath.Join(env.Layout.Data, worker.IdentityFileName),
+		Version:      env.Version,
+		Client:       client,
+		Logger:       logger,
 	})
 	if err != nil {
 		return err
@@ -246,4 +255,44 @@ func splitLabels(raw string) []string {
 		}
 	}
 	return out
+}
+
+// runWorkerKeygen creates this machine's age key and prints the public half.
+//
+// The private key is written and never shown: D10's rule that the CLI does not
+// print secret material applies to the key that reads secrets at least as much
+// as to the secrets themselves. What is printed is the recipient, which is
+// public by construction and is the thing you paste into a source's secrets
+// file to let this machine read it (D25).
+func runWorkerKeygen(env *Env) error {
+	path := filepath.Join(env.Layout.Data, worker.IdentityFileName)
+
+	if _, err := os.Stat(path); err == nil {
+		// Refused rather than overwritten. Replacing this key silently would
+		// make every secret encrypted to it unreadable, with no way back and
+		// nothing said.
+		return fmt.Errorf("%s already exists.\n"+
+			"Replacing it would make every secret encrypted to it unreadable.\n"+
+			"Its public key is:  je worker keygen --show", path)
+	}
+
+	id, err := age.GenerateX25519Identity()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, []byte(id.String()+"\n"), 0o600); err != nil {
+		return err
+	}
+
+	fmt.Fprintf(env.Stdout, "wrote %s\n\n", path)
+	fmt.Fprintf(env.Stdout, "public key  %s\n\n", id.Recipient())
+	fmt.Fprintln(env.Stdout,
+		"Add it as a recipient of a source's secrets so this machine can read them:\n"+
+			"  je secret recipients add <source> "+id.Recipient().String()+"\n\n"+
+			"Until then this worker can run jobs that need no secrets, and will say\n"+
+			"so plainly for the ones that do.")
+	return nil
 }

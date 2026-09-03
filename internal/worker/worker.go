@@ -53,6 +53,10 @@ type Options struct {
 	// costs a re-download and nothing else (D25).
 	CacheDir string
 
+	// IdentityFile is the age key that lets this worker read secrets encrypted
+	// into a source (D25). Defaults to <CacheDir>/identity.
+	IdentityFile string
+
 	Client *Client
 	Logger *slog.Logger
 }
@@ -312,7 +316,21 @@ func (w *Worker) execute(ctx context.Context, d engine.Dispatch) {
 		return
 	}
 
+	// Secrets the control plane could not resolve, decrypted here (D25/C11).
+	// A failure is reported as an exec error rather than run-and-fail: the job
+	// never started, and "this worker has no key" is a much better sentence
+	// than whatever the command would print without its credentials.
+	repoSecrets, err := w.resolveSecrets(d, root)
+	if err != nil {
+		w.report(ctx, d, engine.Completion{ExecError: err.Error()})
+		return
+	}
+	for name, value := range repoSecrets {
+		env = append(env, name+"="+value)
+	}
+
 	sink := newLogShipper(w.client, d.RunID, d.Attempt, w.log)
+	sink.redact(redactorFor(repoSecrets))
 	result, execErr := executor.Process{}.Run(runCtx, executor.Spec{
 		Command: d.Command,
 		Workdir: workdir,

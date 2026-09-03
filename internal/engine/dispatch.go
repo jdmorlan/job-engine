@@ -108,6 +108,16 @@ type Dispatch struct {
 	SourceName     string `json:"source_name,omitempty"`
 	SourceRevision string `json:"source_revision,omitempty"`
 
+	// Secrets are declared names the control plane did not resolve, because it
+	// cannot: their values are encrypted in the source above, readable only by
+	// a recipient's key.
+	//
+	// Names rather than values is the whole point. Building a process
+	// environment is execution-time work, and C11 says the control plane does
+	// not execute -- so the values are injected where the process will be, by
+	// the machine that can read them (D25).
+	Secrets []string `json:"secrets,omitempty"`
+
 	// Env is the complete environment minus the four values the worker can
 	// only know locally: JOB_WORKDIR and the three output channel paths (D6).
 	// The worker creates the scratch directory and appends them, which is what
@@ -295,14 +305,25 @@ func (e *Engine) dispatchFor(ctx context.Context, p Prepared, worker store.Worke
 	}
 
 	// The same resolved values that went into the environment drive redaction,
-	// so the two cannot drift (D10). Redaction stays on this side: logs are
-	// stored here, and a worker bug must not be able to put a secret into the
-	// permanent record.
-	resolved, err := e.secrets.Resolve(p.Def.Secrets)
+	// so the two cannot drift (D10). Redaction of *these* stays on this side:
+	// logs are stored here, and a worker bug must not be able to put a secret
+	// the control plane holds into the permanent record.
+	//
+	// Secrets the control plane cannot read are redacted by the worker instead,
+	// before the line crosses the network. That is not a weakening -- it is the
+	// only place it can happen, and it happens earlier than this does (D25).
+	resolved, err := e.storeHeldSecrets(p.Def.Secrets)
 	if err != nil {
 		return nil, fmt.Errorf("job %s: %w", p.Job.Slug, err)
 	}
 	e.rememberRedactor(p.Run.ID, newRedactor(resolved))
+
+	// Names, not values: what the worker must decrypt for itself out of the
+	// source tree it already has (D25).
+	repoSecrets, err := e.repoHeldSecrets(p.Def.Secrets)
+	if err != nil {
+		return nil, fmt.Errorf("job %s: %w", p.Job.Slug, err)
+	}
 
 	// Where this job's code lives, which is a fact about its source rather than
 	// about this worker (D22). Absent for the built-in local source, whose root
@@ -339,6 +360,7 @@ func (e *Engine) dispatchFor(ctx context.Context, p Prepared, worker store.Worke
 		SourceRoot:     sourceRoot,
 		SourceName:     sourceName,
 		SourceRevision: sourceRevision,
+		Secrets:        repoSecrets,
 		Env:            env,
 		Timeout:        p.Def.Timeout.D,
 		Grace:          executor.DefaultGrace,

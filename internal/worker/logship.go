@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -33,9 +34,10 @@ type logShipper struct {
 	attempt int
 	log     *slog.Logger
 
-	mu     sync.Mutex
-	buf    []engine.LogLine
-	closed bool
+	mu       sync.Mutex
+	buf      []engine.LogLine
+	closed   bool
+	redactor *strings.Replacer
 
 	done chan struct{}
 	stop chan struct{}
@@ -51,15 +53,30 @@ func newLogShipper(c *Client, runID int64, attempt int, log *slog.Logger) *logSh
 	return s
 }
 
+// redact sets the replacer applied before a line is buffered. Nil means none.
+//
+// Only ever holds secrets this worker decrypted itself (D25). Everything the
+// control plane can read, it still redacts on the way into storage, where a
+// tampered worker cannot skip it -- so this adds a case rather than moving one.
+func (s *logShipper) redact(r *strings.Replacer) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.redactor = r
+}
+
 // WriteLine records one line. It is called from the executor's two scanner
 // goroutines, so it must be safe for concurrent use.
 //
-// Note what is absent: redaction. The worker sends what the process printed and
-// the control plane strips secrets on the way into storage (D10), so a worker
-// that is buggy -- or that somebody has tampered with -- cannot put a secret
-// into the permanent record.
+// Redaction here covers only what the control plane cannot see. The values it
+// does hold are stripped on the way into storage (D10), so a worker that is
+// buggy -- or tampered with -- still cannot put those into the permanent
+// record. For a secret only this machine can read, this is the earliest point
+// it can happen, and it happens before the line crosses the network.
 func (s *logShipper) WriteLine(stream executor.Stream, ts time.Time, line string) {
 	s.mu.Lock()
+	if s.redactor != nil {
+		line = s.redactor.Replace(line)
+	}
 	s.buf = append(s.buf, engine.LogLine{Stream: string(stream), TS: ts, Line: line})
 	full := len(s.buf) >= flushSize
 	s.mu.Unlock()

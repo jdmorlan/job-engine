@@ -201,7 +201,7 @@ architecture), **D16** (daemon lifecycle and generic event ingress).
 | D22 | Job sources | **NEW (v0.5) — two open questions** |
 | D23 | The web client | **NEW (v0.7) — agreed, phase 1 shipped** |
 | D24 | Worker version coherence | **NEW (v0.7) — phase 1 shipped, C10 enforced** |
-| D25 | Secrets that travel with definitions | **NEW (v0.7) — agreed, step 2 building** |
+| D25 | Secrets that travel with definitions | **NEW (v0.7) — steps 1-4 shipped, identity open** |
 | N1 | Non-goals | AGREED |
 | N2 | v1 done | AGREED |
 | Q1 | Storage adapters | AGREED — SQLite only, no adapter |
@@ -3084,7 +3084,7 @@ event for the situation and a new one only when a version actually changes.
 
 ### D25. Secrets that travel with definitions — NEW
 
-**Status:** NEW (v0.7) — agreed; step 1 shipped, step 2 building
+**Status:** NEW (v0.7) — agreed; steps 1-4 shipped, step 5 open
 
 **Your observation:**
 
@@ -3386,11 +3386,18 @@ real `sops` binary rather than on having read the spec carefully.
 2. **The secrets file, and the CLI flow that writes it.** `age`, SOPS-shaped, with
    `je secret set --source`. Needs no identity work: recipients are age public keys
    a human manages, which is how people already use age.
-3. **The worker resolves declared secrets and builds its own environment.**
-   `Dispatch` carries names, not values. This is the C11 fix, and it is the step
-   the item is really about.
-4. **Load-time validation without keys** -- declared-but-absent secrets, and the
-   capability/recipient invariant above.
+3. **The worker resolves declared secrets and builds its own environment.
+   Shipped.** `Dispatch` carries the names of secrets the control plane could not
+   resolve, and the worker decrypts them from the tree it already fetches. The
+   control plane still resolves what its own store holds -- the remaining seam
+   named above -- but for a repository-backed secret it never sees the value at
+   any point. Redaction for those moves to the worker, where it happens *before*
+   the line crosses the network rather than on the way into storage; what the
+   control plane can read, it still redacts itself, so a tampered worker cannot
+   skip it. `je worker keygen` writes the machine's key and prints only the
+   public half.
+4. **Load-time validation without keys** -- declared-but-absent secrets
+   **shipped**; the capability/recipient invariant needs step 5.
 5. **Enrolled identity and mTLS.** Worker keys stop being hand-managed, labels stop
    being self-advertised, and the recipient list becomes trustworthy rather than
    conventional.

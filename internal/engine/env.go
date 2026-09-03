@@ -81,15 +81,21 @@ func (e *Engine) buildEnv(
 	)
 
 	// D10: only declared secrets, and the whole store is never handed over.
-	// Resolve fails loudly if one is missing, but load-time validation should
-	// have caught that already -- this is the backstop for a secret deleted
-	// between load and run.
-	resolved, err := e.secrets.Resolve(def.Secrets)
+	//
+	// Only the ones this control plane actually holds. A declared secret the
+	// store does not have is expected to be encrypted in the job's own source,
+	// where the control plane cannot read it and the worker can -- so it is
+	// left out of the environment entirely and its name is dispatched instead
+	// (D25). Building a process environment is the worker's job under C11; this
+	// is the part of it that has not moved yet.
+	held, err := e.storeHeldSecrets(def.Secrets)
 	if err != nil {
 		return nil, fmt.Errorf("job %s: %w", job.Slug, err)
 	}
 	for _, name := range def.Secrets {
-		env = append(env, name+"="+resolved[name])
+		if value, ok := held[name]; ok {
+			env = append(env, name+"="+value)
+		}
 	}
 
 	// D14: engine-owned and read-only, so the two facts that must not be
@@ -106,4 +112,40 @@ func (e *Engine) buildEnv(
 	}
 
 	return env, nil
+}
+
+// storeHeldSecrets resolves the declared secrets this control plane has, and
+// says nothing about the ones it does not.
+//
+// Distinct from Store.Resolve, which fails on an unknown name. Absence is not
+// an error here: it means the value lives in the job's source, and load-time
+// validation has already refused any name that is in neither place (D25).
+func (e *Engine) storeHeldSecrets(declared []string) (map[string]string, error) {
+	if len(declared) == 0 {
+		return nil, nil
+	}
+	missing, err := e.secrets.Missing(declared)
+	if err != nil {
+		return nil, err
+	}
+	absent := make(map[string]bool, len(missing))
+	for _, name := range missing {
+		absent[name] = true
+	}
+	present := make([]string, 0, len(declared))
+	for _, name := range declared {
+		if !absent[name] {
+			present = append(present, name)
+		}
+	}
+	return e.secrets.Resolve(present)
+}
+
+// repoHeldSecrets are the declared names this control plane cannot supply, and
+// which the worker is therefore expected to decrypt for itself.
+func (e *Engine) repoHeldSecrets(declared []string) ([]string, error) {
+	if len(declared) == 0 {
+		return nil, nil
+	}
+	return e.secrets.Missing(declared)
 }
