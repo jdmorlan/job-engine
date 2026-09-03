@@ -195,7 +195,7 @@ Then, in another terminal, try this in order:
   je runs                        what happened, and when
   je waiting                     what has not happened yet
   je workers                     what is attached, and what it can run
-  je sources                     where these came from, and at which commit
+  je source                      where these came from, and at which commit
 
 Leave it alone for a couple of minutes, then:
 

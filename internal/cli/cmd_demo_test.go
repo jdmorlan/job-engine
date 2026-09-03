@@ -141,7 +141,7 @@ func TestTheTourUsesQualifiedNames(t *testing.T) {
 	for _, want := range []string{
 		"je run " + DemoSource + "/demo-hello",
 		"je run " + DemoSource + "/demo-ingest",
-		"je sources",
+		"je source",
 		"je quickstart", // nothing below it works until the engine is running
 	} {
 		if !strings.Contains(tour, want) {
