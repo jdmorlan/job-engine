@@ -2775,15 +2775,71 @@ a pull request, no. The posture degrades to "a branch you merge yourself" —
 still history, attribution, revert, and a real revision, but not the reviewed path
 GitHub sources get. Stated plainly rather than implied as parity.
 
-**Git operations shell out to `git` for now**, behind an interface. The image is
-`FROM scratch` and `go.mod` has exactly one direct dependency, so the alternative
-is `go-git` — pure Go, `CGO_ENABLED=0`-safe, and a real transitive tree. Deferred
-on the same grounds D20 and D21 defer things: not before something demands it.
-The cost is honest and worth writing down: **a containerized control plane cannot
-author local repositories**, which cuts against D19's "the same artifact runs
-everywhere." A container control plane is the cluster case, where sources are
-GitHub, so the gap is tolerable until it isn't — and the interface makes taking
-`go-git` a swap rather than a rewrite.
+**Git operations shell out to `git`, and the base image gains it.** This
+replaces an earlier answer in this item that deferred the question and accepted a
+capability gap — *"a containerized control plane cannot author local
+repositories"* — on the grounds that the image is `FROM scratch`. That reasoning
+was backwards, and the correction is D23's most useful outcome:
+
+> *"I don't understand the true importance of this `FROM scratch`... Docker is
+> pretty standard in today's world, so it just seems odd to me."*
+
+Measured, `FROM scratch` is worth **18.5 MB** against **~47 MB** for a base
+carrying `git` and certificates. Twenty-nine megabytes is not a reason to vendor a
+git implementation or to ship a control plane that can author on one deployment
+and not the other. **An image-hygiene property was being allowed to decide an
+architecture, and it is the cheapest thing in the stack to change.**
+
+So: shelling out is the answer in both places, permanently. The container gets
+`git` from its base; a native control plane gets it from the machine, which on any
+box that has a repository to write to is already true. `go-git` is off the table
+rather than deferred, and there is no gap to write down.
+
+**This does not touch D22's fetch decision.** Reading a source is still a tarball
+over HTTPS — `net/http`, `archive/tar`, `compress/gzip`, nothing added — and that
+stays correct because it is genuinely better, not because a binary was
+unavailable. Only the *write* path needs `git`.
+
+**What survives from D20's argument.** D20 said an image with no Python, no Node
+and no shell is *correct* rather than limited, because the control plane never
+runs your code. That is right and is preserved: the guarantee comes from C11 —
+every run goes to a worker — not from the filesystem being empty. `git` is an
+engine dependency like `ca-certificates`, not a language runtime, and adding it
+leaves the "no user code here" property enforced by the architecture that actually
+enforces it. The empty image was an illustration of the rule, not the rule.
+
+**The change lands with the write path, not before.** Twenty-nine megabytes for a
+capability nothing uses yet is still worth deferring — but the *decision* is made,
+so it is no longer a fork blocking design.
+
+#### Deployment posture, stated once
+
+The confusion this item cleared up is worth recording as a rule, because it kept
+leaking into unrelated decisions:
+
+> *"I completely understand that the worker shouldn't have a dependency on
+> Docker, but I really don't think the same holds for the control plane or the
+> UI."*
+
+**Adopted.** The three components do not have the same obligation, and pretending
+they did is what produced the bad reasoning above.
+
+- **The worker must be able to run natively.** This is product, not preference:
+  D20's whole premise is that a worker goes where the work is, and a job that
+  drives Apple Shortcuts or reaches a device on your LAN cannot run in a
+  container. Not negotiable.
+- **The control plane and the web client may assume a container.** The control
+  plane is a database, a scheduler and an HTTP API; the web client is a file
+  server and a proxy. Neither has a reason to care, and D20 already concluded the
+  control plane has exactly one form factor.
+
+The native path for those two still *exists* — one static binary, and Go would
+take effort to give that up rather than effort to keep it — but it is a
+**property, not a goal**. Nothing should be designed around preserving it, and
+"works without Docker" is not an argument for anything on its own. Where that
+phrasing was used in this item to justify embedding the web assets, the honest
+reason is simpler and does not mention Docker at all: one artifact, one version,
+one release process.
 
 **Your response:**
 

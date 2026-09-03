@@ -1,13 +1,15 @@
 // Package webui serves the web client (D23).
 //
 // The assets are embedded rather than shipped as a second image, so the web
-// client is the same artifact as everything else: one binary, one image, a
-// third component alongside control-plane and worker. D23 originally argued for
-// a separate container on the grounds that go:embed makes the assets
-// non-optional in the cluster image. That cost turned out to be about 1.5 MB in
-// a 12 MB binary, and the benefit is that `je web` runs natively exactly the way
-// `je control-plane run` does -- no Docker required to see anything. The trade
-// went the other way once both sides were measured.
+// client is the same artifact as everything else: one binary, one image, one
+// version, a third component alongside control-plane and worker. D23 originally
+// argued for a separate container on the grounds that go:embed makes the assets
+// non-optional in the cluster image; measured, that is about 1.5 MB in a 12 MB
+// binary, against a whole second release process. One artifact wins on its own
+// terms.
+//
+// It also means `je web run` needs no Docker, which is a side effect and not
+// the reason -- the web client has no claim on running natively (D23).
 package webui
 
 import (

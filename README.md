@@ -393,9 +393,10 @@ weather-jobs  github  you/weather-jobs@main       a3f81c2   5     4m ago
 ```
 
 No git binary is involved: a repository is a tarball over HTTPS, which is
-`net/http`, `archive/tar` and `compress/gzip` and adds nothing to the
-dependency list. That keeps the single static binary and the `FROM scratch`
-image (D19) intact — a fetched repo works anywhere the engine works.
+`net/http`, `archive/tar` and `compress/gzip` and adds nothing to the dependency
+list. A fetched repo therefore works anywhere the engine works, with no
+toolchain to install. (Reading is the whole of this: *writing* definitions back
+to a repository will use a real `git`, per D23.)
 
 **A ref always resolves to a commit.** `--ref` takes a branch, a tag or a SHA,
 and a bare `owner/repo` tracks whatever the repository says its own default
@@ -693,9 +694,15 @@ machine with no node toolchain, and what keeps the image a single static build.
 Only `make web-build` regenerates it, and only changes under `web/` need it.
 
 One direct Go dependency: `modernc.org/sqlite`, the pure-Go driver. That is what
-keeps the binary static and cgo-free, which is in turn why one artifact is both
-the control plane and the worker, and runs in a terminal, in a `FROM scratch`
-image, in a cluster, and inside a Mac app (D18).
+keeps the binary static and cgo-free, so one artifact is both the control plane
+and the worker, and runs in a terminal, in a container, in a cluster, and inside
+a Mac app (D18).
+
+The component that genuinely needs the native path is the **worker**: a job that
+drives Apple Shortcuts or reaches a device on your LAN cannot run in a container,
+so the binary has to stand on its own (D20). The control plane and the web client
+run natively too, but nothing is designed around keeping that true — it is a
+property of the binary, not a goal (D23).
 
 ## Where things live
 
