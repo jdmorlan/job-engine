@@ -11,6 +11,7 @@ import (
 func (s *Server) registerEnrolment(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/enrol/tokens", s.handleMintEnrolment)
 	mux.HandleFunc("POST /v1/enrol", s.handleEnrol)
+	mux.HandleFunc("POST /v1/enrol/renew", s.handleRenew)
 	mux.HandleFunc("GET /v1/ca", s.handleCA)
 }
 
@@ -111,4 +112,40 @@ func (s *Server) handleCA(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/x-pem-file")
 	w.Write(authority.CertPEM())
+}
+
+// RenewRequest carries a fresh public key. There is no token: the connection's
+// own certificate is the credential.
+type RenewRequest struct {
+	PublicKey string `json:"public_key"`
+}
+
+// RenewResponse is the reissued identity.
+type RenewResponse struct {
+	Certificate string `json:"certificate"`
+}
+
+func (s *Server) handleRenew(w http.ResponseWriter, r *http.Request) {
+	// Only a request that already proved who it is may renew, and it may only
+	// renew itself -- the name comes from the verified certificate and is never
+	// read from the body, so there is nothing to ask for on somebody else's
+	// behalf.
+	name := IdentityOf(r.Context())
+	if name == "" {
+		s.writeError(w, http.StatusUnauthorized,
+			"renewal is authenticated by the certificate being replaced, and this "+
+				"connection presented none")
+		return
+	}
+
+	var req RenewRequest
+	if !decodeBody(s, w, r, &req) {
+		return
+	}
+	cert, err := s.engine.Renew(r.Context(), name, []byte(req.PublicKey))
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, RenewResponse{Certificate: string(cert)})
 }

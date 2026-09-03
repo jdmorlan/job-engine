@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jdmorlan/job-engine/internal/ca"
 	"github.com/jdmorlan/job-engine/internal/engine"
 	"github.com/jdmorlan/job-engine/internal/executor"
 	"github.com/jdmorlan/job-engine/internal/store"
@@ -206,6 +207,12 @@ func (w *Worker) heartbeatLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 		}
+
+		// Renewed on the heartbeat, while the current certificate is still
+		// valid and therefore still able to authenticate the request. Waiting
+		// for expiry would mean needing a human and a token again, which is the
+		// thing short-lived certificates are supposed to avoid (D25).
+		w.renewIfExpiringSoon(ctx)
 
 		revoked, err := w.client.Heartbeat(ctx, w.id, w.held())
 		if err != nil {
@@ -522,4 +529,29 @@ func expandHome(path string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(home, strings.TrimPrefix(path, "~")), nil
+}
+
+// renewIfExpiringSoon replaces this worker's certificate before it expires.
+//
+// Failure is logged and not fatal. There is time left -- that is what
+// RenewBefore buys -- and the next heartbeat tries again; a control plane that
+// is briefly unreachable should not cost a worker its identity. It becomes
+// visible as a refusal only if every attempt inside the window fails, which is
+// the case that genuinely needs a human.
+func (w *Worker) renewIfExpiringSoon(ctx context.Context) {
+	notAfter, ok := w.client.NotAfter()
+	if !ok {
+		return // no certificate: a plaintext worker has nothing to renew
+	}
+	remaining := time.Until(notAfter)
+	if remaining > ca.RenewBefore {
+		return
+	}
+
+	if err := w.client.Renew(ctx); err != nil {
+		w.log.Warn("could not renew this worker's certificate",
+			"expires_in", remaining.Round(time.Minute), "error", err)
+		return
+	}
+	w.log.Info("renewed this worker's certificate")
 }

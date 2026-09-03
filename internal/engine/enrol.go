@@ -114,3 +114,58 @@ func Fingerprint(der []byte) string {
 	sum := sha256.Sum256(der)
 	return hex.EncodeToString(sum[:])
 }
+
+// Renew issues a fresh certificate for an identity that already holds a valid
+// one.
+//
+// Authenticated by the certificate being replaced rather than by a token, which
+// is the whole point: a worker that is already trusted should never need a human
+// to keep it trusted. A token exists to bootstrap an identity from nothing, and
+// renewal is not that.
+//
+// This is what makes a 24-hour leaf affordable. Short lifetimes are how this CA
+// avoids needing revocation at all (see the ca package), and short lifetimes are
+// only tolerable if nobody has to think about them.
+func (e *Engine) Renew(ctx context.Context, name string, publicKeyPEM []byte) (certPEM []byte, err error) {
+	if name == "" {
+		return nil, ErrNotEnrolled
+	}
+	worker, err := e.store.WorkerByID(ctx, WorkerID(name))
+	if err != nil {
+		return nil, fmt.Errorf("no enrolled worker named %q", name)
+	}
+	if !worker.Enrolled() {
+		// A worker that registered by claiming a name has nothing to renew,
+		// and issuing one here would hand out an identity without the step
+		// that decides what it is allowed to be.
+		return nil, fmt.Errorf("worker %q was never enrolled", name)
+	}
+
+	authority, err := e.Authority()
+	if err != nil {
+		return nil, err
+	}
+	block, _ := pem.Decode(publicKeyPEM)
+	if block == nil {
+		return nil, errors.New("the renewing worker sent no public key")
+	}
+	pub, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("the renewing worker's public key is unusable: %w", err)
+	}
+
+	certPEM, err = authority.Issue(name, pub)
+	if err != nil {
+		return nil, err
+	}
+	leaf, _ := pem.Decode(certPEM)
+
+	// The recorded fingerprint follows the certificate in use, so `je workers`
+	// names the identity that is actually presenting rather than the one first
+	// issued.
+	if err := e.store.RecordFingerprint(ctx, worker.ID, Fingerprint(leaf.Bytes)); err != nil {
+		return nil, err
+	}
+	e.log.Info("worker certificate renewed", "worker", name)
+	return certPEM, nil
+}

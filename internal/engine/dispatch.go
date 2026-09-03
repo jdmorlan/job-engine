@@ -38,7 +38,10 @@ const LeaseTTL = 90 * time.Second
 
 // HeartbeatInterval is how often a worker should renew. Three fit inside a
 // lease, so two may be lost without consequence.
-const HeartbeatInterval = 30 * time.Second
+//
+// A variable only so a test can compress it, the same as the certificate
+// lifetimes in the ca package. Nothing in the product changes it.
+var HeartbeatInterval = 30 * time.Second
 
 // ErrLeaseLost is C7's fencing signal, returned to a worker whose claim was
 // revoked while it was out of contact. The worker's duty on seeing it is to

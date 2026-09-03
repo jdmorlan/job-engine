@@ -3,14 +3,20 @@ package worker
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/jdmorlan/job-engine/internal/api"
@@ -25,6 +31,10 @@ import (
 // (C1), which is what makes the control plane's timeline complete rather than a
 // partial view assembled from two places.
 type Client struct {
+	// identity is the certificate presented on every connection, when this
+	// worker has one. Nil on a plaintext client.
+	identity *identity
+
 	base *url.URL
 	http *http.Client
 }
@@ -62,17 +72,113 @@ func DialTLS(addr, certPath, keyPath, caPath string) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("bad control plane address %q: %w", addr, err)
 	}
-	return &Client{
-		base: base,
-		http: &http.Client{
-			Timeout: 30 * time.Second,
-			Transport: &http.Transport{TLSClientConfig: &tls.Config{
-				Certificates: []tls.Certificate{cert},
-				RootCAs:      pool,
-				MinVersion:   tls.VersionTLS12,
-			}},
-		},
-	}, nil
+	c := &Client{base: base, identity: &identity{
+		certPath: certPath, keyPath: keyPath,
+	}}
+	c.identity.set(cert)
+
+	c.http = &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{
+			// A callback rather than a fixed list, so a renewed certificate is
+			// picked up by the next connection without rebuilding the client
+			// or dropping anything in flight (D25).
+			GetClientCertificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+				return c.identity.get(), nil
+			},
+			RootCAs:    pool,
+			MinVersion: tls.VersionTLS12,
+		}},
+	}
+	return c, nil
+}
+
+// identity is the certificate this client presents, swappable while it runs.
+type identity struct {
+	certPath, keyPath string
+
+	mu   sync.RWMutex
+	cert tls.Certificate
+}
+
+func (i *identity) get() *tls.Certificate {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	cert := i.cert
+	return &cert
+}
+
+func (i *identity) set(cert tls.Certificate) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.cert = cert
+}
+
+// NotAfter is when the presented certificate stops being accepted.
+func (c *Client) NotAfter() (time.Time, bool) {
+	if c.identity == nil {
+		return time.Time{}, false
+	}
+	cert := c.identity.get()
+	if cert.Leaf == nil {
+		if len(cert.Certificate) == 0 {
+			return time.Time{}, false
+		}
+		parsed, err := x509.ParseCertificate(cert.Certificate[0])
+		if err != nil {
+			return time.Time{}, false
+		}
+		cert.Leaf = parsed
+	}
+	return cert.Leaf.NotAfter, true
+}
+
+// Renew asks for a fresh certificate, presenting the current one as the
+// credential, and starts using it.
+//
+// A new keypair each time rather than a new certificate over the old key: the
+// cost is negligible and it means a key that leaked stops being useful when its
+// certificate expires, rather than living as long as the worker does.
+func (c *Client) Renew(ctx context.Context) error {
+	if c.identity == nil {
+		return errors.New("this worker has no certificate to renew")
+	}
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return err
+	}
+	pubDER, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	if err != nil {
+		return err
+	}
+	out, err := do[api.RenewResponse](ctx, c, http.MethodPost, "/v1/enrol/renew",
+		api.RenewRequest{PublicKey: string(pem.EncodeToMemory(
+			&pem.Block{Type: "PUBLIC KEY", Bytes: pubDER}))})
+	if err != nil {
+		return err
+	}
+
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		return err
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+
+	cert, err := tls.X509KeyPair([]byte(out.Certificate), keyPEM)
+	if err != nil {
+		return fmt.Errorf("the renewed certificate does not match the key: %w", err)
+	}
+
+	// Written before it is used. A process that swapped in memory and then
+	// failed to write would work until it restarted and then not know why.
+	if err := os.WriteFile(c.identity.keyPath, keyPEM, 0o600); err != nil {
+		return err
+	}
+	if err := os.WriteFile(c.identity.certPath, []byte(out.Certificate), 0o644); err != nil {
+		return err
+	}
+	c.identity.set(cert)
+	return nil
 }
 
 // Addr reports where this client is pointed, for log lines and errors.

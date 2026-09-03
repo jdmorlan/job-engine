@@ -44,12 +44,24 @@ const (
 	// LeafLifetime is short because it is what replaces revocation. A worker
 	// renews while it is healthy; one that stops being trusted stops working
 	// within a day without anybody distributing a revocation list.
-	LeafLifetime = 24 * time.Hour
+	//
+	// A variable rather than a constant so that a test can watch a renewal
+	// happen instead of waiting a day for one. Nothing in the product changes
+	// it, and the ordinary lifetime is the value here.
+	defaultLeafLifetime = 24 * time.Hour
 
 	// RenewBefore is when a worker should ask for a new certificate. A third of
 	// the lifetime, so a worker that is asleep or unreachable for a few hours
 	// still has time to renew before it is turned away.
-	RenewBefore = 8 * time.Hour
+	defaultRenewBefore = 8 * time.Hour
+)
+
+// LeafLifetime and RenewBefore are how long an issued identity lasts and how
+// early a worker replaces it. See the constants above for why they are what
+// they are; they are variables only so a test can compress them.
+var (
+	LeafLifetime = defaultLeafLifetime
+	RenewBefore  = defaultRenewBefore
 )
 
 // Authority signs worker identities.

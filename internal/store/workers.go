@@ -404,3 +404,14 @@ func (s *Store) EnrolWorker(ctx context.Context, w Worker) error {
 	}
 	return nil
 }
+
+// RecordFingerprint updates which certificate an identity presents.
+//
+// Separate from EnrolWorker because renewal must not touch name, labels or
+// roles: those were decided at enrolment and a renewal is not an opportunity to
+// revisit them.
+func (s *Store) RecordFingerprint(ctx context.Context, id, fingerprint string) error {
+	_, err := s.state.ExecContext(ctx,
+		`UPDATE workers SET cert_fingerprint = ? WHERE id = ?`, fingerprint, id)
+	return err
+}

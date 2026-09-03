@@ -3425,7 +3425,80 @@ real `sops` binary rather than on having read the spec carefully.
 
 Identity moved last deliberately. Steps 2-4 are useful without it and it is the
 largest piece; doing it first would have blocked everything behind the thing least
-likely to be finished in one sitting.**Your response:**
+likely to be finished in one sitting.
+
+#### Identity for clients, and retiring the plaintext path
+
+> *"How hard would it be to have a cert for my laptop, for the client? It could
+> act like an identity and authorization layer, or not? I also think we should
+> get to a point where the cert stuff is so easy that we can completely eliminate
+> the path where you don't need one."*
+
+**Both adopted.** The second is the destination, and the first turns out not to
+be new scope.
+
+**A client identity closes two things that are already half-built.**
+`RunOptions.Actor` is described as *"the person responsible"* and D7 uses it to
+tell a human intervention from an automatic retry — but it arrives in the request
+body, so it is a claim, exactly as a worker's name was before step 5b. A
+certificate makes attribution true rather than asserted, which is the same fix
+applied to the human side. And step 5's remaining item is binding an age key to
+an enrolled identity; with a client identity, `je secret recipients add
+jays-laptop` resolves a name to a key the control plane knows rather than one
+somebody pasted. "Humans are recipients too" does not really work without it.
+
+**Authorization is mostly already done, and not by a policy engine.** Worth
+noticing before anyone reaches for RBAC, which N1 excludes:
+
+- **For secrets the encryption is the authorization layer.** An identity that is
+  not a recipient cannot read a value. That is enforced by mathematics, and a
+  policy layer on top would be a second, weaker mechanism guarding the same
+  thing.
+- **`actingAsSelf` is authorization**, and it needed no policy either: a
+  certificate for `laptop` cannot claim work leased to `buildbox`, because the
+  check is structural.
+
+What is genuinely ungated is non-secret mutation — `je run`, `je source remove`.
+For one operator that needs nothing, and the rule stands: **let a second person
+demand it rather than building it speculatively**, which is how D20 and D21 treat
+everything else.
+
+**Retiring plaintext is blocked on renewal, not on certificates.** The friction
+people associate with mTLS is external authorities, domain validation and manual
+renewal, and a closed CA has none of them. What actually stands in the way, in
+order:
+
+1. ~~**Renewal.**~~ **Shipped.** A worker replaces its own certificate on the
+   heartbeat, while the current one is still valid and therefore still able to
+   authenticate the request -- so renewal is authenticated by the certificate
+   being replaced rather than by a token. A token exists to bootstrap an identity
+   from nothing, and renewal is not that. The name comes from the verified
+   certificate and is never read from the body, so there is nothing to ask for on
+   somebody else's behalf, and renewal cannot change name, labels or roles: those
+   were decided at enrolment and reissuing is not an opportunity to revisit them.
+   A new keypair each time, so a leaked key stops being useful when its
+   certificate expires rather than living as long as the worker.
+2. **Local bootstrap must cost nothing.** The trust anchor to use: **a process
+   that can read the data directory is the control plane's owner** — the CA key
+   is in there, so filesystem access already implies everything a token would
+   grant. A worker sharing the data directory, or the compose volume, enrols
+   itself with no token; only a *remote* worker needs one. That keeps `je
+   quickstart` and `docker compose up` at zero extra steps, which is where the
+   friction would otherwise be felt.
+3. **Clock skew** currently fails as an opaque handshake error and needs a real
+   sentence.
+4. The daemon test harness assumes plaintext.
+
+Then the plaintext path can go — a breaking change worth a version bump, and one
+that rewrites D19's *"the trust boundary is the network"* into **"the trust
+boundary is the certificate."** That is a better sentence, and it closes the gap
+D20 opened the moment a worker could live on somebody else's machine.
+
+**Order: renewal, then local auto-enrolment, then client identity, then drop
+plaintext.** Renewal first because everything after it depends on certificates
+being something you never think about.
+
+**Your response:**
 
 ```
 
