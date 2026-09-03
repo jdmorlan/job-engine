@@ -217,19 +217,20 @@ export function Runs({ onPick }) {
 
 export function Sources() {
   const state = usePoll(api.sources, [], 8000)
+  const jobs = usePoll(api.jobs, [], 8000)
   return (
     <>
       <div className="head">
         <h1>Sources</h1>
         <p>Where definitions come from. Authoring lands here, not in the database (D23).</p>
       </div>
-      <div className="body">
+      <div className="body" style={{ display: 'grid', gap: 18 }}>
         <Panel>
           <Load state={state} empty={(d) => (d.sources?.length ? null : 'no sources registered')}>
             {(d) => (
               <table>
                 <thead>
-                  <tr><th>Name</th><th>Kind</th><th>Ref</th><th>Revision</th><th>Jobs</th><th>Synced</th></tr>
+                  <tr><th>Name</th><th>Kind</th><th>Ref</th><th>Revision</th><th>Jobs</th><th>Secrets</th><th>Synced</th></tr>
                 </thead>
                 <tbody>
                   {d.sources.map((s) => (
@@ -243,6 +244,15 @@ export function Sources() {
                           jobs until they are backed by a repo. Shown, not hidden. */}
                       <td className="mono dim">{s.revision ? s.revision.slice(0, 8) : <span className="faint">none</span>}</td>
                       <td className="mono dim">{s.jobs}</td>
+                      <td className="mono dim">
+                        {s.secrets_error ? (
+                          <span style={{ color: 'var(--fail)' }}>unreadable</span>
+                        ) : s.secrets?.length ? (
+                          `${s.secrets.length} · ${s.recipients?.length ?? 0} key${s.recipients?.length === 1 ? '' : 's'}`
+                        ) : (
+                          <span className="faint">—</span>
+                        )}
+                      </td>
                       <td className="dim">{s.last_error ? <span style={{ color: 'var(--fail)' }}>{s.last_error}</span> : ago(s.synced_at)}</td>
                     </tr>
                   ))}
@@ -251,7 +261,82 @@ export function Sources() {
             )}
           </Load>
         </Panel>
+
+        <Secrets sources={state} jobs={jobs} />
       </div>
     </>
+  )
+}
+
+// The keyless half of the secrets surface (D23/D25).
+//
+// Everything here is answerable without a key: which secrets exist, who can
+// read them, and which jobs declare one nothing supplies. Setting or rotating a
+// value needs a key, and therefore a process on your own machine -- so this view
+// says so rather than offering a button it cannot honour.
+function Secrets({ sources, jobs }) {
+  return (
+    <Panel title="Secrets">
+      <Load state={sources}>
+        {(d) => {
+          const withSecrets = d.sources.filter((s) => s.secrets?.length || s.secrets_error)
+          const misconfigured = (jobs.data?.jobs ?? []).filter((j) => j.config_error)
+
+          if (!withSecrets.length && !misconfigured.length) {
+            return <div className="empty">no source carries encrypted secrets</div>
+          }
+          return (
+            <div className="pad" style={{ display: 'grid', gap: 14 }}>
+              {withSecrets.map((s) => (
+                <div key={s.name}>
+                  <div className="mono" style={{ fontSize: 12 }}>
+                    {s.name}
+                    <span className="faint">
+                      {' \u00b7 '}{s.recipients?.length ?? 0} recipient{s.recipients?.length === 1 ? '' : 's'}
+                    </span>
+                  </div>
+                  {s.secrets_error ? (
+                    <div style={{ color: 'var(--fail)', fontSize: 11.5, marginLeft: 12 }}>{s.secrets_error}</div>
+                  ) : (
+                    <div style={{ marginLeft: 12, marginTop: 4 }}>
+                      {s.secrets.map((name) => (
+                        <span key={name} className="pill" style={{ marginRight: 5 }}>{name}</span>
+                      ))}
+                    </div>
+                  )}
+                  {/* Who can read this is the question an audit asks, so it is
+                      on the page rather than a level down. */}
+                  {s.recipients?.map((r) => (
+                    <div key={r} className="faint mono" style={{ fontSize: 10.5, marginLeft: 12, marginTop: 3 }}>
+                      {r}
+                    </div>
+                  ))}
+                </div>
+              ))}
+
+              {misconfigured.length > 0 && (
+                <div style={{ borderTop: '1px solid var(--line)', paddingTop: 10 }}>
+                  <div className="faint" style={{ fontSize: 10.5, textTransform: 'uppercase', letterSpacing: '.7px', marginBottom: 5 }}>
+                    Cannot run
+                  </div>
+                  {misconfigured.map((j) => (
+                    <div key={j.id} className="mono" style={{ fontSize: 11.5 }}>
+                      {j.slug}
+                      <div style={{ color: 'var(--wait)', marginLeft: 12, fontSize: 11 }}>{j.config_error}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div className="faint" style={{ fontSize: 11, borderTop: '1px solid var(--line)', paddingTop: 10 }}>
+                Names and recipients only — a value needs a key, which lives on your machine.
+                Set or rotate one with <span className="mono">je secret set</span>, or from a web
+                client running locally.
+              </div>
+            </div>
+          )
+        }}
+      </Load>
+    </Panel>
   )
 }

@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/jdmorlan/job-engine/internal/jobdef"
+	"github.com/jdmorlan/job-engine/internal/secretfile"
 	"github.com/jdmorlan/job-engine/internal/store"
 )
 
@@ -62,6 +63,12 @@ func (e *Engine) Load(ctx context.Context, registered store.Source, src jobdef.S
 		return LoadResult{}, err
 	}
 
+	// The encrypted secrets travelling with these definitions, if any (D25).
+	// Read for its *names* only: no key is involved and none could be, which is
+	// the property that lets D10's load-time check keep working for secrets the
+	// control plane cannot read.
+	inRepo, secretsErr := e.repoSecretNames(src)
+
 	result := LoadResult{Revision: snap.Revision, Source: src.Describe()}
 	slugs := make([]string, 0, len(snap.Definitions))
 	jobIDs := make(map[string]int64, len(snap.Definitions))
@@ -87,7 +94,18 @@ func (e *Engine) Load(ctx context.Context, registered store.Source, src jobdef.S
 			if err != nil {
 				return LoadResult{}, err
 			}
-			if len(missing) > 0 {
+			// A secret encrypted into this source satisfies the declaration
+			// just as a locally set one does. The control plane cannot read the
+			// value and does not need to: presence is the question at load
+			// time, and presence is answerable without a key (D25).
+			missing = without(missing, inRepo)
+
+			switch {
+			case secretsErr != "" && len(missing) > 0:
+				// The file is there and unreadable, so "not set" would be a
+				// guess. Say what is actually wrong.
+				configErr = secretsErr
+			case len(missing) > 0:
 				configErr = fmt.Sprintf("secret not set: %s (set it with: je secret set %s)",
 					strings.Join(missing, ", "), missing[0])
 			}
@@ -265,4 +283,49 @@ func (e *Engine) Definition(ctx context.Context, slug string) (*jobdef.Definitio
 	// The snapshot is the job; the line numbers are the file it came from, and
 	// they are stored separately for that reason (P3).
 	return def.WithDeclaredLines(job.Declared), job, nil
+}
+
+// repoSecretNames lists the secrets encrypted alongside these definitions.
+//
+// Returns names and, separately, a description of why it could not read them --
+// rather than an error, because a malformed secrets file must not reject an
+// otherwise valid sync. It makes the jobs that need those secrets
+// misconfigured, which is visible and recoverable; rejecting the whole load
+// would take down jobs that have nothing to do with it (D19's atomicity is
+// about partial application, not about refusing everything).
+func (e *Engine) repoSecretNames(src jobdef.Source) (map[string]bool, string) {
+	reader, ok := src.(jobdef.SidecarReader)
+	if !ok {
+		return nil, ""
+	}
+	body, err := reader.ReadSidecar(secretfile.Name)
+	if err != nil {
+		return nil, fmt.Sprintf("%s could not be read: %v", secretfile.Name, err)
+	}
+	if len(body) == 0 {
+		return nil, ""
+	}
+	file, err := secretfile.Parse(body)
+	if err != nil {
+		return nil, fmt.Sprintf("%s is not readable: %v", secretfile.Name, err)
+	}
+	names := make(map[string]bool, len(file.Names()))
+	for _, n := range file.Names() {
+		names[n] = true
+	}
+	return names, ""
+}
+
+// without removes from missing every name the repository supplies.
+func without(missing []string, supplied map[string]bool) []string {
+	if len(supplied) == 0 {
+		return missing
+	}
+	out := missing[:0]
+	for _, name := range missing {
+		if !supplied[name] {
+			out = append(out, name)
+		}
+	}
+	return out
 }

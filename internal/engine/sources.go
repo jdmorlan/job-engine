@@ -12,6 +12,7 @@ import (
 	"github.com/jdmorlan/job-engine/internal/gitsource"
 	"github.com/jdmorlan/job-engine/internal/jobdef"
 	"github.com/jdmorlan/job-engine/internal/model"
+	"github.com/jdmorlan/job-engine/internal/secretfile"
 	"github.com/jdmorlan/job-engine/internal/store"
 )
 
@@ -35,6 +36,20 @@ type SourceStatus struct {
 	// Path is where a directory source actually reads from, with the built-in
 	// local source's "wherever the jobs directory is" resolved.
 	Path string `json:"path,omitempty"`
+
+	// Secrets are the names encrypted alongside this source's definitions, and
+	// Recipients is how many keys can read them (D25).
+	//
+	// Names and a count, never values: this is the keyless half of the secrets
+	// surface, and the control plane could not report more if it wanted to. It
+	// is also the half worth having in a deployed instance, where "which
+	// secrets exist and who can read them" is exactly what an audit asks.
+	Secrets    []string `json:"secrets,omitempty"`
+	Recipients []string `json:"recipients,omitempty"`
+
+	// SecretsError is why the file above could not be read, when it is present
+	// and unreadable. Distinct from having no secrets at all.
+	SecretsError string `json:"secrets_error,omitempty"`
 }
 
 // Sources lists what is registered, with what each provides.
@@ -69,6 +84,7 @@ func (e *Engine) Sources(ctx context.Context) ([]SourceStatus, error) {
 				status.Chains++
 			}
 		}
+		status.Secrets, status.Recipients, status.SecretsError = e.sourceSecrets(src)
 		out = append(out, status)
 	}
 	return out, nil
@@ -303,4 +319,29 @@ func (e *Engine) SourceTreeDir(ctx context.Context, name, revision string) (stri
 		return "", fmt.Errorf("this control plane does not have %s at revision %s", name, revision)
 	}
 	return dir, nil
+}
+
+// sourceSecrets reads the names and recipients of a source's encrypted secrets.
+//
+// Read here rather than stored, for the same reason the job and chain counts
+// above are counted rather than stored: a cached copy of what a file says is a
+// thing that can disagree with the file. The files are small and this is a
+// read-time view.
+func (e *Engine) sourceSecrets(src store.Source) (names, recipients []string, problem string) {
+	dir := e.SourceDir(src)
+	if dir == "" {
+		return nil, nil, ""
+	}
+	body, err := os.ReadFile(filepath.Join(dir, src.Subpath, secretfile.Name))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil, ""
+	}
+	if err != nil {
+		return nil, nil, fmt.Sprintf("%s could not be read: %v", secretfile.Name, err)
+	}
+	file, err := secretfile.Parse(body)
+	if err != nil {
+		return nil, nil, fmt.Sprintf("%s is not readable: %v", secretfile.Name, err)
+	}
+	return file.Names(), file.Recipients, ""
 }

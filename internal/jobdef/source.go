@@ -2,11 +2,14 @@ package jobdef
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"path"
 	"sort"
 	"strings"
+
+	"github.com/jdmorlan/job-engine/internal/secretfile"
 )
 
 // Source supplies job definitions.
@@ -59,6 +62,29 @@ type FSSource struct {
 	FS   fs.FS
 	Root string // subdirectory holding job files, e.g. "jobs"
 	Name string // what to call this in messages
+}
+
+// SidecarReader is a source that can hand back one file sitting beside the
+// definitions, by name.
+//
+// Optional rather than part of Source, because it is not something every source
+// must be able to do and the interface above is deliberately three lines. The
+// engine asks for it and copes when a source cannot answer -- which is what lets
+// the encrypted secrets file (D25) travel with definitions without jobdef
+// needing to know that secrets exist.
+type SidecarReader interface {
+	ReadSidecar(name string) ([]byte, error)
+}
+
+// ReadSidecar reads a file from this source's root. Missing is not an error:
+// the overwhelmingly common source has no secrets file, and treating its
+// absence as a failure would make the ordinary case the exceptional one.
+func (s FSSource) ReadSidecar(name string) ([]byte, error) {
+	body, err := fs.ReadFile(s.FS, path.Join(s.Root, name))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	return body, err
 }
 
 func (s FSSource) Describe() string {
@@ -218,6 +244,19 @@ func (s Snapshot) validate() error {
 	return checkCycles(s.Chains)
 }
 
+// Sidecars are files that live beside definitions and are not definitions.
+//
+// They have to be named, because "every .yaml in this directory is a job" is
+// otherwise true and the encrypted secrets file (D25) would be parsed as a
+// broken job -- rejecting the whole sync, since D19 makes one unparseable file
+// fail everything.
+var sidecars = map[string]bool{
+	secretfile.Name: true,
+}
+
 func isYAML(name string) bool {
+	if sidecars[name] {
+		return false
+	}
 	return strings.HasSuffix(name, ".yaml") || strings.HasSuffix(name, ".yml")
 }

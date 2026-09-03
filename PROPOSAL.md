@@ -2843,6 +2843,67 @@ phrasing was used in this item to justify embedding the web assets, the honest
 reason is simpler and does not mention Docker at all: one artifact, one version,
 one release process.
 
+#### Capability locality — the web client's one real claim
+
+*(v0.7. This narrows the paragraph above, which said the web client has no claim
+on running natively. It has exactly one, and it is the same shape as the
+worker's.)*
+
+> *"This is why I think there are far more cases than people admit for having the
+> web UI just be easily spun up on your machine — that way you can manage secrets
+> from the UI, but they don't go off your computer."*
+
+The rule this item settled is that the worker must be able to run natively because
+**locality is the capability**: a job driving Apple Shortcuts cannot be
+containerized, so the binary has to stand alone. D25 gives the web client the same
+kind of claim, for a different resource. A web process on your machine can act as
+*you* — your filesystem, your keys — and a container beside the control plane
+structurally cannot. That is not Docker-avoidance. It is the same argument with
+`age` keys in place of hardware.
+
+So the general rule, which covers both:
+
+> **Native matters where a capability requires locality, and nowhere else.**
+
+**This does not produce a second application.** The split people reach for — "a
+separate little secrets UI" — falls in the wrong place. The real line is between
+*reading about secrets* and *reading secrets*, and `secretfile` is built on
+exactly that line:
+
+| Needs no key | Needs a key |
+|---|---|
+| which secrets exist (`Names()`) | setting a value |
+| which are declared but absent | rotating one |
+| who the recipients are | adding a recipient |
+| a job that can never run, and why | — |
+
+Everything on the left belongs *next to the job*, including on a deployed
+instance. Splitting secrets into their own application would push the useful
+column out of the place it is useful, in order to protect a column that is
+already impossible without a key.
+
+**One client, whose capabilities depend on what its process can reach.** A
+deployed instance renders the left column and says plainly why it cannot offer the
+right one — the same way `je workers` degrades to an unmarked table when it cannot
+reach health, rather than hiding the column. A local instance offers both, because
+it is the only one that can. That is not two versions of the app; it is how `je`
+itself already works.
+
+Two constraints that fall out and are not negotiable:
+
+- **Write-only.** D10 is unambiguous that the CLI never prints a secret value and
+  there is no `get`. The web client inherits it: set and rotate, never view.
+  Plaintext moves browser → process on a set, and never back — so a screen share
+  or a shoulder cannot harvest anything the CLI would have refused.
+- **A key-holding process binds to loopback.** `je web run` already defaults to
+  `127.0.0.1`, and this is the reason that must hold when a key is in the process.
+  A form posting a token over plain HTTP is fine on loopback and nowhere else.
+
+The payoff composes with D25's audit story: the local client is where you see the
+recipient list, add a machine, and produce the commit D23's own flow then puts
+through review — grant, encrypt, commit, review, with the private key never
+leaving the laptop.
+
 **Your response:**
 
 ```
