@@ -73,7 +73,20 @@ type Dispatch struct {
 	JobSlug string `json:"job_slug"`
 
 	Command []string `json:"command"`
-	Workdir string   `json:"workdir"`
+
+	// Workdir is the job's declared working directory, UNRESOLVED: empty,
+	// relative, or absolute, exactly as the definition wrote it.
+	//
+	// Resolved by the worker, on the machine where the directory has to exist.
+	// The control plane resolving it was a real bug the moment the two could be
+	// different machines: a control plane in a container would send
+	// /var/lib/je/jobs to a worker on a laptop, where that path is not there --
+	// and if it happened to be there, the job would run in the wrong place,
+	// which is worse.
+	//
+	// Same rule as JOB_WORKDIR and the three output channels below: a path is
+	// resolved by whoever will use it.
+	Workdir string `json:"workdir"`
 
 	// Env is the complete environment minus the four values the worker can
 	// only know locally: JOB_WORKDIR and the three output channel paths (D6).
@@ -249,10 +262,6 @@ func (e *Engine) dispatchFor(ctx context.Context, p Prepared, worker store.Worke
 	if err != nil {
 		return nil, err
 	}
-	workdir, err := e.resolveWorkdir(p.Def.Workdir)
-	if err != nil {
-		return nil, err
-	}
 
 	// The same resolved values that went into the environment drive redaction,
 	// so the two cannot drift (D10). Redaction stays on this side: logs are
@@ -272,7 +281,7 @@ func (e *Engine) dispatchFor(ctx context.Context, p Prepared, worker store.Worke
 		Attempt: attempt.Number,
 		JobSlug: p.Job.Slug,
 		Command: p.Def.Command,
-		Workdir: workdir,
+		Workdir: p.Def.Workdir,
 		Env:     env,
 		Timeout: p.Def.Timeout.D,
 		Grace:   executor.DefaultGrace,

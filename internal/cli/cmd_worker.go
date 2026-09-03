@@ -52,6 +52,9 @@ func runWorker(ctx context.Context, env *Env, args []string) error {
 	addr := fs.String("addr", "", "control plane address (default: the one this data dir records)")
 	concurrency := fs.Int("concurrency", 0, "how many jobs to run at once")
 	verbose := fs.Bool("v", false, "log at debug level")
+	useDocker := fs.Bool("docker", false, "join as a container instead of a native service")
+	native := fs.Bool("native", false, "join as a native service (launchd or systemd)")
+	printOnly := fs.Bool("print", false, "print what would be done, and do nothing")
 	positional, err := parseArgs(fs, args)
 	if err != nil {
 		return err
@@ -74,7 +77,7 @@ func runWorker(ctx context.Context, env *Env, args []string) error {
 		if len(positional) != 1 {
 			return usagef("unexpected argument %q", positional[1])
 		}
-		return removeComponent(env, service.Worker)
+		return removeComponent(ctx, env, service.Worker)
 	default:
 		return usagef("unknown subcommand %q; expected run, join, status or remove",
 			positional[0])
@@ -85,14 +88,28 @@ func runWorker(ctx context.Context, env *Env, args []string) error {
 		// Same resolution the CLI uses, so a worker on this machine finds the
 		// control plane without being told twice.
 		resolved, err := controlPlaneAddr(env)
-		if err != nil {
+		switch {
+		case err == nil:
+			target = resolved
+		case *printOnly:
+			// Printing must not require a running control plane: the whole
+			// point is to read the command before anything exists.
+			target = daemon.DefaultAddr
+		default:
 			return adviseNoControlPlane(err)
 		}
-		target = resolved
 	}
 
 	if positional[0] == "join" {
-		return joinWorker(ctx, env, *name, target, splitLabels(*labels), *concurrency)
+		return joinWorker(ctx, env, workerJoin{
+			name:        *name,
+			addr:        target,
+			labels:      splitLabels(*labels),
+			concurrency: *concurrency,
+			mode: installMode{
+				docker: *useDocker, native: *native, printOnly: *printOnly,
+			},
+		})
 	}
 
 	client, err := worker.Dial(target)
@@ -110,6 +127,7 @@ func runWorker(ctx context.Context, env *Env, args []string) error {
 		Name:        *name,
 		Labels:      splitLabels(*labels),
 		Concurrency: *concurrency,
+		JobsDir:     env.Layout.Jobs,
 		Version:     env.Version,
 		Client:      client,
 		Logger:      logger,

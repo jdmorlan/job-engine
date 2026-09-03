@@ -121,6 +121,13 @@ func executeDispatch(t *testing.T, e *engine.Engine, d engine.Dispatch, ctx cont
 	output := filepath.Join(scratch, "output.json")
 	events := filepath.Join(scratch, "events.jsonl")
 
+	// The worker resolves the workdir, so the helper must too -- otherwise it
+	// would test a path the product does not have (D20).
+	workdir := d.Workdir
+	if workdir == "" {
+		workdir = e.Health(context.Background()).JobsDir
+	}
+
 	env := append([]string{}, d.Env...)
 	env = append(env,
 		"JOB_WORKDIR="+scratch,
@@ -132,7 +139,7 @@ func executeDispatch(t *testing.T, e *engine.Engine, d engine.Dispatch, ctx cont
 	sink := &collectingSink{}
 	result, execErr := executor.Process{}.Run(ctx, executor.Spec{
 		Command: d.Command,
-		Workdir: d.Workdir,
+		Workdir: workdir,
 		Env:     env,
 		Timeout: d.Timeout,
 		Grace:   d.Grace,

@@ -140,33 +140,52 @@ func componentStatus(env *Env, c service.Component) error {
 	return tw.Flush()
 }
 
-// removeComponent unregisters, and says exactly what it did and did not touch.
-func removeComponent(env *Env, c service.Component) error {
+// removeComponent tears down a component however it was set up.
+//
+// It checks both shapes rather than asking which you used, because somebody
+// removing something does not necessarily remember how they installed it --
+// and "nothing to remove" while a container is still running would be a lie.
+func removeComponent(ctx context.Context, env *Env, c service.Component) error {
+	var removed []string
+
+	if stopped, err := stopContainer(ctx, string(c)); err != nil {
+		return err
+	} else if stopped {
+		removed = append(removed, "container "+containerName(string(c)))
+	}
+
 	mgr, err := service.New(c)
-	if err != nil {
-		return err
+	if err == nil {
+		state, err := mgr.Status()
+		if err != nil {
+			return err
+		}
+		if state.Installed {
+			if err := mgr.Uninstall(); err != nil {
+				return err
+			}
+			removed = append(removed, "service "+state.UnitPath)
+		}
 	}
-	state, err := mgr.Status()
-	if err != nil {
-		return err
-	}
-	if !state.Installed {
-		fmt.Fprintf(env.Stdout, "%s is not registered; nothing to remove\n", c)
+
+	if len(removed) == 0 {
+		fmt.Fprintf(env.Stdout, "%s is not set up here; nothing to remove\n", c)
 		return nil
-	}
-	if err := mgr.Uninstall(); err != nil {
-		return err
 	}
 
 	// Naming what survives matters as much as doing the removal. D19's rule
 	// that deleting a definition never deletes history applies to the operator
 	// too: somebody removing a service should not have to wonder whether they
 	// just destroyed their run history.
+	// Naming what survives matters as much as doing the removal. D19's rule
+	// that deleting a definition never deletes history applies to the operator
+	// too: somebody removing a service should not have to wonder whether they
+	// just destroyed their run history.
 	fmt.Fprintf(env.Stdout,
-		"removed the %s service (%s)\n\n"+
+		"removed %s: %s\n\n"+
 			"Left alone: your data directory, job definitions, run history and secrets.\n"+
 			"            %s\n",
-		c, state.UnitPath, env.Layout.Data)
+		c, strings.Join(removed, ", "), env.Layout.Data)
 	return nil
 }
 
@@ -216,24 +235,79 @@ func waitForControlPlane(ctx context.Context, env *Env) error {
 // control plane is the sole writer (C1): a worker that has really joined shows
 // up in `je workers` on the far side. An enrollment that cannot confirm it
 // landed is not finished -- it is a file on disk and a hope.
-func joinWorker(
-	ctx context.Context, env *Env, name, addr string, labels []string, concurrency int,
-) error {
-	args := []string{"--addr", addr, "--name", name, "--labels", strings.Join(labels, ",")}
-	if concurrency > 0 {
-		args = append(args, "--concurrency", strconv.Itoa(concurrency))
+type workerJoin struct {
+	name        string
+	addr        string
+	labels      []string
+	concurrency int
+	mode        installMode
+}
+
+func joinWorker(ctx context.Context, env *Env, j workerJoin) error {
+	args := []string{"--addr", j.addr, "--name", j.name,
+		"--labels", strings.Join(j.labels, ",")}
+	if j.concurrency > 0 {
+		args = append(args, "--concurrency", strconv.Itoa(j.concurrency))
+	}
+
+	verify := func(ctx context.Context) error { return waitForWorker(ctx, env, j.name) }
+	next := fmt.Sprintf(
+		"It will take jobs whose runs_on is one of: %s\n"+
+			"See what is attached:  je workers",
+		strings.Join(j.labels, ", "))
+
+	kind, err := chooseMode(env, j.mode)
+	if err != nil {
+		return err
+	}
+
+	if kind == modeDocker {
+		image, err := dockerImage(env, j.mode)
+		if err != nil {
+			return err
+		}
+		// A container worker can only run what is in its image, and this one
+		// is FROM scratch. That is right for the system worker, whose jobs are
+		// the engine's own, and wrong for yours -- a worker that runs Python
+		// jobs needs a Python image with /je in it. Said here rather than
+		// discovered later as "command not found".
+		fmt.Fprintln(env.Stderr,
+			"note: this image contains only je, so a container worker can run only\n"+
+				"      jobs whose commands are self-contained. Use --native for jobs\n"+
+				"      that need tools from this machine.")
+
+		// Rewritten for the container's view of the network, which is not the
+		// host's. See workerTarget.
+		target, network := workerTarget(ctx, j.addr)
+		containerArgs := append([]string{}, args...)
+		for i := range containerArgs {
+			if containerArgs[i] == j.addr {
+				containerArgs[i] = target
+			}
+		}
+		if network != "" && !j.mode.printOnly {
+			if err := ensureNetwork(ctx); err != nil {
+				return err
+			}
+		}
+
+		spec := dockerSpec{
+			component: "worker",
+			image:     image,
+			args:      containerArgs,
+			// No volume: a worker holds nothing durable (C2). Losing this
+			// container costs its in-flight runs and nothing else.
+			env:     []string{"TZ=" + localTimezone()},
+			network: network,
+		}
+		return runDockerInstall(ctx, env, spec, j.mode, verify, next)
 	}
 
 	return installComponent(ctx, env, installPlan{
 		component: service.Worker,
 		args:      args,
-		verify: func(ctx context.Context) error {
-			return waitForWorker(ctx, env, name)
-		},
-		nextStep: fmt.Sprintf(
-			"It will take jobs whose runs_on is one of: %s\n"+
-				"See what is attached:  je workers",
-			strings.Join(labels, ", ")),
+		verify:    verify,
+		nextStep:  next,
 	})
 }
 
@@ -273,4 +347,127 @@ func waitForWorker(ctx context.Context, env *Env, name string) error {
 		last = errors.New("it did not appear in the worker list")
 	}
 	return last
+}
+
+// installMode is how the caller asked for a component to be kept alive.
+type installMode struct {
+	docker    bool
+	native    bool
+	printOnly bool
+}
+
+type modeKind int
+
+const (
+	modeNative modeKind = iota
+	modeDocker
+)
+
+// chooseMode decides container-versus-native, and says which it chose.
+//
+// It picks a default rather than asking, because an install command that
+// interrogates you is worse than one that acts and explains. But it never
+// chooses silently: the whole argument for removing the CLI's daemonless
+// fallback was that a decision you cannot see is worse than one you disagree
+// with, and that applies at least as much to something that changes your
+// machine.
+func chooseMode(env *Env, mode installMode) (modeKind, error) {
+	switch {
+	case mode.docker && mode.native:
+		return 0, usagef("--docker and --native contradict each other")
+	case mode.native:
+		return modeNative, nil
+	case mode.docker:
+		if err := dockerAvailable(); err != nil {
+			return 0, fmt.Errorf("%w\n\nUse --native to register it with the "+
+				"system service manager instead", err)
+		}
+		return modeDocker, nil
+	}
+
+	// Unasked. Native is the default on a machine with a service manager: it
+	// needs nothing installed, it runs as you -- which is what lets a worker
+	// reach your files -- and it does not require Docker Desktop to be running
+	// for your scheduler to work.
+	if err := dockerAvailable(); err == nil {
+		fmt.Fprintln(env.Stderr,
+			"using the system service manager; --docker to use a container instead")
+	}
+	return modeNative, nil
+}
+
+// runDockerInstall starts a component as a container and verifies it.
+func runDockerInstall(
+	ctx context.Context, env *Env, spec dockerSpec, mode installMode,
+	verify func(context.Context) error, nextStep string,
+) error {
+	// --print exists so this is auditable rather than magic. Everything the
+	// CLI does here you could have typed, and being able to read it is what
+	// makes a generated deployment better than a documented one rather than
+	// merely faster.
+	if mode.printOnly {
+		fmt.Fprintln(env.Stdout, spec.String())
+		return nil
+	}
+
+	if err := spec.start(ctx); err != nil {
+		return err
+	}
+
+	tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintf(tw, "started\t%s as a container\n", spec.component)
+	fmt.Fprintf(tw, "container\t%s\n", containerName(spec.component))
+	fmt.Fprintf(tw, "image\t%s\n", spec.image)
+	fmt.Fprintf(tw, "logs\tdocker logs -f %s\n", containerName(spec.component))
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+
+	if verify != nil {
+		if err := verify(ctx); err != nil {
+			fmt.Fprintf(env.Stderr,
+				"\nstarted, but it is not working yet:\n  %v\n\n"+
+					"  docker logs %s   has what it said on the way up\n",
+				err, containerName(spec.component))
+			return errAttention
+		}
+		fmt.Fprintln(env.Stdout, "\nverified: it is running and answering.")
+	}
+	if nextStep != "" {
+		fmt.Fprintf(env.Stdout, "\n%s\n", nextStep)
+	}
+	return nil
+}
+
+// localTimezone is what the host calls its timezone, for a container that
+// would otherwise default to UTC.
+func localTimezone() string {
+	if tz := os.Getenv("TZ"); tz != "" {
+		return tz
+	}
+	// The zoneinfo symlink is how macOS and most Linux distributions record
+	// it, and reading it is more reliable than parsing `date`.
+	if link, err := os.Readlink("/etc/localtime"); err == nil {
+		if i := strings.Index(link, "zoneinfo/"); i >= 0 {
+			return link[i+len("zoneinfo/"):]
+		}
+	}
+	return "UTC"
+}
+
+// dockerImage resolves the image to run, or explains why it cannot.
+//
+// In --print mode a placeholder is fine and an error is not: printing is meant
+// to be readable before anything is possible, including on a dev build.
+func dockerImage(env *Env, mode installMode) (string, error) {
+	if mode.printOnly {
+		return printableImage(env.Version), nil
+	}
+	image := imageRef(env.Version)
+	if image == "" {
+		return "", fmt.Errorf(
+			"this is a %s build, which has no published image.\n"+
+				"Install a release (see the README) or use --native", env.Version)
+	}
+	return image, nil
 }

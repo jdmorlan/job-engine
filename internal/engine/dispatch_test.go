@@ -513,3 +513,48 @@ func writeJob(t *testing.T, dir, name, script string) {
 		t.Fatal(err)
 	}
 }
+
+// TestWorkdirIsResolvedByTheWorker is the bug a containerised control plane
+// with a native worker would have hit immediately.
+//
+// The control plane used to resolve `workdir` against its own filesystem, so it
+// would hand /var/lib/je/jobs to a worker on a laptop -- a path that is not
+// there, or worse, one that is and is wrong. A path belongs to whoever will use
+// it, which is the same rule the output channels already follow.
+func TestWorkdirIsResolvedByTheWorker(t *testing.T) {
+	ctx := context.Background()
+	e, _ := jobFixture(t, "plain", `echo hi`)
+
+	workerID := ensureWorker(t, e)
+	if _, err := e.TriggerRun(ctx, "plain", engine.RunOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	dispatch, err := e.Claim(ctx, workerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if dispatch.Workdir != "" {
+		t.Errorf("workdir = %q, want it unresolved: the job declared none, and only "+
+			"the worker knows where its own jobs live", dispatch.Workdir)
+	}
+}
+
+// TestDeclaredAbsoluteWorkdirSurvivesTheWire keeps the other half honest: an
+// absolute workdir is the job author's explicit choice and must travel intact.
+func TestDeclaredAbsoluteWorkdirSurvivesTheWire(t *testing.T) {
+	ctx := context.Background()
+	e, _ := jobFixture(t, "elsewhere", `echo hi`, "workdir: /tmp")
+
+	workerID := ensureWorker(t, e)
+	if _, err := e.TriggerRun(ctx, "elsewhere", engine.RunOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	dispatch, err := e.Claim(ctx, workerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dispatch.Workdir != "/tmp" {
+		t.Errorf("workdir = %q, want /tmp", dispatch.Workdir)
+	}
+}

@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -40,6 +41,11 @@ type Options struct {
 
 	// Version must match the control plane's (C10).
 	Version string
+
+	// JobsDir is where this machine keeps job definitions and the code beside
+	// them. It is what an unset `workdir` resolves to (D20: paths are resolved
+	// by whoever will use them).
+	JobsDir string
 
 	Client *Client
 	Logger *slog.Logger
@@ -79,6 +85,9 @@ func New(opts Options) (*Worker, error) {
 	}
 	if opts.Concurrency <= 0 {
 		opts.Concurrency = engine.DefaultConcurrency
+	}
+	if opts.JobsDir == "" {
+		return nil, errors.New("a worker needs a jobs directory to resolve workdirs against")
 	}
 	if opts.Logger == nil {
 		opts.Logger = slog.New(slog.NewTextHandler(os.Stderr, nil))
@@ -235,10 +244,16 @@ func (w *Worker) execute(ctx context.Context, d engine.Dispatch) {
 		"JOB_EVENTS_FILE="+ch.events,
 	)
 
+	workdir, err := w.resolveWorkdir(d.Workdir)
+	if err != nil {
+		w.report(ctx, d, engine.Completion{ExecError: err.Error()})
+		return
+	}
+
 	sink := newLogShipper(w.client, d.RunID, d.Attempt, w.log)
 	result, execErr := executor.Process{}.Run(runCtx, executor.Spec{
 		Command: d.Command,
-		Workdir: d.Workdir,
+		Workdir: workdir,
 		Env:     env,
 		Timeout: d.Timeout,
 		Grace:   d.Grace,
@@ -361,3 +376,52 @@ const maxChannelBytes = 4 << 20
 
 // workerID derives a stable id from a name.
 func workerID(name string) string { return "worker-" + name }
+
+// resolveWorkdir decides where a command runs, on this machine.
+//
+// D20 moved this out of the control plane, which is the only place it can
+// correctly live once the two can be different machines: an unset workdir means
+// "where this worker keeps job definitions", and only the worker knows where
+// that is. A control plane in a container resolving it would send its own
+// container path to a laptop.
+//
+// The consequence worth stating: a job whose command references files next to
+// its definition needs those files on the worker. Splitting the engine in two
+// splits the definition from the code it runs, and closing that gap properly is
+// D22's job (sources), not something to paper over with a path.
+func (w *Worker) resolveWorkdir(declared string) (string, error) {
+	expanded, err := expandHome(declared)
+	if err != nil {
+		return "", err
+	}
+	switch {
+	case expanded == "":
+		return w.opts.JobsDir, nil
+	case filepath.IsAbs(expanded):
+		return expanded, nil
+	default:
+		return filepath.Join(w.opts.JobsDir, expanded), nil
+	}
+}
+
+// expandHome resolves a leading ~ in a configured path.
+//
+// Job files say `workdir: ~/code/almanac`, and a process's Dir is not run
+// through a shell, so nothing else would expand it. Without this the job fails
+// with "no such directory: ~/code/almanac", which reads like a typo.
+//
+// It expands against the *worker's* home, which is the right one: this is the
+// user the job will run as.
+func expandHome(path string) (string, error) {
+	if path == "" || !strings.HasPrefix(path, "~") {
+		return path, nil
+	}
+	if path != "~" && !strings.HasPrefix(path, "~/") {
+		return "", fmt.Errorf("cannot expand %q; only ~/ is supported", path)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, strings.TrimPrefix(path, "~")), nil
+}

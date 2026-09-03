@@ -92,6 +92,7 @@ func runQuickstart(ctx context.Context, env *Env, args []string) error {
 	w, err := worker.New(worker.Options{
 		Name:    defaultWorkerName(),
 		Labels:  splitLabels(*labels),
+		JobsDir: env.Layout.Jobs,
 		Version: env.Version,
 		Client:  client,
 		Logger:  logger,

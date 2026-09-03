@@ -104,11 +104,20 @@ func startDaemonWithWorker(t *testing.T, jobs ...string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	// Asked over the API rather than passed in, which is what a worker on
+	// another machine would have to do anyway.
+	var health struct {
+		JobsDir string `json:"jobs_dir"`
+	}
+	getJSON(t, base+"/v1/health", &health)
+
 	w, err := worker.New(worker.Options{
 		Name:        "test-worker",
 		Labels:      []string{store.DefaultLabel},
 		Concurrency: 2,
 		Version:     "test",
+		JobsDir:     health.JobsDir,
 		Client:      client,
 		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})

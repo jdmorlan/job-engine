@@ -37,6 +37,9 @@ func runControlPlane(ctx context.Context, env *Env, args []string) error {
 	fs := newFlagSet(cmd, env)
 	addr := fs.String("addr", daemon.DefaultAddr, "address to listen on")
 	verbose := fs.Bool("v", false, "log at debug level")
+	useDocker := fs.Bool("docker", false, "install as a container instead of a native service")
+	native := fs.Bool("native", false, "install as a native service (launchd or systemd)")
+	printOnly := fs.Bool("print", false, "print what would be done, and do nothing")
 	positional, err := parseArgs(fs, args)
 	if err != nil {
 		return err
@@ -53,33 +56,77 @@ func runControlPlane(ctx context.Context, env *Env, args []string) error {
 	case "run":
 		return runControlPlaneForeground(ctx, env, *addr, *verbose)
 	case "install":
-		return installControlPlane(ctx, env, *addr)
+		return installControlPlane(ctx, env, *addr, installMode{
+			docker: *useDocker, native: *native, printOnly: *printOnly,
+		})
 	case "status":
 		return componentStatus(env, service.ControlPlane)
 	case "remove":
-		return removeComponent(env, service.ControlPlane)
+		return removeComponent(ctx, env, service.ControlPlane)
 	default:
 		return usagef("unknown subcommand %q; expected run, install, status or remove",
 			positional[0])
 	}
 }
 
-// installControlPlane registers the control plane and proves it answers.
-func installControlPlane(ctx context.Context, env *Env, addr string) error {
+// installControlPlane sets up a control plane and proves it answers.
+func installControlPlane(ctx context.Context, env *Env, addr string, mode installMode) error {
+	// C8, said at the only moment it is cheap to act on. A control plane with
+	// no worker is registered, running, and executes nothing -- and every
+	// other view will look healthy while it does so.
+	next := "It will not run anything yet: a control plane never executes (D20).\n" +
+		"Attach a worker:  je worker join"
+
+	// Verification is "does it answer", not "did the supervisor accept a file".
+	verify := func(ctx context.Context) error { return waitForControlPlane(ctx, env) }
+
+	kind, err := chooseMode(env, mode)
+	if err != nil {
+		return err
+	}
+
+	if kind == modeDocker {
+		image, err := dockerImage(env, mode)
+		if err != nil {
+			return err
+		}
+		spec := dockerSpec{
+			component: "control-plane",
+			image:     image,
+			// 0.0.0.0 inside the container; the published port is what
+			// decides who can reach it, and that stays on loopback.
+			args:  []string{"--addr", "0.0.0.0:7620"},
+			ports: []string{addr + ":7620"},
+			volumes: []string{
+				// A named volume, never a bind mount: SQLite over a macOS
+				// bind mount goes through VirtioFS and has the same class of
+				// silent locking pathology D19 warns about for NFS.
+				"je-data:/var/lib/je",
+				// Definitions are read-only and safe to bind -- no SQLite
+				// involved -- and editing job files on the host is the point.
+				env.Layout.Jobs + ":/var/lib/je/jobs:ro",
+			},
+			// D9/D19: containers default to UTC and schedules mean local time
+			// to a human. This is the "why did my 3am job run at 8pm" bug.
+			env: []string{"TZ=" + localTimezone()},
+			// Joined to the shared bridge so a containerised worker can reach
+			// it by name, which is the only address that works from inside
+			// another container.
+			network: networkName,
+		}
+		if !mode.printOnly {
+			if err := ensureNetwork(ctx); err != nil {
+				return err
+			}
+		}
+		return runDockerInstall(ctx, env, spec, mode, verify, next)
+	}
+
 	return installComponent(ctx, env, installPlan{
 		component: service.ControlPlane,
 		args:      []string{"--addr", addr},
-
-		// Verification is "does it answer", not "did launchd accept a file".
-		verify: func(ctx context.Context) error {
-			return waitForControlPlane(ctx, env)
-		},
-
-		// C8, said at the only moment it is cheap to act on. A control plane
-		// with no worker is registered, running, and executes nothing -- and
-		// every other view will look healthy while it does so.
-		nextStep: "It will not run anything yet: a control plane never executes (D20).\n" +
-			"Attach a worker:  je worker join",
+		verify:    verify,
+		nextStep:  next,
 	})
 }
 

@@ -47,3 +47,20 @@ jobs:
             GOOS="${target%/*}" GOARCH="${target#*/}" CGO_ENABLED=0 \
               go build -o /dev/null ./cmd/je
           done
+
+  # The Dockerfile is a release artifact like any other, and the same argument
+  # applies: a broken image discovered at tag time is discovered at the worst
+  # moment. Built on every push, never pushed to a registry from here.
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: build the image
+        run: docker buildx build --load -t je:ci .
+      - name: it runs, and can be either component
+        run: |
+          set -eu
+          docker run --rm je:ci version
+          docker run --rm je:ci control-plane 2>&1 | grep -q "usage: je control-plane"
+          docker run --rm je:ci worker 2>&1 | grep -q "usage: je worker"
