@@ -2,12 +2,14 @@ package engine
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 
+	"github.com/jdmorlan/job-engine/internal/gitsource"
 	"github.com/jdmorlan/job-engine/internal/jobdef"
 	"github.com/jdmorlan/job-engine/internal/model"
 	"github.com/jdmorlan/job-engine/internal/store"
@@ -107,9 +109,35 @@ func (e *Engine) AddSource(ctx context.Context, src store.Source) (LoadResult, e
 			return LoadResult{}, fmt.Errorf(
 				"the control plane cannot read %s: %w", abs, err)
 		}
+	case store.SourceKindGitHub:
+		repo, err := gitsource.ParseRepo(src.Location)
+		if err != nil {
+			return LoadResult{}, err
+		}
+		src.Location = repo.String()
+		if src.Ref == "" {
+			// Asked rather than assumed: "main" is a convention and not a
+			// rule. Resolved once, here, and stored -- so from now on the
+			// source tracks a named branch rather than re-deciding what its
+			// default is on every sync.
+			client, err := e.gitClient(src)
+			if err != nil {
+				return LoadResult{}, err
+			}
+			branch, err := client.DefaultBranch(ctx, repo)
+			if err != nil {
+				return LoadResult{}, err
+			}
+			src.Ref = branch
+		}
 	default:
 		return LoadResult{}, fmt.Errorf("unknown source kind %q", src.Kind)
 	}
+
+	// Whether this name has ever loaded anything decides what a failure below
+	// means, so it is checked before the registration is written.
+	_, existing := e.store.SourceByName(ctx, src.Name)
+	isNew := errors.Is(existing, sql.ErrNoRows)
 
 	if err := e.store.UpsertSource(ctx, src); err != nil {
 		return LoadResult{}, err
@@ -117,10 +145,19 @@ func (e *Engine) AddSource(ctx context.Context, src store.Source) (LoadResult, e
 
 	result, err := e.loadRegistered(ctx, src)
 	if err != nil {
-		// Registered but not loading is a real state and it is recorded, not
-		// rolled back: `je source` shows the error, and a fixed file plus a
-		// sync is the remedy. Unregistering on a parse error would mean a typo
-		// in one YAML file silently discards the registration you just made.
+		if isNew {
+			// A first registration that cannot load has nothing to keep
+			// serving, so leaving it behind would put a permanently broken row
+			// in `je source` for what is almost always a typo in the argument.
+			if removeErr := e.store.DeleteSource(ctx, src.Name); removeErr != nil {
+				e.log.Error("removing a source that never loaded",
+					"source", src.Name, "error", removeErr)
+			}
+			return LoadResult{}, err
+		}
+		// Re-registering an existing source and failing is different: it has a
+		// last good tree, it is still serving it, and discarding the
+		// registration over one bad file would be the destructive answer.
 		if recordErr := e.store.RecordSourceSync(ctx, src.Name, "", err.Error()); recordErr != nil {
 			e.log.Error("recording a failed source sync", "source", src.Name, "error", recordErr)
 		}
@@ -224,4 +261,23 @@ func (e *Engine) recordSourceSynced(ctx context.Context, src store.Source, was s
 func SourceOfJob(qualified string) string {
 	source, _ := store.SourceOfName(qualified)
 	return source
+}
+
+// sourceRevision is the commit a job's code currently comes from, or empty for
+// a job that is just a file on disk.
+func (e *Engine) sourceRevision(ctx context.Context, job store.Job) (string, error) {
+	if job.Source == "" || job.Source == store.LocalSource {
+		return "", nil
+	}
+	src, err := e.store.SourceByName(ctx, job.Source)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			// The source was unregistered while a job of its was still
+			// runnable. Not a reason to refuse the run: the job row is the
+			// authority on what runs, and an absent revision is honest.
+			return "", nil
+		}
+		return "", err
+	}
+	return src.Revision, nil
 }

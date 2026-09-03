@@ -105,6 +105,12 @@ func (e *Engine) loadRegistered(ctx context.Context, src store.Source) (LoadResu
 	switch src.Kind {
 	case store.SourceKindDir:
 		return e.loadDir(ctx, src, e.SourceDir(src))
+	case store.SourceKindGitHub:
+		result, err := e.loadGitHub(ctx, src)
+		if err == nil && result.Revision != src.Revision {
+			e.pruneTrees(src.Name, result.Revision, src.Revision)
+		}
+		return result, err
 	default:
 		return LoadResult{}, fmt.Errorf("unknown source kind %q", src.Kind)
 	}

@@ -26,3 +26,10 @@ func Abandon(e *Engine) error {
 func SetLastWindowForTest(e *Engine, jobID int64, index int, window time.Time) error {
 	return e.store.SetLastWindow(context.Background(), jobID, index, window)
 }
+
+// SetGitHubBaseURLForTest points fetches at a stub server.
+//
+// Here rather than on Options, because the real API's address is not something
+// this engine is configured with -- it is where GitHub is. A knob for it in the
+// product would be a knob nobody should turn.
+func SetGitHubBaseURLForTest(e *Engine, url string) { e.githubBaseURL = url }

@@ -12,20 +12,25 @@ import (
 
 // Run is a unit of intent, caused by one event, with 1..N attempts (D7).
 type Run struct {
-	ID                int64           `json:"id"`
-	JobID             int64           `json:"job_id"`
-	DefinitionHash    string          `json:"definition_hash"`
-	TriggeringEventID *int64          `json:"triggering_event_id,omitempty"`
-	TriggeringRouteID *int64          `json:"triggering_route_id,omitempty"`
-	RouteHash         string          `json:"route_hash,omitempty"`
-	Status            model.Status    `json:"status"`
-	QueuedAt          time.Time       `json:"queued_at"`
-	StartedAt         *time.Time      `json:"started_at,omitempty"`
-	EndedAt           *time.Time      `json:"ended_at,omitempty"`
-	AttemptCount      int             `json:"attempt_count"`
-	StateVersionIn    *int64          `json:"state_version_in,omitempty"`
-	Output            json.RawMessage `json:"output,omitempty"`
-	Error             string          `json:"error,omitempty"`
+	ID                int64  `json:"id"`
+	JobID             int64  `json:"job_id"`
+	DefinitionHash    string `json:"definition_hash"`
+	TriggeringEventID *int64 `json:"triggering_event_id,omitempty"`
+	TriggeringRouteID *int64 `json:"triggering_route_id,omitempty"`
+
+	// SourceRevision is the commit this run's code came from, for a job whose
+	// source is fetched (D22). Empty for a job on local disk, which has no
+	// revision to record.
+	SourceRevision string          `json:"source_revision,omitempty"`
+	RouteHash      string          `json:"route_hash,omitempty"`
+	Status         model.Status    `json:"status"`
+	QueuedAt       time.Time       `json:"queued_at"`
+	StartedAt      *time.Time      `json:"started_at,omitempty"`
+	EndedAt        *time.Time      `json:"ended_at,omitempty"`
+	AttemptCount   int             `json:"attempt_count"`
+	StateVersionIn *int64          `json:"state_version_in,omitempty"`
+	Output         json.RawMessage `json:"output,omitempty"`
+	Error          string          `json:"error,omitempty"`
 
 	// Overlap is the policy in force when this run was queued (D8).
 	Overlap string `json:"overlap"`
@@ -65,12 +70,14 @@ func (s *Store) CreateRun(ctx context.Context, r Run) (Run, error) {
 	r.Status = model.StatusQueued
 	err := s.state.QueryRowContext(ctx, `
 		INSERT INTO runs (job_id, definition_hash, triggering_event_id,
-		                  triggering_route_id, route_hash, status, queued_at,
-		                  attempt_count, state_version_in, overlap, runs_on)
-		VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+		                  triggering_route_id, route_hash, source_revision,
+		                  status, queued_at, attempt_count, state_version_in,
+		                  overlap, runs_on)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
 		RETURNING id`,
 		r.JobID, r.DefinitionHash, r.TriggeringEventID, r.TriggeringRouteID,
-		nullString(r.RouteHash), string(r.Status), formatTime(r.QueuedAt), r.StateVersionIn,
+		nullString(r.RouteHash), nullString(r.SourceRevision),
+		string(r.Status), formatTime(r.QueuedAt), r.StateVersionIn,
 		r.Overlap, r.RunsOn,
 	).Scan(&r.ID)
 	if err != nil {
@@ -311,10 +318,10 @@ func (s *Store) LatestRunByRoute(ctx context.Context, routeID int64) (Run, error
 func (s *Store) RunTriggeredBy(ctx context.Context, causeRunID, routeID int64) (Run, error) {
 	return scanRun(s.state.QueryRowContext(ctx, `
 		SELECT r.id, r.job_id, r.definition_hash, r.triggering_event_id,
-		       r.triggering_route_id, r.route_hash, r.status, r.queued_at,
-		       r.started_at, r.ended_at, r.attempt_count, r.state_version_in,
-		       r.output, r.error, r.overlap, r.runs_on, r.worker_id,
-		       r.lease_expires_at
+		       r.triggering_route_id, r.route_hash, r.source_revision, r.status,
+		       r.queued_at, r.started_at, r.ended_at, r.attempt_count,
+		       r.state_version_in, r.output, r.error, r.overlap, r.runs_on,
+		       r.worker_id, r.lease_expires_at
 		FROM runs r
 		JOIN events e ON e.id = r.triggering_event_id
 		WHERE e.caused_by_run_id = ? AND r.triggering_route_id = ?
@@ -323,9 +330,9 @@ func (s *Store) RunTriggeredBy(ctx context.Context, causeRunID, routeID int64) (
 
 const selectRun = `
 	SELECT id, job_id, definition_hash, triggering_event_id, triggering_route_id,
-	       route_hash, status, queued_at, started_at, ended_at, attempt_count,
-	       state_version_in, output, error, overlap, runs_on, worker_id,
-	       lease_expires_at
+	       route_hash, source_revision, status, queued_at, started_at, ended_at,
+	       attempt_count, state_version_in, output, error, overlap, runs_on,
+	       worker_id, lease_expires_at
 	FROM runs`
 
 func scanRun(sc scanner) (Run, error) {
@@ -336,17 +343,19 @@ func scanRun(sc scanner) (Run, error) {
 		startedAt sql.NullString
 		endedAt   sql.NullString
 		routeHash sql.NullString
+		revision  sql.NullString
 		output    sql.NullString
 		runErr    sql.NullString
 		workerID  sql.NullString
 		leaseEnds sql.NullString
 	)
 	if err := sc.Scan(&r.ID, &r.JobID, &r.DefinitionHash, &r.TriggeringEventID,
-		&r.TriggeringRouteID, &routeHash, &status, &queuedAt, &startedAt, &endedAt,
-		&r.AttemptCount, &r.StateVersionIn, &output, &runErr, &r.Overlap,
+		&r.TriggeringRouteID, &routeHash, &revision, &status, &queuedAt, &startedAt,
+		&endedAt, &r.AttemptCount, &r.StateVersionIn, &output, &runErr, &r.Overlap,
 		&r.RunsOn, &workerID, &leaseEnds); err != nil {
 		return Run{}, err
 	}
+	r.SourceRevision = revision.String
 	if workerID.Valid {
 		r.WorkerID = &workerID.String
 	}

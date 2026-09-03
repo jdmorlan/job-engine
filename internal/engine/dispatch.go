@@ -292,9 +292,10 @@ func (e *Engine) dispatchFor(ctx context.Context, p Prepared, worker store.Worke
 		if err != nil {
 			return nil, fmt.Errorf("job %s: reading its source: %w", p.Job.Slug, err)
 		}
-		if src.Kind == store.SourceKindDir {
-			sourceRoot = e.SourceDir(src)
-		}
+		// Both kinds: a directory's own path, or the unpacked tree of the
+		// commit a fetched source is serving. Empty means the source has never
+		// been fetched, which the worker reports rather than guessing at.
+		sourceRoot = e.SourceDir(src)
 	}
 
 	e.log.Info("dispatched",

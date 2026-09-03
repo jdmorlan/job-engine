@@ -73,6 +73,10 @@ type Engine struct {
 	routesMu sync.RWMutex
 	routes   map[string][]compiledRoute
 
+	// githubBaseURL is empty in the product and set by tests to a stub. See
+	// export_test.go.
+	githubBaseURL string
+
 	// scheduleReloads carries a request from Sync to a running scheduler, and
 	// a channel to answer on. Unbuffered on purpose: a send that finds nobody
 	// listening means no scheduler is running, which Sync needs to be able to

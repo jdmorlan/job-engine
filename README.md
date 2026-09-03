@@ -339,12 +339,68 @@ $ je init ~/code/weather-jobs
 $ cd ~/code/weather-jobs
 $ je new ingest --script
 $ je source add weather .
+```
+
+Or point it at a repository and let the engine fetch it:
+
+```console
+$ je source add you/weather-jobs
+resolving you/weather-jobs...
+registered weather-jobs -> you/weather-jobs
+  resolved main -> a3f81c2
+  jobs    5
+  chains  1 (2 route(s))
 
 $ je source
-NAME     KIND  WHERE                 JOBS  SYNCED
-local    dir   ~/.je/jobs            2     -
-weather  dir   ~/code/weather-jobs   5     4m ago
+NAME          KIND    WHERE                       REVISION  JOBS  SYNCED
+local         dir     ~/.je/jobs                  -         2     -
+weather-jobs  github  you/weather-jobs@main       a3f81c2   5     4m ago
 ```
+
+No git binary is involved: a repository is a tarball over HTTPS, which is
+`net/http`, `archive/tar` and `compress/gzip` and adds nothing to the
+dependency list. That keeps the single static binary and the `FROM scratch`
+image (D19) intact — a fetched repo works anywhere the engine works.
+
+**A ref always resolves to a commit.** `--ref` takes a branch, a tag or a SHA,
+and a bare `owner/repo` tracks whatever the repository says its own default
+branch is — asked, not assumed, because "main" is a convention and not a rule.
+The resolved commit is what gets cached, what a run records, and what
+`source.synced` names:
+
+```console
+$ je source sync weather-jobs
+weather-jobs  a3f81c2 -> 7e10b4f
+  jobs  5
+
+$ je events
+42  source.synced  {"source":"weather-jobs","from":"a3f81c2","to":"7e10b4f",...}
+```
+
+Without that recorded commit, "what ran?" has no answer for any job whose code
+came from a moving branch — D11 would quietly stop being true for every remote
+job. Trees are cached under their commit, so a sync that resolves to what is
+already here downloads nothing.
+
+**Private repositories** authenticate with a token from the secret store. The
+source records the secret's *name*, never a token, so a registration is safe to
+print and back up:
+
+```console
+$ je secret set GITHUB_TOKEN
+$ je source add you/private-jobs --token GITHUB_TOKEN
+```
+
+This is scheduled execution of code fetched from the internet, running with your
+`PATH` and your `HOME` — the same trust model as a CI runner, which is fine for
+repos you own and worth being clear-eyed about. Pinning to a tag or SHA is as
+easy as tracking a branch, every update from a moving ref is a logged event with
+both revisions, and extraction refuses any archive entry that would land outside
+its own directory.
+
+Fetched sources are re-read on request and once when the control plane starts.
+A source that cannot be reached keeps serving the tree it last fetched and says
+why in `je source`, so a laptop that wakes without a network keeps working.
 
 Every engine has a built-in source, `local` — your jobs directory. Registering
 nothing still leaves somewhere to put a job file.
@@ -540,9 +596,12 @@ table it needs is already in the schema, so it is a feature and not a
 migration. The same goes for `trigger.expired`, the "the thing I was waiting
 for never came" event, which is where the alerting story starts.
 
-**Sources are local directories only, and re-read on request.** `je source add
-you/weather-jobs` — fetching a public or private repo from GitHub, pinned to a
-resolved commit — is the next piece of D22.
+**Sources are re-read on request, not on a timer.** `je source sync`, and once
+at start. A per-source `interval:` is the GitOps version and is not here: an
+engine that silently pulls new code on a schedule before you have watched it do
+so once is a lot of trust to extend up front.
+
+**Only GitHub, and only over HTTPS.** Other hosts, and SSH, are not built.
 
 **Definitions are reloaded on request, not watched.** `je sync` re-reads the
 source and rebuilds the schedule table, so an edit takes effect without dropping
@@ -578,6 +637,7 @@ is the only package that does.
 | `internal/executor` | running a command. Process today, container later (D1). |
 | `internal/secrets` | the local secret store, and log redaction values (D10). |
 | `internal/schedule` | cron and interval windows, including the DST rules (D9). |
+| `internal/gitsource` | fetching a repository as a tarball, and unpacking it safely (D22). |
 | `internal/selfupdate` | finding, verifying and installing a new binary. |
 
 ## Building
@@ -605,4 +665,5 @@ image, in a cluster, and inside a Mac app (D18).
   daemon.json     the control plane's address, so clients can find it
   jobs/           the built-in `local` source (override with JE_JOBS_DIR)
     chains/       chain files, one flow per file
+  sources/        fetched repositories, cached under the commit they came from
 ```

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/jdmorlan/job-engine/internal/jobdef"
@@ -29,6 +30,11 @@ type LoadResult struct {
 	// Sources is how many registered places were read, and FailedSources names
 	// the ones that would not load. Named rather than counted: "1 source
 	// failed" sends somebody looking, and "weather failed" tells them where.
+	// Ref is the branch, tag or commit a fetched source ended up tracking,
+	// which is not always what was asked for: registering without one asks the
+	// repository what its default branch is called.
+	Ref string `json:"ref,omitempty"`
+
 	Sources       int      `json:"sources,omitempty"`
 	FailedSources []string `json:"failed_sources,omitempty"`
 
@@ -227,6 +233,15 @@ func (e *Engine) loadDir(ctx context.Context, registered store.Source, dir strin
 // jobs directory is configured to be", so JE_JOBS_DIR keeps working and nobody
 // has to register anything to write their first job.
 func (e *Engine) SourceDir(src store.Source) string {
+	if src.Kind == store.SourceKindGitHub {
+		// A fetched source lives in the cache, under the commit it came from.
+		// Empty until it has been fetched once, which is what a job dispatched
+		// from an unfetched source has to report rather than guess about.
+		if src.Revision == "" {
+			return ""
+		}
+		return filepath.Join(e.opts.Layout.SourceTree(src.Name, src.Revision), src.Subpath)
+	}
 	if src.Location == "" {
 		return e.opts.Layout.Jobs
 	}

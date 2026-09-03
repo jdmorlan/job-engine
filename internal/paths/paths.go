@@ -85,6 +85,17 @@ func (l Layout) Runtime() string { return filepath.Join(l.Data, "daemon.json") }
 // machine entirely (D19/R2).
 func (l Layout) Endpoint() string { return filepath.Join(l.Data, "endpoint.json") }
 
+// SourceTree is where a fetched source is unpacked, keyed by the commit it
+// came from.
+//
+// Content-addressed on purpose (D22): a commit is immutable, so a tree that has
+// been fetched once never needs fetching again, and two syncs that resolve to
+// the same commit do no work. It also means the path a job ran from is
+// reconstructible from the revision recorded against the run.
+func (l Layout) SourceTree(source, revision string) string {
+	return filepath.Join(l.Data, "sources", source, revision)
+}
+
 // Chains is where chain files live -- one flow per file, filename is the
 // chain name (D17).
 func (l Layout) Chains() string { return filepath.Join(l.Jobs, "chains") }

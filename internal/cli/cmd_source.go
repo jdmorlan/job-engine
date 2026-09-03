@@ -11,13 +11,14 @@ import (
 
 	"github.com/jdmorlan/job-engine/internal/api"
 	"github.com/jdmorlan/job-engine/internal/engine"
+	"github.com/jdmorlan/job-engine/internal/gitsource"
 	"github.com/jdmorlan/job-engine/internal/store"
 )
 
 func init() {
 	register(&Command{
 		Name:  "source",
-		Args:  "[add <name> <path> | sync <name> | remove <name>]",
+		Args:  "[add [<name>] <owner/repo | path> | sync <name> | remove <name>]",
 		Usage: "register and inspect the places definitions come from",
 		Long: "Definitions and the code they run arrive from named sources, and a\n" +
 			"source is a whole tree rather than a pile of YAML: the scripts a job\n" +
@@ -35,6 +36,8 @@ func init() {
 func runSource(ctx context.Context, env *Env, args []string) error {
 	fs := newFlagSet(commands["source"], env)
 	subpath := fs.String("path", "", "the directory within the tree holding job files")
+	ref := fs.String("ref", "", "branch, tag or commit to track (default: the repository's own default branch)")
+	token := fs.String("token", "", "name of the secret holding a GitHub token, for a private repo")
 	rest, err := parseArgs(fs, args)
 	if err != nil {
 		return err
@@ -45,10 +48,22 @@ func runSource(ctx context.Context, env *Env, args []string) error {
 
 	switch verb := rest[0]; verb {
 	case "add":
-		if len(rest) != 3 {
-			return usagef("je source add <name> <path>")
+		// The name is optional: `je source add you/weather-jobs` should just
+		// work, and the repository already has a name.
+		var name, location string
+		switch len(rest) {
+		case 2:
+			location = rest[1]
+			name = defaultSourceName(location)
+		case 3:
+			name, location = rest[1], rest[2]
+		default:
+			return usagef("je source add [<name>] <owner/repo | path>")
 		}
-		return addSource(ctx, env, rest[1], rest[2], *subpath)
+		return addSource(ctx, env, sourceSpec{
+			name: name, location: location,
+			subpath: *subpath, ref: *ref, token: *token,
+		})
 	case "sync":
 		if len(rest) != 2 {
 			return usagef("je source sync <name>")
@@ -72,10 +87,10 @@ func listSources(ctx context.Context, env *Env) error {
 		}
 
 		tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(tw, "NAME\tKIND\tWHERE\tJOBS\tSYNCED")
+		fmt.Fprintln(tw, "NAME\tKIND\tWHERE\tREVISION\tJOBS\tSYNCED")
 		for _, s := range sources {
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\n",
-				s.Name, s.Kind, sourceWhere(s), s.Jobs, sourceSynced(s))
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%s\n",
+				s.Name, s.Kind, sourceWhere(s), sourceRevision(s), s.Jobs, sourceSynced(s))
 		}
 		if err := tw.Flush(); err != nil {
 			return err
@@ -102,45 +117,159 @@ func listSources(ctx context.Context, env *Env) error {
 	})
 }
 
-func addSource(ctx context.Context, env *Env, name, path, subpath string) error {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return err
+type sourceSpec struct {
+	name     string
+	location string
+	subpath  string
+	ref      string
+	token    string
+}
+
+// defaultSourceName is the repository or directory's own name, so registering
+// something does not require inventing a second name for it.
+//
+// Lowercased and cleaned, because a source name prefixes every job name from
+// it and job names are slugs -- and half of GitHub is called Hello-World.
+func defaultSourceName(location string) string {
+	if gitsource.LooksLikeRepo(location) {
+		if repo, err := gitsource.ParseRepo(location); err == nil {
+			return slugify(repo.Name)
+		}
 	}
-	// Checked here as well as on the control plane, because the message can be
-	// better: this side knows whether the path exists *on the machine you
-	// typed it on*, which is the more likely mistake once the control plane is
-	// a container somewhere else.
-	if _, err := os.Stat(abs); err != nil {
-		return fmt.Errorf("%s: %w", abs, err)
+	abs, err := filepath.Abs(location)
+	if err != nil {
+		return slugify(filepath.Base(location))
+	}
+	return slugify(filepath.Base(abs))
+}
+
+// slugify makes a derived name usable. It is deliberately only applied to
+// names we derived: a name somebody typed is validated rather than corrected,
+// since silently registering something under a different name than they asked
+// for is worse than saying no.
+func slugify(name string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(name) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case b.Len() > 0:
+			b.WriteRune('-')
+		}
+	}
+	return strings.Trim(b.String(), "-")
+}
+
+func addSource(ctx context.Context, env *Env, spec sourceSpec) error {
+	req := api.AddSourceRequest{
+		Name:        spec.name,
+		Subpath:     spec.subpath,
+		Ref:         spec.ref,
+		TokenSecret: spec.token,
+	}
+
+	// A path and owner/repo are told apart by shape, so that the thing
+	// somebody would type -- `je source add you/weather-jobs` -- works without
+	// a flag saying which kind it is. A local directory that exists always
+	// wins, since that is unambiguous evidence.
+	local, err := filepath.Abs(spec.location)
+	_, statErr := os.Stat(local)
+	switch {
+	case err == nil && statErr == nil:
+		req.Kind = store.SourceKindDir
+		req.Location = local
+	case gitsource.LooksLikeRepo(spec.location):
+		repo, err := gitsource.ParseRepo(spec.location)
+		if err != nil {
+			return err
+		}
+		req.Kind = store.SourceKindGitHub
+		req.Location = repo.String()
+	default:
+		return fmt.Errorf(
+			"%s is neither a directory here nor a GitHub repository -- "+
+				"write a repository as owner/repo", spec.location)
+	}
+
+	if req.Kind == store.SourceKindGitHub && req.TokenSecret == "" {
+		fmt.Fprintf(env.Stdout, "resolving %s...\n", req.Location)
 	}
 
 	return withClient(ctx, env, func(ctx context.Context, rd *Client) error {
-		result, err := rd.AddSource(ctx, api.AddSourceRequest{
-			Name:     name,
-			Kind:     store.SourceKindDir,
-			Location: abs,
-			Subpath:  subpath,
-		})
+		result, err := rd.AddSource(ctx, req)
 		if err != nil {
 			return err
 		}
 
-		fmt.Fprintf(env.Stdout, "registered %s -> %s\n", name, abs)
+		fmt.Fprintf(env.Stdout, "registered %s -> %s\n", req.Name, req.Location)
+		if result.Revision != "" {
+			fmt.Fprintf(env.Stdout, "  resolved %s -> %s\n",
+				sourceRef(result, req.Ref), shortSHA(result.Revision))
+		}
+		printLoaded(env, req.Name, result)
+		return nil
+	})
+}
+
+// sourceRef is the ref that was actually tracked, which is not necessarily the
+// one that was typed: registering without --ref asks the repository what its
+// default branch is called.
+func sourceRef(result engine.LoadResult, asked string) string {
+	if result.Ref != "" {
+		return result.Ref
+	}
+	if asked != "" {
+		return asked
+	}
+	return "the default branch"
+}
+
+func shortSHA(sha string) string {
+	if len(sha) > 7 {
+		return sha[:7]
+	}
+	return sha
+}
+
+func syncSource(ctx context.Context, env *Env, name string) error {
+	return withClient(ctx, env, func(ctx context.Context, rd *Client) error {
+		before, err := revisionOf(ctx, rd, name)
+		if err != nil {
+			return err
+		}
+
+		result, err := rd.SyncSource(ctx, name)
+		if err != nil {
+			return err
+		}
+
+		// The revision, and whether it moved, is the thing worth reporting: a
+		// sync that changed nothing and a sync that pulled in somebody else's
+		// commit look identical from a job count.
+		switch {
+		case result.Revision == "":
+		case result.Revision == before:
+			fmt.Fprintf(env.Stdout, "%s  %s (unchanged)\n", name, shortSHA(result.Revision))
+		default:
+			fmt.Fprintf(env.Stdout, "%s  %s -> %s\n",
+				name, shortSHA(before), shortSHA(result.Revision))
+		}
 		printLoaded(env, name, result)
 		return nil
 	})
 }
 
-func syncSource(ctx context.Context, env *Env, name string) error {
-	return withClient(ctx, env, func(ctx context.Context, rd *Client) error {
-		result, err := rd.SyncSource(ctx, name)
-		if err != nil {
-			return err
+func revisionOf(ctx context.Context, rd *Client, name string) (string, error) {
+	sources, err := rd.Sources(ctx)
+	if err != nil {
+		return "", err
+	}
+	for _, s := range sources {
+		if s.Name == name {
+			return s.Revision, nil
 		}
-		printLoaded(env, name, result)
-		return nil
-	})
+	}
+	return "", nil
 }
 
 func removeSource(ctx context.Context, env *Env, name string) error {
@@ -188,6 +317,16 @@ func sourceWhere(s engine.SourceStatus) string {
 		return s.Location + "@" + s.Ref
 	}
 	return s.Location
+}
+
+// sourceRevision is the commit a fetched source is currently serving. It is a
+// column of its own because it is the answer to "what code is running?", which
+// is not something the repository name can tell you.
+func sourceRevision(s engine.SourceStatus) string {
+	if s.Revision == "" {
+		return "-"
+	}
+	return shortSHA(s.Revision)
 }
 
 func sourceSynced(s engine.SourceStatus) string {

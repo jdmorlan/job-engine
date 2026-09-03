@@ -1,13 +1,19 @@
 package engine_test
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/jdmorlan/job-engine/internal/engine"
+	"github.com/jdmorlan/job-engine/internal/model"
 	"github.com/jdmorlan/job-engine/internal/store"
 )
 
@@ -234,5 +240,100 @@ func TestTheBuiltInSourceCannotBeRemovedOrReRegistered(t *testing.T) {
 		Name: store.LocalSource, Kind: store.SourceKindDir, Location: t.TempDir(),
 	}); err == nil {
 		t.Error("the built-in source was re-registered over")
+	}
+}
+
+// githubStub serves the two requests a fetch makes, so the whole path -- ref to
+// commit, tarball, unpack, load, run -- is exercised without a network.
+func githubStub(t *testing.T, sha string, files map[string]string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/repos/you/jobs"):
+			// Asked once at registration, so a repository whose default branch
+			// is not called main still works.
+			w.Write([]byte(`{"default_branch":"trunk"}`))
+		case strings.Contains(r.URL.Path, "/commits/"):
+			if !strings.HasSuffix(r.URL.Path, "/commits/trunk") {
+				t.Errorf("resolved %q, want the repository's own default branch", r.URL.Path)
+			}
+			w.Write([]byte(sha))
+		case strings.Contains(r.URL.Path, "/tarball/"):
+			var buf bytes.Buffer
+			gz := gzip.NewWriter(&buf)
+			tw := tar.NewWriter(gz)
+			for name, body := range files {
+				header := &tar.Header{
+					Name:     "you-jobs-" + sha[:7] + "/" + name,
+					Typeflag: tar.TypeReg,
+					Mode:     0o755,
+					Size:     int64(len(body)),
+				}
+				if err := tw.WriteHeader(header); err != nil {
+					t.Error(err)
+					return
+				}
+				if _, err := tw.Write([]byte(body)); err != nil {
+					t.Error(err)
+					return
+				}
+			}
+			tw.Close()
+			gz.Close()
+			w.Write(buf.Bytes())
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+}
+
+func TestAFetchedSourceRunsItsOwnCodeAndRecordsTheCommit(t *testing.T) {
+	ctx := context.Background()
+	e, layout := chainFixture(t, nil, nil)
+
+	const sha = "a3f81c2ffffffffffffffffffffffffffffffffff"
+	server := githubStub(t, sha, map[string]string{
+		"ingest.yaml":       "command: [\"/bin/sh\", \"scripts/ingest.sh\"]\n",
+		"scripts/ingest.sh": "#!/bin/sh\necho ingesting from the repository\n",
+	})
+	defer server.Close()
+	engine.SetGitHubBaseURLForTest(e, server.URL)
+
+	if _, err := e.AddSource(ctx, store.Source{
+		Name: "weather", Kind: store.SourceKindGitHub, Location: "you/jobs",
+	}); err != nil {
+		t.Fatalf("registering a fetched source: %v", err)
+	}
+
+	// The tree is unpacked under the commit it came from, so a tree that has
+	// been fetched once never needs fetching again.
+	tree := layout.SourceTree("weather", sha)
+	if _, err := os.Stat(filepath.Join(tree, "scripts", "ingest.sh")); err != nil {
+		t.Fatalf("the repository was not unpacked where the cache expects it: %v", err)
+	}
+
+	// The job runs its own repository's script, which is the whole point of a
+	// source being a tree rather than a pile of YAML.
+	out, err := runJob(t, e, "weather/ingest", engine.RunOptions{})
+	if err != nil {
+		t.Fatalf("running a job from a fetched source: %v", err)
+	}
+	if out.Run.Status != model.StatusSucceeded {
+		t.Fatalf("status = %s: %s", out.Run.Status, out.Run.Error)
+	}
+	// Without this, "what ran?" is unanswerable for a job whose code came from
+	// a moving branch (D11, D22).
+	if out.Run.SourceRevision != sha {
+		t.Errorf("run recorded revision %q, want the commit it ran from", out.Run.SourceRevision)
+	}
+
+	sources, err := e.Sources(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range sources {
+		if s.Name == "weather" && s.Revision != sha {
+			t.Errorf("source revision = %q", s.Revision)
+		}
 	}
 }

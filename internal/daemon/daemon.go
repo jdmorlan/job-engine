@@ -79,7 +79,14 @@ func Run(ctx context.Context, cfg Config) error {
 
 	// Definitions before schedules: the scheduler builds its table from what
 	// is loaded, so an empty load would mean an empty scheduler.
-	if _, err := eng.LoadFromDisk(ctx); err != nil {
+	//
+	// Every registered source, not just the local directory (D22), which means
+	// a fetched source is re-read on start -- the cadence D22 settles on,
+	// manual plus once at boot. A source that cannot be reached is recorded
+	// and skipped: its jobs are already rows in the database and keep running
+	// from the tree last fetched, so a laptop that wakes without a network
+	// keeps working and says why it did not update.
+	if _, err := eng.Sync(ctx); err != nil {
 		// A broken job file must not stop the daemon. Every other job should
 		// keep running, and `je jobs` is where the problem is visible (P1).
 		cfg.Logger.Error("loading definitions", "error", err)

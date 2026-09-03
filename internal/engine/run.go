@@ -185,6 +185,16 @@ func (e *Engine) Enqueue(ctx context.Context, slug string, opts RunOptions) (*Pr
 		newRun.RouteHash = opts.Route.RouteHash
 	}
 
+	// Which commit's code this run will execute (D22). Snapshotted at enqueue
+	// for the same reason the definition and the overlap policy are: a source
+	// that re-syncs between enqueue and dispatch must not change what this
+	// already-queued run is a record of.
+	if revision, err := e.sourceRevision(ctx, job); err != nil {
+		return nil, err
+	} else {
+		newRun.SourceRevision = revision
+	}
+
 	run, err := e.store.CreateRun(ctx, newRun)
 	if err != nil {
 		return nil, err

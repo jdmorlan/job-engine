@@ -1,0 +1,12 @@
+-- 0008_run_revision: which commit's code a run executed.
+--
+-- D11 makes a run point at the exact definition it ran under, and that was the
+-- whole story while definitions and code lived on the same disk as the engine.
+-- A source fetched from a repository breaks it in half: the definition snapshot
+-- says what the job was, and says nothing about which version of the script it
+-- invoked.
+--
+-- So the run records the source revision alongside the definition hash. Without
+-- it, "what ran?" is unanswerable for any job whose code came from a moving
+-- branch, which is most of the reason to track one.
+ALTER TABLE runs ADD COLUMN source_revision TEXT;
