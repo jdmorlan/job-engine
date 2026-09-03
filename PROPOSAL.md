@@ -201,7 +201,7 @@ architecture), **D16** (daemon lifecycle and generic event ingress).
 | D22 | Job sources | **NEW (v0.5) — two open questions** |
 | D23 | The web client | **NEW (v0.7) — agreed, phase 1 shipped** |
 | D24 | Worker version coherence | **NEW (v0.7) — phase 1 shipped, C10 enforced** |
-| D25 | Secrets that travel with definitions | **NEW (v0.7) — step 1 shipped, 2 questions open** |
+| D25 | Secrets that travel with definitions | **NEW (v0.7) — agreed, step 2 building** |
 | N1 | Non-goals | AGREED |
 | N2 | v1 done | AGREED |
 | Q1 | Storage adapters | AGREED — SQLite only, no adapter |
@@ -3023,7 +3023,7 @@ event for the situation and a new one only when a version actually changes.
 
 ### D25. Secrets that travel with definitions — NEW
 
-**Status:** NEW (v0.7) — agreed in shape; step 1 shipped, steps 2-4 open
+**Status:** NEW (v0.7) — agreed; step 1 shipped, step 2 building
 
 **Your observation:**
 
@@ -3081,13 +3081,124 @@ directory that has none, and the sentence is correct as it stands.
 
 Once the worker receives the tree, the encrypted secrets file is *in* it. The
 control plane serves ciphertext and never needs the key; the worker decrypts what
-it was sent. That is the property worth having, and it arrives without the worker
-touching git at all:
+it was sent.
 
-> **The control plane stops being a secret custodian.**
+#### Why the control plane should not hold secrets — the real reason
 
-A stolen `state.db` yields nothing. Which machines can read which secrets becomes
-a fact recorded in a repository rather than a state nobody can enumerate.
+An earlier draft of this item argued that from a threat model: a stolen
+`state.db` yields nothing. **That framing was weak and is withdrawn.** It does not
+survive contact with the system: a control plane with code execution constructs
+`Dispatch` values itself, so it can put any command on any worker that can decrypt
+and exfiltrate through a channel that is not the log pipe. Redaction is irrelevant
+to that, and no amount of encryption prevents it.
+
+*(What the threat framing did get right, narrowly: `Dispatch.Command` comes from
+the job definition and `RunOptions` carries no command field, so neither API
+access nor a stolen database can inject a command. The attack needs code execution
+on the control plane, which is a much higher bar than the earlier draft implied.
+It is still not a reason to build this.)*
+
+**The real reason is C11, and it is already written down:**
+
+> *"The control plane never executes. No in-process executor, no 'just this once'
+> local path, no `--local` escape hatch."*
+
+Look at what dispatch does today: it calls `e.secrets.Resolve(p.Def.Secrets)` and
+puts the result in `Dispatch.Env`, described as *"the complete environment minus
+the four values the worker can only know locally."* **The control plane is
+building a process environment.** That is execution-time work, in the component
+that does not execute.
+
+It is the same class of leftover as `SourceRoot` being a control-plane path, fixed
+in step 1 for the same reason: D20 moved execution to the worker, and the parts of
+execution that were tangled into dispatch did not all move with it. The control
+plane holding secrets is not a posture anybody chose. It is a seam from before the
+split.
+
+So the sequencing below is not security hardening with an architectural
+justification attached. **It is finishing D20**, and the secrets property is what
+falls out.
+
+> *"I think in either case we should get to a point where the control plane
+> doesn't know secrets at all... not because that's something to check off the
+> list, but because of the architecture of the system."*
+
+**The concrete change:** `Dispatch` carries the *declared names* of the secrets a
+job needs, and the worker resolves them and builds the environment on the machine
+where the process will exist. D10's "only declared secrets are injected" is
+unchanged; it simply happens where the process is.
+
+**One thread this opens and does not close.** It splits secrets into *repository
+secrets*, which the worker resolves, and *`je secret set` store secrets*, which
+the control plane still resolves. Two paths for one concept is worse than one, and
+D10 exists to make secrets a pit of success. Whether the local store also becomes
+worker-side, or stays a deliberate fallback for the single-machine loop, is not
+decided here.
+
+#### Recipients are identities, not labels
+
+> *"Just because your thing is macos doesn't mean it should get secrets. I think a
+> label represents capabilities, not identity."*
+
+**Correct, and an earlier draft of this item had it wrong.** `runs_on: macos` says
+a job needs a machine that can do macOS things. It says nothing about trust: a
+hardened build Mac and somebody's personal laptop can both honestly advertise
+`macos`. Scoping secrets by label would mean **declaring a capability grants
+credentials** — privilege escalation by self-description, and worse given labels
+are self-advertised today.
+
+So recipients are **identities**. That does mean the recipients file changes when a
+machine is added, and the friction is the point: "this machine may now read
+production credentials" should be a reviewed act, not a side effect of a worker
+starting with a new flag.
+
+**Keeping the two axes separate buys a checkable invariant**, which is the real
+argument rather than hygiene:
+
+> A job declares `secrets: [WEATHER_API_KEY]` and `runs_on: macos`. No worker
+> carrying the `macos` label is a recipient of that secret. **The job can never
+> run successfully** — and the control plane can say so at load time, holding no
+> key at all.
+
+Capability and identity are both facts the control plane has, and a
+structure-in-cleartext format tells it which secrets exist without decrypting
+them. That is D10's "fail at load time, not at 3am" extended to the new model, and
+it is only askable because the two axes are distinct. Collapse them and the
+question disappears.
+
+**Humans are recipients too.** You cannot rotate or add a secret you cannot read,
+so the person running `je secret set` is on the list — which also makes the access
+answer honest, since a laptop that can read production credentials is exactly the
+thing an audit wants named.
+
+#### The CLI owns the encryption flow
+
+> *"I think the CLI should facilitate the secrets encryption flow — it should help
+> us do the SOPS/age-like process before we commit to the git repo."*
+
+**Adopted, and it is D10 rather than a new idea.** D10 already ruled that *"nobody
+hand-edits a secrets file; nobody pastes a token into a shell history."* A
+`sops`-style "decrypt into $EDITOR" flow would walk that back, so the same command
+grows a destination:
+
+```
+je secret set WEATHER_API_KEY --source weather
+```
+
+Prompts without echo, encrypts to that source's recipients, writes the ciphertext
+into the repository's secrets file, and leaves a diff to commit. `je secret list`
+still shows names and never values; there is still no `get`.
+
+#### Removing a recipient is not revocation
+
+The operational fact that bites people, stated before it does: **old ciphertext
+stays in git history forever.** Anyone with that commit and that key can still read
+what it held. Removing a worker from the recipients file protects nothing already
+written.
+
+So revocation means **rotation**, and the CLI has to say so rather than let a
+tidy-looking edit imply safety. `je secret revoke` rotates; it does not merely
+edit a list.
 
 This also closes a portability gap D22 left open and did not name: definitions and
 code travel, and secrets do not. Register the weather repo on a second control
@@ -3170,26 +3281,62 @@ roles, and it is not a precedent for any of them.
    the portability gap; the control plane is still a custodian.
 4. **Workers as recipients.** The control plane stops being one. Needs 1–3.
 
-#### Open questions for you
+#### Resolutions
 
-1. **Is the control plane holding the key (step 3) a resting place or a waypoint?**
-   If it is a resting place, step 3 is the destination and step 4 is optional
-   polish. If it is a waypoint, step 3 should be built so that the key location is
-   a strategy from the start rather than an assumption to unpick later. I lean
-   waypoint — "the control plane cannot read your secrets" is the sentence worth
-   being able to say — but it costs a little structure up front and you may
-   reasonably want the simpler thing that works.
+**1. A waypoint, and for C11's reason rather than the one I first gave.** The
+control plane not knowing secrets is the finished state, because building a
+process environment is execution-time work and the control plane does not execute.
+Step 3 is therefore built so the resolver is a strategy from the start, not an
+assumption to unpick.
 
-2. **Full SOPS format, or plain `age`?** SOPS costs a real dependency and gets
-   format compatibility: the `sops` CLI edits the files, and it is a format people
-   already know and can adopt without learning ours. Plain `age` is a much smaller
-   dependency and means our own file format, our own editing command, and nobody
-   else's tooling. Given D22 already decided a repository should be portable and
-   legible on its own, I lean **SOPS format** — but it is the larger commitment of
-   the two and the dependency conversation from D23 is fresh enough to be worth
-   repeating.
+**2. `age`, in a SOPS-shaped file. Not the SOPS library.** Measured rather than
+argued:
 
-**Your response:**
+| Import | Modules pulled in |
+|---|---|
+| `filippo.io/age` | **13** |
+| `github.com/getsops/sops/v3/decrypt` | **341** — 187 of them AWS/Azure/GCP/Vault SDKs |
+
+A project with one direct dependency and a `FROM scratch` base does not import 341
+modules, most of them cloud KMS clients it will never call, to decrypt a file.
+
+But the *structure* is not a SOPS preference, it is forced by what this system
+needs, and it stands whatever the file is called:
+
+- **Keys in cleartext, values encrypted**, so the control plane can verify a
+  declared secret exists while holding no key. Without that, D10's "a missing
+  secret is a definition error, not a 3am surprise" dies for repository secrets --
+  and that is the whole of D10.
+- **One data key, encrypted to the recipients.** So rotating one secret is one
+  changed line rather than a rewritten blob, and adding a recipient touches only
+  the metadata. Under D23 a human reviews these diffs; "4KB of base64 changed" is
+  not a review.
+
+**Byte-for-byte SOPS compatibility is a separate and deferrable question.** It buys
+exactly one thing -- the `sops` CLI can edit our files -- and costs implementing
+their serialisation exactly, including the per-value AAD and the MAC. That is real
+crypto glue where "subtly wrong" is possible. Build the structure with `age` now;
+if wire compatibility is chased later, gate it on a round-trip test against the
+real `sops` binary rather than on having read the spec carefully.
+
+#### Revised sequencing
+
+1. ~~The worker fetches source trees from the control plane~~ — **shipped**.
+2. **The secrets file, and the CLI flow that writes it.** `age`, SOPS-shaped, with
+   `je secret set --source`. Needs no identity work: recipients are age public keys
+   a human manages, which is how people already use age.
+3. **The worker resolves declared secrets and builds its own environment.**
+   `Dispatch` carries names, not values. This is the C11 fix, and it is the step
+   the item is really about.
+4. **Load-time validation without keys** -- declared-but-absent secrets, and the
+   capability/recipient invariant above.
+5. **Enrolled identity and mTLS.** Worker keys stop being hand-managed, labels stop
+   being self-advertised, and the recipient list becomes trustworthy rather than
+   conventional.
+
+Identity moved last deliberately. Steps 2-4 are useful without it and it is the
+largest piece; doing it first would have blocked everything behind the thing least
+likely to be finished in one sitting.**Your response:**
 
 ```
 
