@@ -26,6 +26,14 @@ type RuntimeInfo struct {
 	PID       int       `json:"pid"`
 	Version   string    `json:"version"`
 	StartedAt time.Time `json:"started_at"`
+
+	// TLS reports that this control plane speaks HTTPS (D25 step 5).
+	//
+	// Recorded rather than probed, because a client guessing the scheme gets a
+	// confusing handshake error either way round. The thing that knows is the
+	// process that bound the socket, so it writes it down -- the same reason
+	// the endpoint file exists at all.
+	TLS bool `json:"tls,omitempty"`
 }
 
 // WriteRuntime publishes the daemon's runtime information atomically.

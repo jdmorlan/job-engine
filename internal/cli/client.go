@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -52,7 +54,23 @@ func Connect(l paths.Layout) (*Client, error) {
 		return nil, err
 	}
 
-	base, err := url.Parse("http://" + addr)
+	// A control plane serving TLS says so in its runtime file, so the CLI does
+	// not have to guess a scheme -- guessing wrong gives a handshake error that
+	// explains nothing, in either direction (D25).
+	scheme, transport := "http://", http.DefaultTransport
+	if usesTLS(l) {
+		pool, err := authorityPool(l)
+		if err != nil {
+			return nil, err
+		}
+		scheme = "https://"
+		transport = &http.Transport{TLSClientConfig: &tls.Config{
+			RootCAs:    pool,
+			MinVersion: tls.VersionTLS12,
+		}}
+	}
+
+	base, err := url.Parse(scheme + addr)
 	if err != nil {
 		return nil, fmt.Errorf("bad engine address %q: %w", addr, err)
 	}
@@ -60,8 +78,36 @@ func Connect(l paths.Layout) (*Client, error) {
 		base: base,
 		// No overall timeout: `je logs -f` will stream indefinitely. Per-request
 		// deadlines belong on the context the caller passes.
-		http: &http.Client{},
+		http: &http.Client{Transport: transport},
 	}, nil
+}
+
+// usesTLS reports whether the control plane this layout points at serves HTTPS.
+func usesTLS(l paths.Layout) bool {
+	if info, err := daemon.ReadRuntime(l.Runtime()); err == nil {
+		return info.TLS
+	}
+	return false
+}
+
+// authorityPool verifies the control plane against the CA it issues from.
+//
+// The CLI presents no certificate of its own: it is not a worker, it has no
+// identity to prove, and read endpoints need none. What it does need is to know
+// it is talking to the right control plane, which this gives it without any
+// public CA or system trust store being involved.
+func authorityPool(l paths.Layout) (*x509.CertPool, error) {
+	body, err := os.ReadFile(l.CACert())
+	if err != nil {
+		return nil, fmt.Errorf(
+			"this control plane serves TLS, and its authority is not readable at %s: %w",
+			l.CACert(), err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(body) {
+		return nil, fmt.Errorf("%s is not a certificate", l.CACert())
+	}
+	return pool, nil
 }
 
 // DialAddr connects to a control plane named directly, skipping the resolution
@@ -76,6 +122,25 @@ func DialAddr(addr string) (*Client, error) {
 		return nil, fmt.Errorf("bad control plane address %q: %w", addr, err)
 	}
 	return &Client{base: base, http: &http.Client{}}, nil
+}
+
+// DialVerified connects to a control plane verified against a CA the caller
+// already has and trusts. Used during enrolment, once the authority has been
+// pinned by fingerprint.
+func DialVerified(addr string, caPEM []byte) (*Client, error) {
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caPEM) {
+		return nil, fmt.Errorf("the control plane's authority is not a certificate")
+	}
+	base, err := url.Parse("https://" + addr)
+	if err != nil {
+		return nil, fmt.Errorf("bad control plane address %q: %w", addr, err)
+	}
+	return &Client{base: base, http: &http.Client{
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{
+			RootCAs: pool, MinVersion: tls.VersionTLS12,
+		}},
+	}}, nil
 }
 
 // resolveAddr finds the control plane, in the order that puts the most

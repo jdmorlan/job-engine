@@ -48,7 +48,11 @@ func (s *Server) Handler() http.Handler {
 	s.registerRuns(mux)
 	s.registerSources(mux)
 	s.registerEnrolment(mux)
-	return mux
+
+	// Identity is attached once, here, so no handler has to remember to look
+	// at r.TLS -- and so the rule that it comes only from a verified chain
+	// lives in one place (D25).
+	return withClientIdentity(mux)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

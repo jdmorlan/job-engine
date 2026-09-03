@@ -28,6 +28,17 @@ type Config struct {
 	Version string
 	Logger  *slog.Logger
 
+	// TLS serves HTTPS with a certificate the control plane issues itself,
+	// from the same authority workers enrol against (D25 step 5).
+	//
+	// Off by default, and that is deliberate rather than timid: every existing
+	// deployment speaks plaintext on a trusted network (D19), and flipping the
+	// transport underneath one would be a breaking change dressed as a security
+	// improvement. On, a presented client certificate becomes an identity; an
+	// absent one is simply nobody, because the CLI and the web client are
+	// clients too and read endpoints need no identity.
+	TLS bool
+
 	// Ready, if set, is closed once the daemon is listening and the runtime
 	// file is published. Tests use it to avoid polling; nothing else needs it.
 	Ready chan<- struct{}
@@ -108,6 +119,7 @@ func Run(ctx context.Context, cfg Config) error {
 		PID:       os.Getpid(),
 		Version:   cfg.Version,
 		StartedAt: time.Now(),
+		TLS:       cfg.TLS,
 	}); err != nil {
 		ln.Close()
 		return err
@@ -118,9 +130,37 @@ func Run(ctx context.Context, cfg Config) error {
 		ReadHeaderTimeout: 10 * time.Second, // cheap protection against a stuck client
 	}
 
+	serve := srv.Serve
+	if cfg.TLS {
+		authority, err := eng.Authority()
+		if err != nil {
+			ln.Close()
+			return fmt.Errorf("preparing the certificate authority: %w", err)
+		}
+		host, _, splitErr := net.SplitHostPort(cfg.Addr)
+		if splitErr != nil || host == "" || host == "0.0.0.0" || host == "::" {
+			// A wildcard bind has no name of its own to certify. Loopback is
+			// always added, and anything else is reached by an address this
+			// process cannot know -- so it is named at the client instead.
+			host = ""
+		}
+		var hosts []string
+		if host != "" {
+			hosts = append(hosts, host)
+		}
+		tlsConfig, err := authority.ServerTLS(hosts)
+		if err != nil {
+			ln.Close()
+			return err
+		}
+		srv.TLSConfig = tlsConfig
+		serve = func(l net.Listener) error { return srv.ServeTLS(l, "", "") }
+		cfg.Logger.Info("serving TLS", "client_certs", "verified if presented")
+	}
+
 	serveErr := make(chan error, 1) // buffered: the goroutine must not block if we already returned
 	go func() {
-		err := srv.Serve(ln)
+		err := serve(ln)
 		if errors.Is(err, http.ErrServerClosed) {
 			err = nil // an expected shutdown is not a failure
 		}

@@ -37,6 +37,7 @@ func runControlPlane(ctx context.Context, env *Env, args []string) error {
 	fs := newFlagSet(cmd, env)
 	addr := fs.String("addr", daemon.DefaultAddr, "address to listen on")
 	verbose := fs.Bool("v", false, "log at debug level")
+	useTLS := fs.Bool("tls", false, "serve HTTPS, and verify any client certificate presented")
 	useDocker := fs.Bool("docker", false, "install as a container instead of a native service")
 	native := fs.Bool("native", false, "install as a native service (launchd or systemd)")
 	printOnly := fs.Bool("print", false, "print what would be done, and do nothing")
@@ -54,7 +55,7 @@ func runControlPlane(ctx context.Context, env *Env, args []string) error {
 
 	switch positional[0] {
 	case "run":
-		return runControlPlaneForeground(ctx, env, *addr, *verbose)
+		return runControlPlaneForegroundTLS(ctx, env, *addr, *verbose, *useTLS)
 	case "install":
 		return installControlPlane(ctx, env, *addr, installMode{
 			docker: *useDocker, native: *native, printOnly: *printOnly,
@@ -133,6 +134,10 @@ func installControlPlane(ctx context.Context, env *Env, addr string, mode instal
 }
 
 func runControlPlaneForeground(ctx context.Context, env *Env, addr string, verbose bool) error {
+	return runControlPlaneForegroundTLS(ctx, env, addr, verbose, false)
+}
+
+func runControlPlaneForegroundTLS(ctx context.Context, env *Env, addr string, verbose, useTLS bool) error {
 	level := slog.LevelInfo
 	if verbose {
 		level = slog.LevelDebug
@@ -147,5 +152,6 @@ func runControlPlaneForeground(ctx context.Context, env *Env, addr string, verbo
 		Addr:    addr,
 		Version: env.Version,
 		Logger:  logger,
+		TLS:     useTLS,
 	})
 }

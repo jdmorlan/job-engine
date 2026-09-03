@@ -20,12 +20,16 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"fmt"
 	"math/big"
+	"net"
 	"os"
 	"path/filepath"
 	"time"
@@ -197,4 +201,93 @@ func serialNumber() (*big.Int, error) {
 	// 128 random bits, which is what makes a serial unguessable as well as
 	// unique -- a counter would leak how many workers have ever enrolled.
 	return rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+}
+
+// ServerCertificate issues the control plane's own TLS certificate.
+//
+// Self-issued from the same authority the workers verify against, which is what
+// makes this closed: there is no public CA involved, no domain to own, and no
+// certificate to renew by hand. A worker trusts this control plane because it
+// enrolled with it, and for no other reason.
+//
+// hosts are the addresses it will be reached on. An IP goes in as an IP SAN and
+// a name as a DNS SAN, because a client checks one or the other and getting it
+// wrong fails as an unhelpful handshake error.
+func (a *Authority) ServerCertificate(hosts []string) (tls.Certificate, error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	serial, err := serialNumber()
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	now := time.Now()
+	template := &x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: "je control plane"},
+		NotBefore:    now.Add(-time.Minute),
+		NotAfter:     now.Add(caLifetime),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	for _, host := range hosts {
+		if ip := net.ParseIP(host); ip != nil {
+			template.IPAddresses = append(template.IPAddresses, ip)
+			continue
+		}
+		template.DNSNames = append(template.DNSNames, host)
+	}
+	// Always reachable as localhost, because that is what the CLI on the same
+	// machine uses and forgetting it makes the local case the broken one.
+	template.DNSNames = append(template.DNSNames, "localhost")
+	template.IPAddresses = append(template.IPAddresses, net.ParseIP("127.0.0.1"), net.ParseIP("::1"))
+
+	der, err := x509.CreateCertificate(rand.Reader, template, a.cert, &key.PublicKey, a.key)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	return tls.X509KeyPair(
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
+		pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}),
+	)
+}
+
+// ServerTLS is the control plane's TLS configuration.
+//
+// VerifyClientCertIfGiven rather than RequireAndVerify, deliberately. The CLI
+// and the web client are clients too and have no certificate; requiring one
+// would make identity a thing that breaks every read command. A presented
+// certificate is verified against this authority and becomes an identity; an
+// absent one is simply nobody, and the endpoints that need an identity say so.
+func (a *Authority) ServerTLS(hosts []string) (*tls.Config, error) {
+	cert, err := a.ServerCertificate(hosts)
+	if err != nil {
+		return nil, err
+	}
+	return &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		ClientAuth:   tls.VerifyClientCertIfGiven,
+		ClientCAs:    a.Pool(),
+		MinVersion:   tls.VersionTLS12,
+	}, nil
+}
+
+// FingerprintPEM is how an authority is named when somebody has to compare it
+// by eye or paste it into a command.
+//
+// SHA-256 of the certificate's DER, hex. The same value `openssl x509 -noout
+// -fingerprint -sha256` prints, minus the colons, so it can be checked with a
+// tool that is already on the machine.
+func FingerprintPEM(certPEM []byte) string {
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		return ""
+	}
+	sum := sha256.Sum256(block.Bytes)
+	return hex.EncodeToString(sum[:])
 }

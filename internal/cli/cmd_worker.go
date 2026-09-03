@@ -59,6 +59,7 @@ func runWorker(ctx context.Context, env *Env, args []string) error {
 	native := fs.Bool("native", false, "join as a native service (launchd or systemd)")
 	printOnly := fs.Bool("print", false, "print what would be done, and do nothing")
 	token := fs.String("token", "", "an enrolment token from `je enrol` on the control plane")
+	caPin := fs.String("ca-pin", "", "the control plane's CA fingerprint, printed beside the token")
 	positional, err := parseArgs(fs, args)
 	if err != nil {
 		return err
@@ -117,7 +118,7 @@ func runWorker(ctx context.Context, env *Env, args []string) error {
 	// that is becoming a worker has no control plane of its own to look up --
 	// that is the entire situation enrolment exists for.
 	if *token != "" {
-		if err := enrolAt(ctx, env, target, *token); err != nil {
+		if err := enrolAt(ctx, env, target, *token, *caPin); err != nil {
 			return err
 		}
 	}
@@ -134,7 +135,11 @@ func runWorker(ctx context.Context, env *Env, args []string) error {
 		})
 	}
 
-	client, err := worker.Dial(target)
+	// An enrolled worker speaks TLS and presents what it was issued; one that
+	// never enrolled speaks plaintext exactly as before. Presence of the files
+	// is the switch rather than a flag, because a machine that has an identity
+	// has no reason not to use it, and one that does not cannot (D25).
+	client, err := dialControlPlane(env, target)
 	if err != nil {
 		return err
 	}
@@ -309,4 +314,18 @@ func runWorkerKeygen(env *Env) error {
 			"Until then this worker can run jobs that need no secrets, and will say\n"+
 			"so plainly for the ones that do.")
 	return nil
+}
+
+// dialControlPlane picks the transport from whether this machine has an issued
+// identity to present.
+func dialControlPlane(env *Env, target string) (*worker.Client, error) {
+	cert, key := env.Layout.IdentityCert(), env.Layout.IdentityKey()
+	caPath := filepath.Join(env.Layout.Data, "ca.crt")
+
+	for _, path := range []string{cert, key, caPath} {
+		if _, err := os.Stat(path); err != nil {
+			return worker.Dial(target)
+		}
+	}
+	return worker.DialTLS(target, cert, key, caPath)
 }

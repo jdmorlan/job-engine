@@ -4,6 +4,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
 	"strings"
@@ -158,5 +159,85 @@ func TestTokensAreNotStoredInUsableForm(t *testing.T) {
 	}
 	if tokens.Outstanding() != 0 {
 		t.Error("a redeemed token is still outstanding")
+	}
+}
+
+// A control plane's own certificate has to verify as a server, and be reachable
+// as localhost -- which is what the CLI on the same machine uses, and the case
+// most easily forgotten.
+func TestTheServerCertificateVerifiesForLocalhostAndItsAddress(t *testing.T) {
+	authority, err := ca.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := authority.ServerTLS([]string{"192.168.1.50"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, err := x509.ParseCertificate(cfg.Certificates[0].Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, host := range []string{"localhost", "127.0.0.1", "192.168.1.50"} {
+		if err := leaf.VerifyHostname(host); err != nil {
+			t.Errorf("the control plane is not reachable as %s: %v", host, err)
+		}
+	}
+	if _, err := leaf.Verify(x509.VerifyOptions{
+		Roots:     authority.Pool(),
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}); err != nil {
+		t.Errorf("the server certificate does not verify against its own CA: %v", err)
+	}
+}
+
+// A client certificate is verified if presented and not required, because the
+// CLI and the web client have none and read endpoints need none. Requiring one
+// would make identity a thing that breaks every read command.
+func TestClientCertificatesAreVerifiedButNotRequired(t *testing.T) {
+	authority, err := ca.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := authority.ServerTLS(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ClientAuth != tls.VerifyClientCertIfGiven {
+		t.Errorf("ClientAuth = %v, want VerifyClientCertIfGiven", cfg.ClientAuth)
+	}
+	if cfg.ClientCAs == nil {
+		t.Error("no client CA pool, so a presented certificate could not be verified")
+	}
+	if cfg.MinVersion < tls.VersionTLS12 {
+		t.Errorf("MinVersion = %x, want at least TLS 1.2", cfg.MinVersion)
+	}
+}
+
+// The fingerprint is what somebody pastes into `--ca-pin`, so it has to be
+// stable and to actually identify this authority rather than any other.
+func TestTheFingerprintIdentifiesTheAuthority(t *testing.T) {
+	ours, err := ca.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	theirs, err := ca.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mine := ca.FingerprintPEM(ours.CertPEM())
+	if len(mine) != 64 {
+		t.Errorf("fingerprint = %q, want 64 hex characters of SHA-256", mine)
+	}
+	if mine != ca.FingerprintPEM(ours.CertPEM()) {
+		t.Error("the fingerprint is not stable")
+	}
+	if mine == ca.FingerprintPEM(theirs.CertPEM()) {
+		t.Error("two different authorities share a fingerprint")
+	}
+	if ca.FingerprintPEM([]byte("not a certificate")) != "" {
+		t.Error("garbage produced a fingerprint, which would compare equal to nothing safely")
 	}
 }

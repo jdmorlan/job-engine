@@ -42,6 +42,13 @@ func (s *Server) handleRegisterWorker(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A request that proved who it is may only register as that worker. An
+	// enrolled machine cannot register as somebody else's identity, which is
+	// the point of having issued it one (D25).
+	if id := IdentityOf(r.Context()); id != "" {
+		req.ID, req.Name = engine.WorkerID(id), id
+	}
+
 	saved, err := s.engine.RegisterWorker(r.Context(), req)
 	switch {
 	case errors.Is(err, engine.ErrVersionSkew), errors.Is(err, engine.ErrLabelTaken):
@@ -70,6 +77,9 @@ type HeartbeatResponse struct {
 }
 
 func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
+	if !s.actingAsSelf(w, r) {
+		return
+	}
 	var req HeartbeatRequest
 	if !decodeBody(s, w, r, &req) {
 		return
@@ -93,6 +103,9 @@ type ClaimResponse struct {
 }
 
 func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request) {
+	if !s.actingAsSelf(w, r) {
+		return
+	}
 	dispatch, err := s.engine.Claim(r.Context(), r.PathValue("id"))
 	switch {
 	case errors.Is(err, engine.ErrVersionSkew):
@@ -186,4 +199,25 @@ func (s *Server) pathInt(w http.ResponseWriter, r *http.Request, name string) (i
 		return 0, false
 	}
 	return n, true
+}
+
+// actingAsSelf refuses a worker endpoint invoked for somebody else's id.
+//
+// Only meaningful once a request carries a verified identity; on a plaintext
+// listener there is none and this is a no-op, which is what keeps enrolment
+// additive rather than a breaking change. Where there IS one, a worker holding
+// a certificate for `laptop` cannot claim work leased to `buildbox` -- and
+// without this the certificate would prove who you are while changing nothing
+// about what you may do.
+func (s *Server) actingAsSelf(w http.ResponseWriter, r *http.Request) bool {
+	id := IdentityOf(r.Context())
+	if id == "" {
+		return true
+	}
+	if r.PathValue("id") != engine.WorkerID(id) {
+		s.writeError(w, http.StatusForbidden,
+			"this certificate identifies "+id+", which is not the worker in this request")
+		return false
+	}
+	return true
 }

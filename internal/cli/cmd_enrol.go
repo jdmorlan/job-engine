@@ -12,7 +12,12 @@ import (
 	"path/filepath"
 	"strings"
 
+	"crypto/tls"
 	"github.com/jdmorlan/job-engine/internal/api"
+	"github.com/jdmorlan/job-engine/internal/ca"
+	"io"
+	"net/http"
+	"time"
 )
 
 func init() {
@@ -62,8 +67,8 @@ func runEnrol(ctx context.Context, env *Env, args []string) error {
 		fmt.Fprintf(env.Stdout, "labels   %s\n", strings.Join(out.Labels, ", "))
 		fmt.Fprintf(env.Stdout, "expires  in %s\n\n", out.Expires)
 		fmt.Fprintf(env.Stdout,
-			"On that machine:\n  je worker join --token %s --addr %s\n\n",
-			out.Token, c.Addr())
+			"On that machine:\n  je worker run --token %s \\\n    --addr %s --ca-pin %s\n\n",
+			out.Token, c.Addr(), out.CAFingerprint)
 		fmt.Fprintln(env.Stdout,
 			"Shown once. The control plane keeps a hash, so this cannot be printed again --\n"+
 				"if it is lost, issue another one.")
@@ -76,12 +81,70 @@ func runEnrol(ctx context.Context, env *Env, args []string) error {
 // Not withClient: that resolves from this machine's own data directory, and a
 // machine that is becoming a worker has none. Being told where to go is the
 // whole situation enrolment exists for.
-func enrolAt(ctx context.Context, env *Env, addr, token string) error {
-	c, err := DialAddr(addr)
+func enrolAt(ctx context.Context, env *Env, addr, token, pin string) error {
+	if pin == "" {
+		// No pin means a plaintext control plane, which is the pre-TLS shape
+		// and still valid on a trusted network (D19).
+		c, err := DialAddr(addr)
+		if err != nil {
+			return err
+		}
+		return enrolWorker(ctx, env, c, token)
+	}
+
+	// The control plane is verified BEFORE the token is sent. A token is a
+	// bearer credential -- whoever receives it becomes this worker -- so
+	// handing it to whatever answers the address would make enrolment the one
+	// step where an impostor is free.
+	caPEM, err := fetchAuthority(ctx, addr, pin)
+	if err != nil {
+		return err
+	}
+	c, err := DialVerified(addr, caPEM)
 	if err != nil {
 		return err
 	}
 	return enrolWorker(ctx, env, c, token)
+}
+
+// fetchAuthority downloads the control plane's CA over an unverified
+// connection and refuses it unless it matches the pin.
+//
+// Unverified is safe here precisely because nothing is trusted yet and nothing
+// secret is sent: the response is a public certificate, and it is discarded
+// unless its fingerprint is the one printed by `je enrol` on the other machine.
+func fetchAuthority(ctx context.Context, addr, pin string) ([]byte, error) {
+	client := &http.Client{
+		Timeout: 15 * time.Second,
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true, // checked by fingerprint below, not by chain
+			MinVersion:         tls.VersionTLS12,
+		}},
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+addr+"/v1/ca", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetching the control plane's authority: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, err
+	}
+
+	got := ca.FingerprintPEM(body)
+	if !strings.EqualFold(got, pin) {
+		return nil, fmt.Errorf(
+			"the control plane at %s is not the one this token was issued by.\n"+
+				"  expected  %s\n"+
+				"  found     %s\n"+
+				"Nothing was sent. Check the address, and do not reuse this token.",
+			addr, pin, got)
+	}
+	return body, nil
 }
 
 // enrolWorker redeems a token on the machine that is becoming a worker.

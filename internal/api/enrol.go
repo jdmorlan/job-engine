@@ -28,6 +28,15 @@ type MintEnrolmentResponse struct {
 	Name    string   `json:"name"`
 	Labels  []string `json:"labels"`
 	Expires string   `json:"expires_in"`
+
+	// CAFingerprint is the SHA-256 of the authority's certificate, so the
+	// machine redeeming this token can verify the control plane *before*
+	// sending it.
+	//
+	// Without it enrolment is a bearer credential handed to whoever answers the
+	// address, and a token stolen in transit is a worker identity. The pin
+	// travels with the token because they are pasted together anyway.
+	CAFingerprint string `json:"ca_fingerprint"`
 }
 
 func (s *Server) handleMintEnrolment(w http.ResponseWriter, r *http.Request) {
@@ -44,9 +53,15 @@ func (s *Server) handleMintEnrolment(w http.ResponseWriter, r *http.Request) {
 	if len(labels) == 0 {
 		labels = []string{"default"}
 	}
+	authority, err := s.engine.Authority()
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	writeJSON(w, http.StatusCreated, MintEnrolmentResponse{
 		Token: token, Name: req.Name, Labels: labels,
-		Expires: ca.TokenLifetime.String(),
+		Expires:       ca.TokenLifetime.String(),
+		CAFingerprint: ca.FingerprintPEM(authority.CertPEM()),
 	})
 }
 

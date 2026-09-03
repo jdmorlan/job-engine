@@ -3,11 +3,14 @@ package worker
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"time"
 
 	"github.com/jdmorlan/job-engine/internal/api"
@@ -33,6 +36,43 @@ func Dial(addr string) (*Client, error) {
 		return nil, fmt.Errorf("bad control plane address %q: %w", addr, err)
 	}
 	return &Client{base: base, http: &http.Client{Timeout: 30 * time.Second}}, nil
+}
+
+// DialTLS connects presenting this machine's issued identity, verifying the
+// control plane against the authority it enrolled with (D25 step 5).
+//
+// No system trust store is involved in either direction. The control plane is
+// trusted because this worker enrolled with it, and the worker is trusted
+// because that same authority signed its certificate -- which is what makes
+// this closed, with no domain to own and no public CA to depend on.
+func DialTLS(addr, certPath, keyPath, caPath string) (*Client, error) {
+	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
+	if err != nil {
+		return nil, fmt.Errorf("reading this worker's identity: %w", err)
+	}
+	caPEM, err := os.ReadFile(caPath)
+	if err != nil {
+		return nil, fmt.Errorf("reading the control plane's authority: %w", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caPEM) {
+		return nil, fmt.Errorf("%s is not a certificate", caPath)
+	}
+	base, err := url.Parse("https://" + addr)
+	if err != nil {
+		return nil, fmt.Errorf("bad control plane address %q: %w", addr, err)
+	}
+	return &Client{
+		base: base,
+		http: &http.Client{
+			Timeout: 30 * time.Second,
+			Transport: &http.Transport{TLSClientConfig: &tls.Config{
+				Certificates: []tls.Certificate{cert},
+				RootCAs:      pool,
+				MinVersion:   tls.VersionTLS12,
+			}},
+		},
+	}, nil
 }
 
 // Addr reports where this client is pointed, for log lines and errors.

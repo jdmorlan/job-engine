@@ -201,7 +201,7 @@ architecture), **D16** (daemon lifecycle and generic event ingress).
 | D22 | Job sources | **NEW (v0.5) — two open questions** |
 | D23 | The web client | **NEW (v0.7) — agreed, phase 1 shipped** |
 | D24 | Worker version coherence | **NEW (v0.7) — phase 1 shipped, C10 enforced** |
-| D25 | Secrets that travel with definitions | **NEW (v0.7) — steps 1-4 shipped, identity open** |
+| D25 | Secrets that travel with definitions | **NEW (v0.7) — steps 1-5 shipped** |
 | N1 | Non-goals | AGREED |
 | N2 | v1 done | AGREED |
 | Q1 | Storage adapters | AGREED — SQLite only, no adapter |
@@ -3084,7 +3084,7 @@ event for the situation and a new one only when a version actually changes.
 
 ### D25. Secrets that travel with definitions — NEW
 
-**Status:** NEW (v0.7) — agreed; steps 1-4 shipped, step 5 open
+**Status:** NEW (v0.7) — agreed; steps 1-5 shipped, key-to-identity binding open
 
 **Your observation:**
 
@@ -3398,9 +3398,30 @@ real `sops` binary rather than on having read the spec carefully.
    public half.
 4. **Load-time validation without keys** -- declared-but-absent secrets
    **shipped**; the capability/recipient invariant needs step 5.
-5. **Enrolled identity and mTLS.** Worker keys stop being hand-managed, labels stop
-   being self-advertised, and the recipient list becomes trustworthy rather than
-   conventional.
+5. **Enrolled identity and mTLS. Shipped.** `je enrol <name> --labels <caps>` on
+   the control plane mints a one-time token; `je worker run --token <t> --ca-pin
+   <fp>` on the other machine generates a keypair, verifies the control plane
+   against the pin *before* sending the token, redeems it, and stores the issued
+   certificate. `--tls` on the control plane serves HTTPS from the same
+   authority, and a verified client certificate becomes the caller's identity.
+
+   Three properties held deliberately. Name and labels are decided by whoever
+   mints the token, enforced in the store's upsert so a registration cannot
+   change them -- a worker asking for `default` while enrolled as `macos` gets
+   `macos`. Labels are *not* signed into the certificate, because a capability is
+   not an identity and changing one should not mean re-enrolling. And client
+   certificates are verified-if-given rather than required, because the CLI and
+   the web client are clients too: requiring one would make identity a thing that
+   breaks every read command.
+
+   Enrolment is additive throughout. A worker that never enrolled registers by
+   claiming its own name, on a plaintext listener, exactly as before -- which is
+   what every existing deployment does.
+
+   What remains for the recipient list to be fully trustworthy is binding a
+   worker's age public key to its enrolled identity, so `je secret recipients
+   add <worker>` can resolve a name to a key the control plane knows rather than
+   one somebody pasted.
 
 Identity moved last deliberately. Steps 2-4 are useful without it and it is the
 largest piece; doing it first would have blocked everything behind the thing least
