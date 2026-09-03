@@ -164,6 +164,43 @@ func migrateDB(db *sql.DB, dir string) error {
 	}
 	sort.Strings(names)
 
+	pending := false
+	for _, name := range names {
+		if !applied[name] {
+			pending = true
+			break
+		}
+	}
+	if !pending {
+		return nil
+	}
+
+	// Foreign keys off for the duration, which is what SQLite's own procedure
+	// for schema changes prescribes -- and here it is not optional. SQLite
+	// refuses `ALTER TABLE ... ADD COLUMN ... NOT NULL DEFAULT x REFERENCES y`
+	// while foreign keys are enforced, but *only when the table already has
+	// rows*: it cannot check the constraint for the rows it is about to
+	// backfill. 0007 does exactly that to `jobs`, `chains` and `routes`.
+	//
+	// That row-dependence is why this shipped: a fresh database migrates
+	// cleanly and every test started from one, so the failure only appeared on
+	// a real install with real history -- the one case nothing exercised.
+	//
+	// The pragma has to be outside a transaction, where it is a silent no-op,
+	// and the single connection (SetMaxOpenConns(1)) is what makes setting it
+	// here reliable.
+	// Recorded before anything is disabled, so a database that was already
+	// inconsistent is not blamed on the migration that ran next.
+	before, err := danglingReferences(db)
+	if err != nil {
+		return err
+	}
+
+	if _, err := db.Exec(`PRAGMA foreign_keys = OFF`); err != nil {
+		return fmt.Errorf("disabling foreign keys for migration: %w", err)
+	}
+	defer db.Exec(`PRAGMA foreign_keys = ON`)
+
 	for _, name := range names {
 		if applied[name] {
 			continue
@@ -194,7 +231,59 @@ func migrateDB(db *sql.DB, dir string) error {
 			return fmt.Errorf("%s: %w", name, err)
 		}
 	}
+
+	// Nothing enforced foreign keys while those ran, so check what the
+	// migrations actually did -- but only hold them responsible for damage they
+	// caused. A database that arrives already inconsistent is not this
+	// migration's doing, and refusing to start over it would replace the bug
+	// this fix exists for with a different one on the same upgrade path.
+	after, err := danglingReferences(db)
+	if err != nil {
+		return err
+	}
+	if introduced := added(before, after); len(introduced) > 0 {
+		return fmt.Errorf("migration left %d dangling reference(s): %s",
+			len(introduced), strings.Join(introduced, ", "))
+	}
 	return nil
+}
+
+// danglingReferences lists every row whose foreign key does not resolve, each
+// as a stable "table row N -> parent" string so two snapshots can be compared.
+func danglingReferences(db *sql.DB) ([]string, error) {
+	rows, err := db.Query(`PRAGMA foreign_key_check`)
+	if err != nil {
+		return nil, fmt.Errorf("checking foreign keys: %w", err)
+	}
+	defer rows.Close()
+
+	var broken []string
+	for rows.Next() {
+		// table, rowid, referred table, and which foreign key of that table.
+		var table, parent string
+		var rowid sql.NullInt64
+		var fkid int
+		if err := rows.Scan(&table, &rowid, &parent, &fkid); err != nil {
+			return nil, fmt.Errorf("checking foreign keys: %w", err)
+		}
+		broken = append(broken, fmt.Sprintf("%s row %d -> %s", table, rowid.Int64, parent))
+	}
+	return broken, rows.Err()
+}
+
+// added returns the entries in after that were not already in before.
+func added(before, after []string) []string {
+	had := make(map[string]bool, len(before))
+	for _, b := range before {
+		had[b] = true
+	}
+	var out []string
+	for _, a := range after {
+		if !had[a] {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 func joinErrs(errs []error) error {
