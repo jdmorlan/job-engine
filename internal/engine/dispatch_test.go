@@ -2,6 +2,7 @@ package engine_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -152,6 +153,91 @@ func TestVersionSkewIsRefusedLoudly(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "version") {
 		t.Errorf("error = %v, want it to say which versions disagree", err)
+	}
+}
+
+// TestAStaleWorkerIsRefusedWorkNotJustRegistration is the other half of C10,
+// and the half that was missing.
+//
+// Registration checks the version once, at startup. A worker that was already
+// running when the control plane upgraded never registers again, so before this
+// it kept claiming and executing at its old version indefinitely -- the exact
+// silent incompatibility C10 exists to prevent, and a real one: a v0.3.x worker
+// knows nothing about the source revisions a v0.4 dispatch carries.
+func TestAStaleWorkerIsRefusedWorkNotJustRegistration(t *testing.T) {
+	ctx := context.Background()
+	e, _ := jobFixture(t, "any", `echo hi`)
+
+	w, err := e.RegisterWorker(ctx, store.Worker{
+		ID: "w1", Name: "w1", Labels: []string{store.DefaultLabel},
+		Roles: []string{store.RoleExecute}, Version: e.Health(ctx).Version,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.TriggerRun(ctx, "any", engine.RunOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The upgrade happens under it.
+	if err := engine.StaleWorkerForTest(e, w, "v0.0.1-ancient"); err != nil {
+		t.Fatal(err)
+	}
+
+	dispatch, err := e.Claim(ctx, "w1")
+	if err == nil {
+		t.Fatal("a worker on an old version was handed work")
+	}
+	if dispatch != nil {
+		t.Error("a refused claim still returned a dispatch")
+	}
+	if !errors.Is(err, engine.ErrVersionSkew) {
+		t.Errorf("error = %v, want ErrVersionSkew so the API can answer 409", err)
+	}
+	if !strings.Contains(err.Error(), "v0.0.1-ancient") {
+		t.Errorf("error = %v, want it to name the worker's version", err)
+	}
+}
+
+// The refusal has to leave a trace. D24 settled that a worker lifecycle
+// operation is not a job -- but it still owes the timeline a record, and a
+// worker polling every few seconds must not write one per poll.
+func TestRefusingAWorkerIsRecordedOnce(t *testing.T) {
+	ctx := context.Background()
+	e, _ := jobFixture(t, "any", `echo hi`)
+
+	w, err := e.RegisterWorker(ctx, store.Worker{
+		ID: "w1", Name: "w1", Labels: []string{store.DefaultLabel},
+		Roles: []string{store.RoleExecute}, Version: e.Health(ctx).Version,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.StaleWorkerForTest(e, w, "v0.0.1-ancient"); err != nil {
+		t.Fatal(err)
+	}
+
+	for range 5 {
+		if _, err := e.Claim(ctx, "w1"); err == nil {
+			t.Fatal("expected the claim to be refused")
+		}
+	}
+
+	events, err := e.RecentEvents(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refusals := 0
+	for _, ev := range events {
+		if ev.Type == engine.EventWorkerRefused {
+			refusals++
+			if !strings.Contains(string(ev.Payload), "v0.0.1-ancient") {
+				t.Errorf("payload = %s, want the worker's version in it", ev.Payload)
+			}
+		}
+	}
+	if refusals != 1 {
+		t.Errorf("five refused claims recorded %d events, want exactly 1", refusals)
 	}
 }
 

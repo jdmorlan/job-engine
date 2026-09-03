@@ -3,6 +3,8 @@ package engine
 import (
 	"context"
 	"time"
+
+	"github.com/jdmorlan/job-engine/internal/store"
 )
 
 // Abandon releases the engine's resources the way process death would: the
@@ -33,3 +35,15 @@ func SetLastWindowForTest(e *Engine, jobID int64, index int, window time.Time) e
 // this engine is configured with -- it is where GitHub is. A knob for it in the
 // product would be a knob nobody should turn.
 func SetGitHubBaseURLForTest(e *Engine, url string) { e.githubBaseURL = url }
+
+// StaleWorkerForTest rewrites a registered worker's version, which is the one
+// state the real API cannot produce: RegisterWorker refuses skew, so a worker
+// only ever arrives at the right version. What this simulates is the control
+// plane being upgraded underneath a worker that is already registered and
+// still polling -- C10's actual failure mode, and the reason Claim has to
+// check as well as Register (D24).
+func StaleWorkerForTest(e *Engine, w store.Worker, version string) error {
+	w.Version = version
+	_, err := e.store.RegisterWorker(context.Background(), w)
+	return err
+}

@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -70,6 +71,11 @@ type Worker struct {
 
 	mu      sync.Mutex
 	holding map[int64]context.CancelFunc
+	fatal   error
+
+	// stop ends the worker's own loops when it has been told something it
+	// cannot continue past, such as C10 skew.
+	stop context.CancelFunc
 }
 
 // New returns a worker. It does not contact the control plane.
@@ -100,13 +106,18 @@ func New(opts Options) (*Worker, error) {
 	}, nil
 }
 
-// Run registers and then serves until the context is cancelled.
+// Run registers and then serves until the context is cancelled, or until the
+// control plane refuses it in a way that cannot be retried.
 func (w *Worker) Run(ctx context.Context) error {
 	id, err := w.register(ctx)
 	if err != nil {
 		return err
 	}
 	w.id = id
+
+	ctx, stop := context.WithCancel(ctx)
+	defer stop()
+	w.stop = stop
 	w.log.Info("worker registered",
 		"name", w.opts.Name, "labels", w.opts.Labels, "concurrency", w.opts.Concurrency)
 
@@ -128,7 +139,25 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 
 	wg.Wait()
-	return nil
+
+	// A refusal is the worker's exit status, not a log line it left behind:
+	// `je worker run` should fail visibly, and a supervisor should see a
+	// non-zero exit rather than restart a worker into the same wall forever.
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.fatal
+}
+
+// refuse records why the worker cannot continue and ends its loops.
+func (w *Worker) refuse(err error) {
+	w.mu.Lock()
+	if w.fatal == nil {
+		w.fatal = err
+	}
+	w.mu.Unlock()
+	if w.stop != nil {
+		w.stop()
+	}
 }
 
 // register identifies this worker to the control plane.
@@ -195,6 +224,18 @@ func (w *Worker) pullLoop(ctx context.Context, slot int) {
 		dispatch, err := w.client.Claim(ctx, w.id)
 		if err != nil {
 			if ctx.Err() != nil {
+				return
+			}
+			// C10: the control plane will not give this worker any work, and
+			// polling again will not change that. Stopping is the honest
+			// response -- and it is what makes the refusal loud, which is the
+			// whole point of the constraint (D24).
+			var refused *StatusError
+			if errors.As(err, &refused) && refused.Status == http.StatusConflict {
+				w.log.Error("refused by the control plane, stopping",
+					"reason", refused.Message,
+					"fix", "restart this worker on the control plane's version")
+				w.refuse(fmt.Errorf("refused by the control plane: %s", refused.Message))
 				return
 			}
 			w.log.Error("claiming work", "slot", slot, "error", err)

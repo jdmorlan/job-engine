@@ -200,7 +200,7 @@ architecture), **D16** (daemon lifecycle and generic event ingress).
 | D21 | Shim injection | **NEW (v0.5) — one open question** |
 | D22 | Job sources | **NEW (v0.5) — two open questions** |
 | D23 | The web client | **NEW (v0.7) — agreed, phase 1 shipped** |
-| D24 | Worker version coherence | **NEW (v0.7) — phase 1 shipped, 3 questions open** |
+| D24 | Worker version coherence | **NEW (v0.7) — phase 1 shipped, C10 enforced** |
 | N1 | Non-goals | AGREED |
 | N2 | v1 done | AGREED |
 | Q1 | Storage adapters | AGREED — SQLite only, no adapter |
@@ -2852,7 +2852,7 @@ one release process.
 
 ### D24. Worker version coherence — NEW
 
-**Status:** NEW (v0.7) — phase 1 shipped; three open questions
+**Status:** NEW (v0.7) — phase 1 shipped, C10 enforced; phases 2-3 open
 
 **Your observation:**
 
@@ -2961,30 +2961,56 @@ the heartbeat already carries. It is not autoscaling, not placement optimization
 not node-to-node communication, and not orchestration. Naming that here so the
 next item cannot cite D24 as precedent for any of them.
 
-#### Open questions for you
+#### Resolutions
 
-1. **Does a worker consent to being restarted remotely?** I would have it declare
-   at registration whether it accepts remote lifecycle commands, derived from how
-   it was installed — a supervised worker yes, a terminal `je worker run` no,
-   since exiting would simply kill it and the fleet view would be offering a
-   button that silently removes a worker. The alternative is that the control
-   plane may always ask and the worker decides in the moment; I prefer the
-   declaration, because it is visible in the fleet view before you click.
+**1. Consent is declared, with defaults doing the work.**
 
-2. **Is an upgrade a job?** P2 says the engine's own work is jobs, which is
-   tempting and would come with runs, logs and history for free. But a job that
-   replaces the binary executing it is a strange object, and its final log line
-   can never be written by the process that earned it. I lean **worker lifecycle
-   operation, not job**, with the fleet view as its record — but P2 is a real
-   principle and this is the first place I want to depart from it, so it should be
-   your call rather than my default.
+> *"I think that's fine... I think like you say we can be smart about defaults
+> for it though."*
 
-3. **Should `Claim` enforce C10 now, before any of the above?** It is three lines:
-   `Claim` already loads the worker row, which carries `Version`. Doing it makes
-   the current silent skew loud immediately. Doing it *without* phase 2 means a
-   stale worker stops working and a human must go restart it by hand — which is
-   correct, and briefly worse than today's silence for anybody mid-upgrade. I
-   would do it, and say so in the release notes.
+A worker declares at registration whether it accepts remote lifecycle commands,
+derived from how it was started rather than asked as a flag nobody wants to
+think about: supervised (launchd, systemd, a container with a restart policy)
+defaults to yes, a bare `je worker run` in a terminal defaults to no. An explicit
+flag overrides either way. The fleet view shows which, so a button never appears
+for a worker that would simply vanish when it exited.
+
+**2. Not a job — but it owes the timeline a record.**
+
+> *"I think it's not a job... but I do think it should show up in events, or at
+> least have some type of history."*
+
+**Adopted, and this is the better answer than either of the ones I offered.** I
+framed it as a fork between "it's a job under P2" and "it's a lifecycle operation
+with the fleet view as its record". The second was too weak: a fleet view shows
+the *current* state and forgets, and "when did this worker fall behind, and for
+how long" is exactly the kind of question this engine exists to answer.
+
+So a lifecycle operation is not a job — it gets no run, no attempt, no exit code,
+and P2 stays about work the engine *performs* — but every one of them **publishes
+an event**, in the same log, with the same causation, queryable by `je events`
+and routable like anything else. P2's spirit is that engine behaviour must be
+visible; the event log is what delivers that, and a run was only ever one way to
+reach it.
+
+This is already true for `worker.registered` and `worker.lost`, which publish
+today. `worker.refused` joins them.
+
+**3. `Claim` enforces C10 now. Shipped with this item.**
+
+> *"I'm the only one using this thing for now, so let's do the right thing and
+> worry less about the others upgrading."*
+
+`Claim` checks the version and refuses, so C10 is true rather than aspirational.
+A refused worker gets a 409 — the same status registration uses, because it is
+the same kind of refusal — and **stops**, rather than logging the same error every
+poll interval forever. Stopping is what makes it loud, which was always the point
+of the constraint, and it exits non-zero so a supervisor sees a failure instead of
+restarting into the same wall.
+
+The refusal publishes `worker.refused`, deduped on the worker and both versions,
+so a worker with four pull slots polling every few seconds produces exactly one
+event for the situation and a new one only when a version actually changes.
 
 **Your response:**
 

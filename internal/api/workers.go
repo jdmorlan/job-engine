@@ -94,7 +94,14 @@ type ClaimResponse struct {
 
 func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request) {
 	dispatch, err := s.engine.Claim(r.Context(), r.PathValue("id"))
-	if err != nil {
+	switch {
+	case errors.Is(err, engine.ErrVersionSkew):
+		// Same status registration uses, for the same reason: this is a
+		// refusal a human has to act on, not a server fault. The worker reads
+		// the status rather than the sentence, and stops (C10/D24).
+		s.writeError(w, http.StatusConflict, err.Error())
+		return
+	case err != nil:
 		s.writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}

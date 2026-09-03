@@ -225,6 +225,17 @@ func (e *Engine) Claim(ctx context.Context, workerID string) (*Dispatch, error) 
 	if err != nil {
 		return nil, err
 	}
+	// C10, enforced where it actually matters. Registration checks the version
+	// once, at startup, which leaves a worker that was already running when the
+	// control plane upgraded claiming work at its old version forever -- it
+	// never re-registers, so nothing looks again. Checking here is what makes
+	// C10 true rather than aspirational: this is the path that would hand stale
+	// code a job (D24).
+	if !sameVersion(worker.Version, e.opts.Version) {
+		e.recordRefusal(ctx, worker)
+		return nil, fmt.Errorf("%w: worker is %s, control plane is %s",
+			ErrVersionSkew, worker.Version, e.opts.Version)
+	}
 	now := e.now()
 	if err := e.store.TouchWorker(ctx, workerID, now); err != nil {
 		return nil, err
@@ -556,6 +567,14 @@ const (
 	EventWorkerRegistered = "worker.registered"
 	EventWorkerLost       = "worker.lost"
 	EventRunLost          = "run.lost"
+
+	// EventWorkerRefused is C10 turning a worker away for version skew.
+	//
+	// D24 settled that a worker lifecycle operation is not a job -- a job that
+	// replaced the binary running it could never write its own last log line --
+	// but that it still owes the timeline a record. This is that record: not a
+	// run, but a fact, in the same log as everything else.
+	EventWorkerRefused = "worker.refused"
 )
 
 func (e *Engine) recordWorkerEvent(ctx context.Context, kind string, w store.Worker, reason string) {
@@ -569,6 +588,37 @@ func (e *Engine) recordWorkerEvent(ctx context.Context, kind string, w store.Wor
 		CreatedAt: e.now(),
 	}); err != nil {
 		e.log.Error("recording "+kind, "worker", w.Name, "error", err)
+	}
+}
+
+// recordRefusal notes that a worker was turned away, once.
+//
+// Published rather than appended, so it reaches routes like every other
+// worker lifecycle event -- "tell me when a worker falls behind" should be
+// expressible the same way everything else is.
+//
+// The dedupe key is the worker plus both versions, because a refused worker
+// polls every few seconds and the situation is one fact, not hundreds. A new
+// event appears only when one of the versions changes, which is the only time
+// anything has actually happened.
+func (e *Engine) recordRefusal(ctx context.Context, w store.Worker) {
+	key := fmt.Sprintf("%s:%s:%s:%s", EventWorkerRefused, w.ID, w.Version, e.opts.Version)
+	payload, _ := json.Marshal(map[string]any{
+		"worker":         w.Name,
+		"worker_version": w.Version,
+		"control_plane":  e.opts.Version,
+		"reason":         "version skew",
+	})
+	if _, _, err := e.publish(ctx, model.Event{
+		Type:      EventWorkerRefused,
+		Source:    model.SourceEngine,
+		Payload:   payload,
+		DedupeKey: &key,
+		CreatedAt: e.now(),
+	}); err != nil {
+		// Never fail a claim over bookkeeping: refusing the work is the part
+		// that protects anything.
+		e.log.Error("recording "+EventWorkerRefused, "worker", w.Name, "error", err)
 	}
 }
 

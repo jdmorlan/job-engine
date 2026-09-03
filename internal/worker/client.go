@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -116,6 +115,16 @@ func do[T any](ctx context.Context, c *Client, method, path string, body any) (T
 	return out, nil
 }
 
+// StatusError is a refusal from the control plane that carries its status, so
+// a caller can tell "you are wrong" from "the server broke" without matching on
+// the wording of a sentence.
+type StatusError struct {
+	Status  int
+	Message string
+}
+
+func (e *StatusError) Error() string { return e.Message }
+
 func decodeError(resp *http.Response) error {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
 	var parsed struct {
@@ -124,7 +133,10 @@ func decodeError(resp *http.Response) error {
 		} `json:"error"`
 	}
 	if json.Unmarshal(body, &parsed) == nil && parsed.Error.Message != "" {
-		return errors.New(parsed.Error.Message)
+		return &StatusError{Status: resp.StatusCode, Message: parsed.Error.Message}
 	}
-	return fmt.Errorf("control plane returned %s: %s", resp.Status, bytes.TrimSpace(body))
+	return &StatusError{
+		Status:  resp.StatusCode,
+		Message: fmt.Sprintf("control plane returned %s: %s", resp.Status, bytes.TrimSpace(body)),
+	}
 }
