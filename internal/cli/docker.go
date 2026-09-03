@@ -199,3 +199,22 @@ func splitHostPort(addr string) (host, port string) {
 	}
 	return addr[:i], addr[i+1:]
 }
+
+// containerImageTag reports the tag a component's container is running.
+//
+// The tag is how a container says which version it is: there is no runtime file
+// to ask, and asking the process would mean the container being healthy enough
+// to answer -- which is exactly what may not be true when somebody is trying to
+// work out why nothing works.
+func containerImageTag(ctx context.Context, component string) string {
+	out, err := exec.CommandContext(ctx, "docker", "inspect",
+		"--format", "{{.Config.Image}}", containerName(component)).Output()
+	if err != nil {
+		return ""
+	}
+	image := strings.TrimSpace(string(out))
+	if i := strings.LastIndex(image, ":"); i >= 0 {
+		return image[i+1:]
+	}
+	return ""
+}

@@ -138,28 +138,52 @@ func runUpgrade(ctx context.Context, env *Env, args []string) error {
 	}
 	fmt.Fprintf(env.Stdout, "\nupgraded to %s at %s\n", release.TagName, target)
 
-	warnStaleControlPlane(env, release.TagName)
+	warnStaleControlPlane(ctx, env, release.TagName)
 	return nil
 }
 
-// warnStaleControlPlane points out that a running control plane is still the
-// old binary.
+// warnStaleControlPlane points out what is still running the old version.
 //
-// The file on disk changed; the process did not. Without this the next thing
-// that happens is somebody upgrading, seeing no change in behaviour, and
-// concluding the upgrade did not work.
-func warnStaleControlPlane(env *Env, newVersion string) {
-	info, err := daemon.ReadRuntime(env.Layout.Runtime())
-	if err != nil {
+// `je upgrade` replaces this binary and deliberately nothing else: upgrading a
+// running control plane drops whatever is mid-flight, which is a bad thing to
+// do as a side effect of swapping a file. But going quiet about it is worse,
+// and quiet is what this did for a containerised control plane -- it read the
+// runtime file, which a container writes inside its own volume where the host
+// never sees it.
+//
+// C10 raises the stakes: a worker refuses to register against a control plane
+// on another version. So a half-upgraded deployment does not drift, it stops --
+// with an error that names two versions and never mentions the container.
+func warnStaleControlPlane(ctx context.Context, env *Env, newVersion string) {
+	running, how := runningControlPlaneVersion(ctx, env)
+	if running == "" || sameVersion(running, newVersion) {
 		return
 	}
-	if sameVersion(info.Version, newVersion) {
-		return
-	}
+
 	fmt.Fprintf(env.Stderr,
-		"\nnote: a control plane is still running %s (pid %d).\n"+
-			"      Restart it to pick up %s.\n",
-		info.Version, info.PID, newVersion)
+		"\nnote: the control plane is still running %s, and this is now %s.\n"+
+			"      A worker will refuse to attach across that gap (D20/C10).\n\n"+
+			"      Replace it:  %s\n",
+		running, newVersion, how)
+}
+
+// runningControlPlaneVersion reports the version in service and the command
+// that would replace it, for whichever shape is actually set up.
+func runningControlPlaneVersion(ctx context.Context, env *Env) (version, replaceWith string) {
+	// A container first: its image tag is the version, and it is the case the
+	// runtime file cannot see.
+	if containerExists(ctx, "control-plane") {
+		if tag := containerImageTag(ctx, "control-plane"); tag != "" {
+			// install force-replaces an existing container, so there is no
+			// separate `docker rm` to remember.
+			return tag, "je control-plane install --docker"
+		}
+	}
+
+	if info, err := daemon.ReadRuntime(env.Layout.Runtime()); err == nil {
+		return info.Version, "je control-plane install"
+	}
+	return "", ""
 }
 
 // sameVersion compares versions ignoring a leading v, so v0.2.0 and 0.2.0 are
