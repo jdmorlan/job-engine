@@ -82,10 +82,6 @@ func TestChainErrorsNameWhatToFix(t *testing.T) {
 		name: "a where value that is not a scalar",
 		body: "steps:\n  - on: { event: a.b, where: { tags: [x, y] } }\n    run: rollup\n",
 		want: "equality",
-	}, {
-		name: "an empty chain",
-		body: "description: nothing\n",
-		want: "at least one step",
 	}}
 
 	for _, tc := range cases {
@@ -98,6 +94,20 @@ func TestChainErrorsNameWhatToFix(t *testing.T) {
 				t.Errorf("error = %q, want it to mention %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// An unfinished chain file is not a broken one. Sync is atomic (D19), so
+// refusing to load a file somebody is halfway through writing would take every
+// job in the source down with it.
+func TestAChainWithNoStepsLoadsAndWiresNothing(t *testing.T) {
+	c := parseChain(t, "description: not written yet\n\nsteps: []\n")
+	if len(c.Steps) != 0 {
+		t.Fatalf("steps = %d", len(c.Steps))
+	}
+	bare := parseChain(t, "description: not written yet\n")
+	if len(bare.Steps) != 0 {
+		t.Fatalf("steps = %d", len(bare.Steps))
 	}
 }
 

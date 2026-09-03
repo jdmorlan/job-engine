@@ -60,7 +60,7 @@ func runJobs(ctx context.Context, env *Env, args []string) error {
 			def, err := rd.Definition(ctx, j.Slug)
 			command := ""
 			if err == nil {
-				command = truncate(shellJoin(def.Command), 40)
+				command = truncate(def.CommandLine(), 40)
 			}
 			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", j.Slug, jobStatus(j), command, j.FilePath)
 		}
@@ -107,15 +107,4 @@ func brokenReason(j store.Job) string {
 		return j.LoadError
 	}
 	return j.ConfigError
-}
-
-func shellJoin(argv []string) string {
-	out := ""
-	for i, a := range argv {
-		if i > 0 {
-			out += " "
-		}
-		out += a
-	}
-	return out
 }

@@ -135,14 +135,41 @@ func setIf[T any](dst *T, src *T) {
 	}
 }
 
-// declaredLines records the line number of each top-level key, which is what
-// lets `je explain` cite jobs/weather-ingest.yaml:5 rather than just saying a
-// value came from the file (P3).
+// declaredLines records the line number of every key the author wrote, which is
+// what lets `je explain` cite jobs/weather-ingest.yaml:5 rather than just
+// saying a value came from the file (P3).
+//
+// Nested keys are recorded under a dotted path, and that is not a nicety. A
+// file writing `state.primary_cursor` and not `state.commit` must not have the
+// commit policy attributed to it: the one view whose entire job is telling a
+// chosen value from a default cannot itself guess, or it is worse than not
+// having the view at all.
 func declaredLines(root *yaml.Node) map[string]int {
-	lines := make(map[string]int, len(root.Content)/2)
-	for i := 0; i+1 < len(root.Content); i += 2 {
-		lines[root.Content[i].Value] = root.Content[i].Line
+	lines := map[string]int{}
+
+	var walk func(prefix string, node *yaml.Node)
+	walk = func(prefix string, node *yaml.Node) {
+		switch node.Kind {
+		case yaml.MappingNode:
+			for i := 0; i+1 < len(node.Content); i += 2 {
+				key, value := node.Content[i], node.Content[i+1]
+				path := key.Value
+				if prefix != "" {
+					path = prefix + "." + key.Value
+				}
+				lines[path] = key.Line
+				walk(path, value)
+			}
+		case yaml.SequenceNode:
+			// Indexed, because a job may declare several schedules and each
+			// catches up independently -- "on[1].catch_up" is a different
+			// decision from "on[0].catch_up".
+			for i, item := range node.Content {
+				walk(fmt.Sprintf("%s[%d]", prefix, i), item)
+			}
+		}
 	}
+	walk("", root)
 	return lines
 }
 

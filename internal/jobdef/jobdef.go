@@ -162,10 +162,31 @@ const MaxStateBytes = 64 * 1024
 // up in file names, CLI arguments, event payloads, and URLs.
 var slugPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
 
+// ValidName reports whether a string may name a job or a chain.
+//
+// Exported so `je new` can refuse a bad name while writing the file, rather
+// than writing it and letting the next sync reject it.
+func ValidName(name string) bool { return slugPattern.MatchString(name) }
+
 // SlugFromPath derives a job's identity from its file name.
 func SlugFromPath(path string) string {
 	base := filepath.Base(path)
 	return strings.TrimSuffix(base, filepath.Ext(base))
+}
+
+// CommandLine renders the command the way you would type it, quoting only what
+// needs it. Display only -- nothing executes this string, and the command is
+// always an argv (D6), never a shell line.
+func (d *Definition) CommandLine() string {
+	parts := make([]string, 0, len(d.Command))
+	for _, a := range d.Command {
+		if a == "" || strings.ContainsAny(a, " \t\"'\\$") {
+			parts = append(parts, fmt.Sprintf("%q", a))
+			continue
+		}
+		parts = append(parts, a)
+	}
+	return strings.Join(parts, " ")
 }
 
 // FilePath reports where this definition was read from.
@@ -177,6 +198,27 @@ func (d *Definition) FilePath() string { return d.filePath }
 func (d *Definition) DeclaredAt(field string) (int, bool) {
 	line, ok := d.declared[field]
 	return line, ok
+}
+
+// DeclaredLines returns every field the author actually wrote, and the line it
+// is on.
+//
+// It is stored beside the definition rather than inside it: the snapshot is
+// hashed (D11), and a line number describes the file rather than the job, so
+// adding a comment at the top of a file must not read as a new definition.
+func (d *Definition) DeclaredLines() map[string]int {
+	out := make(map[string]int, len(d.declared))
+	for field, line := range d.declared {
+		out[field] = line
+	}
+	return out
+}
+
+// WithDeclaredLines restores what the file said, for a definition rebuilt from
+// its stored snapshot.
+func (d *Definition) WithDeclaredLines(lines map[string]int) *Definition {
+	d.declared = lines
+	return d
 }
 
 // Validate reports the first thing wrong with a definition.

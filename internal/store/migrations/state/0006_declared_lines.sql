@@ -1,0 +1,15 @@
+-- 0006_declared_lines: where each value in a job file was written.
+--
+-- P3 splits a job into two halves: the file holds what the author decided, and
+-- the tool renders the truth. `je explain` is the second half, and it has to be
+-- able to say "30m (jobs/weather.yaml:7)" rather than just "30m" -- otherwise
+-- the reader cannot tell a value somebody chose from a default that happens to
+-- suit them, which is the whole distinction the split exists to make.
+--
+-- Deliberately NOT part of the definition snapshot, and therefore not part of
+-- the definition hash (D11). A line number describes the file, not the job:
+-- adding a comment at the top of a file moves every value down a line and
+-- changes nothing about what runs. Hashing it would create a new definition
+-- version for a whitespace edit, and the run detail view would show a diff with
+-- nothing in it.
+ALTER TABLE jobs ADD COLUMN declared TEXT;   -- json: field name -> line number

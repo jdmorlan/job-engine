@@ -3,6 +3,7 @@ package jobdef
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -16,11 +17,28 @@ import (
 // the file said 1h is a snapshot nobody can read at 2am.
 type Duration struct{ D time.Duration }
 
+// String renders the duration the way a file would write it: "30m", not
+// "30m0s".
+//
+// This is the stored and hashed form as well as the displayed one, and that is
+// deliberate -- the wrapper exists so a snapshot reads the way the file did,
+// and trailing zero units are exactly the kind of noise it was added to
+// prevent. Values round-trip either way; only the text changes.
 func (d Duration) String() string {
 	if d.D == 0 {
 		return ""
 	}
-	return d.D.String()
+	// Longest first: "1h0m0s" also ends in "m0s", and trimming that leaves
+	// "1h0m".
+	text := d.D.String()
+	switch {
+	case strings.HasSuffix(text, "h0m0s"):
+		return strings.TrimSuffix(text, "0m0s")
+	case strings.HasSuffix(text, "m0s"):
+		return strings.TrimSuffix(text, "0s")
+	default:
+		return text
+	}
 }
 
 func (d Duration) MarshalJSON() ([]byte, error) { return json.Marshal(d.String()) }

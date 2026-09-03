@@ -259,6 +259,10 @@ func (c *Client) StateHistory(ctx context.Context, slug string, limit int) ([]st
 	return out.Versions, err
 }
 
+func (c *Client) Explain(ctx context.Context, slug string) (engine.Explanation, error) {
+	return do[engine.Explanation](ctx, c, http.MethodGet, "/v1/jobs/"+url.PathEscape(slug)+"/explain", nil)
+}
+
 func (c *Client) Waiting(ctx context.Context) (engine.Waiting, error) {
 	return do[engine.Waiting](ctx, c, http.MethodGet, "/v1/waiting", nil)
 }

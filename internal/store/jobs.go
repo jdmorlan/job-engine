@@ -23,6 +23,11 @@ type Job struct {
 	// RemovedAt is set when the definition file disappeared. The job keeps its
 	// history and stops being schedulable (D19).
 	RemovedAt *time.Time `json:"removed_at,omitempty"`
+
+	// Declared maps a field the author wrote to the line it is on, for
+	// `je explain` (P3). Stored beside the definition rather than in it,
+	// because a line number describes the file and not the job.
+	Declared map[string]int `json:"declared,omitempty"`
 }
 
 // Removed reports whether this job's definition file is gone.
@@ -56,9 +61,14 @@ func (s *Store) UpsertJob(ctx context.Context, j Job) (Job, error) {
 
 	// The job row is a projection of the file, so re-loading overwrites it.
 	// job_versions is the immutable half; this table is the current half.
+	declared, err := json.Marshal(j.Declared)
+	if err != nil {
+		return Job{}, fmt.Errorf("recording declared lines for %s: %w", j.Slug, err)
+	}
+
 	err = tx.QueryRowContext(ctx, `
-		INSERT INTO jobs (name, definition_hash, file_path, enabled, loaded_at, load_error, config_error)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO jobs (name, definition_hash, file_path, enabled, loaded_at, load_error, config_error, declared)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (name) DO UPDATE SET
 			definition_hash = excluded.definition_hash,
 			file_path       = excluded.file_path,
@@ -66,6 +76,7 @@ func (s *Store) UpsertJob(ctx context.Context, j Job) (Job, error) {
 			loaded_at       = excluded.loaded_at,
 			load_error      = excluded.load_error,
 			config_error    = excluded.config_error,
+			declared        = excluded.declared,
 			-- A file that reappears un-tombstones the job, keeping its id and
 			-- therefore its whole history and cursor. Reverting a revert has
 			-- to be as safe as the revert was.
@@ -73,6 +84,7 @@ func (s *Store) UpsertJob(ctx context.Context, j Job) (Job, error) {
 		RETURNING id`,
 		j.Slug, j.DefinitionHash, j.FilePath, j.Enabled,
 		formatTime(time.Now()), nullString(j.LoadError), nullString(j.ConfigError),
+		string(declared),
 	).Scan(&j.ID)
 	if err != nil {
 		return Job{}, fmt.Errorf("upserting job %s: %w", j.Slug, err)
@@ -82,7 +94,8 @@ func (s *Store) UpsertJob(ctx context.Context, j Job) (Job, error) {
 
 const selectJob = `
 	SELECT j.id, j.name, j.definition_hash, v.definition, j.file_path,
-	       j.enabled, j.loaded_at, j.load_error, j.config_error, j.removed_at
+	       j.enabled, j.loaded_at, j.load_error, j.config_error, j.removed_at,
+	       j.declared
 	FROM jobs j
 	JOIN job_versions v ON v.definition_hash = j.definition_hash`
 
@@ -158,14 +171,20 @@ func scanJob(sc scanner) (Job, error) {
 		loadErr    sql.NullString
 		configErr  sql.NullString
 		removedAt  sql.NullString
+		declared   sql.NullString
 	)
 	if err := sc.Scan(&j.ID, &j.Slug, &j.DefinitionHash, &definition, &j.FilePath,
-		&j.Enabled, &loadedAt, &loadErr, &configErr, &removedAt); err != nil {
+		&j.Enabled, &loadedAt, &loadErr, &configErr, &removedAt, &declared); err != nil {
 		return Job{}, err
 	}
 	j.Definition = json.RawMessage(definition)
 	j.LoadError = loadErr.String
 	j.ConfigError = configErr.String
+	if declared.Valid && declared.String != "null" {
+		if err := json.Unmarshal([]byte(declared.String), &j.Declared); err != nil {
+			return Job{}, fmt.Errorf("job %s has unreadable declared lines: %w", j.Slug, err)
+		}
+	}
 
 	var err error
 	if j.RemovedAt, err = parseNullTime(removedAt); err != nil {

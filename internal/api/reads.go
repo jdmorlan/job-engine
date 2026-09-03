@@ -18,6 +18,7 @@ import (
 func (s *Server) registerReads(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/jobs", s.handleListJobs)
 	mux.HandleFunc("GET /v1/jobs/{slug}", s.handleGetJob)
+	mux.HandleFunc("GET /v1/jobs/{slug}/explain", s.handleExplain)
 	mux.HandleFunc("GET /v1/jobs/{slug}/state", s.handleGetState)
 	mux.HandleFunc("GET /v1/jobs/{slug}/state/history", s.handleStateHistory)
 	mux.HandleFunc("GET /v1/runs", s.handleListRuns)
@@ -43,6 +44,14 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, job)
+}
+
+func (s *Server) handleExplain(w http.ResponseWriter, r *http.Request) {
+	x, err := s.engine.Explain(r.Context(), r.PathValue("slug"))
+	if s.handleLookupError(w, err, "job") {
+		return
+	}
+	writeJSON(w, http.StatusOK, x)
 }
 
 func (s *Server) handleGetState(w http.ResponseWriter, r *http.Request) {

@@ -87,6 +87,26 @@ func (s Step) RouteHash() (string, error) {
 	return hex.EncodeToString(sum[:16]), nil
 }
 
+// String renders a pattern the way a file would write it: "run.succeeded
+// job=extract". On the type because two views and an API response all render
+// it, and three copies of a formatter is how they come to disagree.
+func (m Match) String() string {
+	if len(m.Where) == 0 {
+		return m.Event
+	}
+	keys := make([]string, 0, len(m.Where))
+	for k := range m.Where {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, k+"="+m.Where[k])
+	}
+	return m.Event + " " + strings.Join(parts, " ")
+}
+
 // Matches reports whether an event satisfies this pattern.
 //
 // payload is the event's payload as stored. A pattern with no `where` matches
@@ -250,9 +270,11 @@ func (c *Chain) Validate() error {
 	if !slugPattern.MatchString(c.Name) {
 		return fmt.Errorf("chain name %q must be lowercase letters, digits and dashes", c.Name)
 	}
-	if len(c.Steps) == 0 {
-		return errors.New("a chain needs at least one step")
-	}
+	// A chain with no steps loads. It wires nothing and says so in `je chains`,
+	// which is the right outcome for a file somebody is part way through
+	// writing: sync is atomic (D19), so rejecting it would take every job in
+	// the source down with it, and "your unfinished chain file stopped the
+	// engine loading anything" is a disproportionate answer to an empty list.
 	for i, s := range c.Steps {
 		if !slugPattern.MatchString(s.Run) {
 			return fmt.Errorf("step %d: run: %q is not a job name", i+1, s.Run)

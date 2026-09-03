@@ -191,3 +191,68 @@ func TestFSSourceMissingDirectoryIsEmptyNotAnError(t *testing.T) {
 		t.Errorf("got %d definitions from nothing", len(snap.Definitions))
 	}
 }
+
+func TestADurationReadsBackTheWayItWasWritten(t *testing.T) {
+	// The wrapper exists so the stored snapshot reads like the file (D11), and
+	// this is the case that made it not: "30m" round-tripping as "30m0s".
+	cases := map[string]string{
+		"30s": "30s", "15m": "15m", "1h": "1h", "4h": "4h",
+		"90m": "1h30m", "1h30m": "1h30m", "36h": "36h", "1500ms": "1.5s",
+	}
+	for written, want := range cases {
+		def := parse(t, "command: [\"echo\", \"hi\"]\ntimeout: "+written+"\n")
+		if got := def.Timeout.String(); got != want {
+			t.Errorf("timeout: %s written, renders as %q, want %q", written, got, want)
+		}
+
+		// And it has to survive the snapshot, or `je explain` and the run
+		// detail view disagree about the same job.
+		body, err := def.Snapshot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		back, err := jobdef.FromSnapshot(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if back.Timeout.D != def.Timeout.D {
+			t.Errorf("timeout %s did not survive a snapshot: %s", written, back.Timeout)
+		}
+	}
+}
+
+func TestExplainCanTellAWrittenValueFromADefault(t *testing.T) {
+	// P3's whole point, and the case that caught it: a file writing
+	// state.primary_cursor and not state.commit must not have the commit
+	// policy attributed to it.
+	def := parse(t, `
+command: ["echo", "hi"]
+on:
+  - every: 15m
+    catch_up: once
+  - cron: "0 3 * * *"
+state:
+  primary_cursor: since
+`)
+
+	written := map[string]bool{
+		"command": true, "on": true, "state": true,
+		"state.primary_cursor": true,
+		"on[0].every":          true, "on[0].catch_up": true, "on[1].cron": true,
+	}
+	notWritten := []string{
+		"state.commit", "timeout", "overlap", "runs_on", "on[1].catch_up",
+	}
+
+	lines := def.DeclaredLines()
+	for field := range written {
+		if _, ok := def.DeclaredAt(field); !ok {
+			t.Errorf("%s was written down and is not recorded (have %v)", field, lines)
+		}
+	}
+	for _, field := range notWritten {
+		if line, ok := def.DeclaredAt(field); ok {
+			t.Errorf("%s is a default and was attributed to line %d", field, line)
+		}
+	}
+}

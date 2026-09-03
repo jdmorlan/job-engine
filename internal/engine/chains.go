@@ -22,6 +22,10 @@ import (
 type ChainState string
 
 const (
+	// ChainEmpty is a chain file with no steps yet. It loads, and it wires
+	// nothing -- distinct from "never run", which is a chain that would fire
+	// if its event happened.
+	ChainEmpty     ChainState = "no steps"
 	ChainNeverRun  ChainState = "never run"
 	ChainRunning   ChainState = "running"
 	ChainComplete  ChainState = "complete"
@@ -137,6 +141,7 @@ func (e *Engine) chainView(ctx context.Context, c store.Chain) (ChainView, error
 		})
 	}
 	if len(view.Steps) == 0 {
+		view.State = ChainEmpty
 		return view, nil
 	}
 

@@ -228,6 +228,8 @@ je workers              what is attached, and what it can run
 je sync           reload job definitions, atomically
 je waiting        what has not happened yet, and what is stuck
 je run <job>      run a job now and follow its output
+je new <job>      write a job file, and optionally the script it runs
+je explain <job>  every effective value, and where each came from
 je jobs           what is loaded, and what is broken
 je runs           recent runs
 je logs <run>     what a run printed
@@ -326,6 +328,10 @@ ID  WHEN                 TYPE            SOURCE  CAUSE  PAYLOAD
 
 ### Writing a job
 
+`je new weather-ingest` writes the file; `je new --script` also writes
+`scripts/weather-ingest.sh` with the whole protocol in it, since there is no SDK
+to read.
+
 A job is a YAML file naming a command. The file's name is the job's name.
 
 ```yaml
@@ -354,6 +360,42 @@ Also set: `JOB_ID`, `RUN_ID`, `ATTEMPT`, `TRIGGERED_BY`, `EVENT_PAYLOAD`,
 `JOB_WORKDIR`. Nothing else from the engine's own environment reaches the job
 except `PATH`, `HOME`, `TZ` and a few other essentials — a job does not inherit
 credentials by accident (D10).
+
+The file above sets four things and the engine will use about fifteen. That is
+only honest if you can see the other eleven, which is what `je explain` is for:
+
+```console
+$ je explain weather-ingest
+weather-ingest  Weather Ingest
+Pulls readings from the local station into the almanac store.
+
+  command                 python3 scripts/ingest_weather.py  (weather-ingest.yaml:4)
+  runtime                 process                            (default)
+  runs_on                 default                            (default)
+  timeout                 30m                                (weather-ingest.yaml:5)
+  overlap                 skip                               (default)
+  retry                   none                               (default)
+  on_interrupt            fail                               (default)
+  state.commit            on_success                         (default)
+  state.primary_cursor    since                              (weather-ingest.yaml:12)
+  secret STATION_API_KEY  set
+
+starts when
+  every 15m  catch_up: once  weather-ingest.yaml
+```
+
+Every line is either a decision you made, at the line you made it on, or a
+default — there is no third category, and nothing is left for you to guess.
+
+It also answers a question the file cannot. A job never names another job, so
+"what starts this?" is not something its own file knows:
+
+```console
+$ je explain daily-rollup
+...
+starts when
+  run.succeeded job=normalize-readings  chain daily-weather step 2  daily-weather.yaml
+```
 
 ### Chains
 

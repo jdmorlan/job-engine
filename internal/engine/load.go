@@ -86,6 +86,7 @@ func (e *Engine) Load(ctx context.Context, src jobdef.Source) (LoadResult, error
 			FilePath:       def.FilePath(),
 			Enabled:        def.Enabled,
 			ConfigError:    configErr,
+			Declared:       def.DeclaredLines(),
 		})
 		if err != nil {
 			return LoadResult{}, err
@@ -204,5 +205,7 @@ func (e *Engine) Definition(ctx context.Context, slug string) (*jobdef.Definitio
 	if err != nil {
 		return nil, store.Job{}, fmt.Errorf("job %s: %w", slug, err)
 	}
-	return def, job, nil
+	// The snapshot is the job; the line numbers are the file it came from, and
+	// they are stored separately for that reason (P3).
+	return def.WithDeclaredLines(job.Declared), job, nil
 }

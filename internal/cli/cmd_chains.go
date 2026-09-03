@@ -3,13 +3,11 @@ package cli
 import (
 	"context"
 	"fmt"
-	"sort"
 	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/jdmorlan/job-engine/internal/engine"
-	"github.com/jdmorlan/job-engine/internal/jobdef"
 )
 
 func init() {
@@ -113,7 +111,7 @@ func runChain(ctx context.Context, env *Env, args []string) error {
 		}
 		for _, s := range c.Steps {
 			fmt.Fprintf(tw, "  step %d\t%s\t%s\ton %s\n",
-				s.Step, s.Job, chainRunText(s.Run), matchText(s.On))
+				s.Step, s.Job, chainRunText(s.Run), s.On)
 		}
 		tw.Flush()
 
@@ -161,6 +159,9 @@ func chainStateShort(c engine.ChainView) string {
 	}
 }
 
+// emptyChainNote is what to say about a file that wires nothing.
+const emptyChainNote = "no steps yet -- this file wires nothing"
+
 // chainStateText says what happened in the words the state means.
 func chainStateText(c engine.ChainView) string {
 	switch c.State {
@@ -173,6 +174,8 @@ func chainStateText(c engine.ChainView) string {
 		return "running"
 	case engine.ChainUnstarted:
 		return "stalled: a step succeeded and the next one never fired (je events shows why)"
+	case engine.ChainEmpty:
+		return emptyChainNote
 	default:
 		return "never run"
 	}
@@ -209,22 +212,4 @@ func chainLastAt(c engine.ChainView) string {
 		return "-"
 	}
 	return sinceText(last)
-}
-
-// matchText renders an event pattern the way the file wrote it.
-func matchText(m jobdef.Match) string {
-	if len(m.Where) == 0 {
-		return m.Event
-	}
-	keys := make([]string, 0, len(m.Where))
-	for k := range m.Where {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	pairs := make([]string, 0, len(keys))
-	for _, k := range keys {
-		pairs = append(pairs, fmt.Sprintf("%s=%s", k, m.Where[k]))
-	}
-	return m.Event + " " + strings.Join(pairs, " ")
 }
