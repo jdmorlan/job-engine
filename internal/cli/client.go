@@ -259,6 +259,32 @@ func (c *Client) StateHistory(ctx context.Context, slug string, limit int) ([]st
 	return out.Versions, err
 }
 
+type sourceList struct {
+	Sources []engine.SourceStatus `json:"sources"`
+}
+
+func (c *Client) Sources(ctx context.Context) ([]engine.SourceStatus, error) {
+	list, err := do[sourceList](ctx, c, http.MethodGet, "/v1/sources", nil)
+	return list.Sources, err
+}
+
+func (c *Client) AddSource(ctx context.Context, req api.AddSourceRequest) (engine.LoadResult, error) {
+	return do[engine.LoadResult](ctx, c, http.MethodPost, "/v1/sources", req)
+}
+
+func (c *Client) SyncSource(ctx context.Context, name string) (engine.LoadResult, error) {
+	return do[engine.LoadResult](ctx, c, http.MethodPost, "/v1/sources/"+url.PathEscape(name)+"/sync", nil)
+}
+
+type removedSource struct {
+	Tombstoned int64 `json:"tombstoned"`
+}
+
+func (c *Client) RemoveSource(ctx context.Context, name string) (int64, error) {
+	out, err := do[removedSource](ctx, c, http.MethodDelete, "/v1/sources/"+url.PathEscape(name), nil)
+	return out.Tombstoned, err
+}
+
 func (c *Client) Explain(ctx context.Context, slug string) (engine.Explanation, error) {
 	return do[engine.Explanation](ctx, c, http.MethodGet, "/v1/jobs/"+url.PathEscape(slug)+"/explain", nil)
 }

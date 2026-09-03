@@ -125,7 +125,11 @@ func executeDispatch(t *testing.T, e *engine.Engine, d engine.Dispatch, ctx cont
 	// would test a path the product does not have (D20).
 	workdir := d.Workdir
 	if workdir == "" {
-		workdir = e.Health(context.Background()).JobsDir
+		// A job from a registered source runs in that source's tree (D22);
+		// only the built-in local source falls back to the jobs directory.
+		if workdir = d.SourceRoot; workdir == "" {
+			workdir = e.Health(context.Background()).JobsDir
+		}
 	}
 
 	env := append([]string{}, d.Env...)

@@ -228,6 +228,8 @@ je workers              what is attached, and what it can run
 je sync           reload job definitions, atomically
 je waiting        what has not happened yet, and what is stuck
 je run <job>      run a job now and follow its output
+je init [dir]     set up a new jobs repository
+je source         register where definitions come from, and what each provides
 je new <job>      write a job file, and optionally the script it runs
 je explain <job>  every effective value, and where each came from
 je jobs           what is loaded, and what is broken
@@ -325,6 +327,50 @@ ID  WHEN                 TYPE            SOURCE  CAUSE  PAYLOAD
 5   2026-09-02 12:40:57  counter.ticked  job     run 2  {"n": 2}
 4   2026-09-02 12:40:57  run.requested   cli     -      {"job":"counter"}
 ```
+
+### Where jobs come from
+
+Definitions and the code they run arrive from named **sources**. A source is a
+whole tree, not a pile of YAML: the scripts a job runs live beside it and travel
+with it, which is what makes a repo work unmodified on another machine.
+
+```console
+$ je init ~/code/weather-jobs
+$ cd ~/code/weather-jobs
+$ je new ingest --script
+$ je source add weather .
+
+$ je source
+NAME     KIND  WHERE                 JOBS  SYNCED
+local    dir   ~/.je/jobs            2     -
+weather  dir   ~/code/weather-jobs   5     4m ago
+```
+
+Every engine has a built-in source, `local` — your jobs directory. Registering
+nothing still leaves somewhere to put a job file.
+
+**A job's name carries its source**, because two repos will eventually both
+contain a `sync.yaml` and you may own neither:
+
+```console
+$ je run ingest              # fine while only one source has it
+$ je run weather/ingest      # always works
+$ je run sync
+je run: "sync" is ambiguous: home/sync and weather/sync -- name the source, e.g. home/sync
+```
+
+Jobs from `local` keep bare names. That is a deliberate departure from treating
+every source alike: until there is a second source, a prefix on every row of
+every view carries no information, and the first job somebody writes should not
+have to know that sources are a concept.
+
+Two rules follow from sources being plural. **Authority is per source**: a repo
+that will not parse keeps its last good tree serving and does not stop the
+others loading — `je source` shows which one is stuck. And **a chain resolves
+job names within its own source**, so a chain file never writes a source name
+and the same repo registered twice wires itself correctly both times.
+
+Removing a source stops its jobs running and keeps every run they did (D19).
 
 ### Writing a job
 
@@ -494,6 +540,10 @@ table it needs is already in the schema, so it is a feature and not a
 migration. The same goes for `trigger.expired`, the "the thing I was waiting
 for never came" event, which is where the alerting story starts.
 
+**Sources are local directories only, and re-read on request.** `je source add
+you/weather-jobs` — fetching a public or private repo from GitHub, pinned to a
+resolved commit — is the next piece of D22.
+
 **Definitions are reloaded on request, not watched.** `je sync` re-reads the
 source and rebuilds the schedule table, so an edit takes effect without dropping
 in-flight runs. Watching the directory automatically is still open. A job
@@ -553,6 +603,6 @@ image, in a cluster, and inside a Mac app (D18).
   lock            the single-writer flock
   secrets.json    the local secret store, mode 0600 (D10)
   daemon.json     the control plane's address, so clients can find it
-  jobs/           job definitions (override with JE_JOBS_DIR)
+  jobs/           the built-in `local` source (override with JE_JOBS_DIR)
     chains/       chain files, one flow per file
 ```

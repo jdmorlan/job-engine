@@ -8,11 +8,15 @@ import (
 	"time"
 )
 
-// Route sources. A job-local `on:` block will compile to rows here too when
-// job files grow inter-job triggers; today every route comes from a chain file.
+// Where a route was authored. A job-local `on:` block will compile to rows here
+// too when job files grow inter-job triggers; today every route comes from a
+// chain file.
+//
+// Distinct from the registered Source the rule arrived from (D22): one says
+// which kind of file wrote it, the other says which repo that file was in.
 const (
-	RouteSourceChainFile = "chain_file"
-	RouteSourceJobFile   = "job_file"
+	AuthoredInChainFile = "chain_file"
+	AuthoredInJobFile   = "job_file"
 )
 
 // Route is one trigger as the database holds it: an event pattern and the job
@@ -29,17 +33,23 @@ type Route struct {
 	RouteHash   string          `json:"route_hash"`
 	ChainName   string          `json:"chain,omitempty"`
 	StepIndex   int             `json:"step,omitempty"`
-	Source      string          `json:"source"`
-	FilePath    string          `json:"file_path"`
-	Enabled     bool            `json:"enabled"`
-	LoadError   string          `json:"load_error,omitempty"`
-	RemovedAt   *time.Time      `json:"removed_at,omitempty"`
+
+	// Source is the registered place this rule arrived from, and Authored is
+	// which kind of file wrote it.
+	Source   string `json:"source"`
+	Authored string `json:"authored"`
+
+	FilePath  string     `json:"file_path"`
+	Enabled   bool       `json:"enabled"`
+	LoadError string     `json:"load_error,omitempty"`
+	RemovedAt *time.Time `json:"removed_at,omitempty"`
 }
 
 // Chain is the display grouping a route belongs to (D17). It is not a runtime
 // entity: nothing here is consulted to decide whether anything runs.
 type Chain struct {
 	Name        string     `json:"name"`
+	Source      string     `json:"source"`
 	Description string     `json:"description,omitempty"`
 	FilePath    string     `json:"file_path"`
 	LoadedAt    time.Time  `json:"loaded_at"`
@@ -62,33 +72,39 @@ func (c Chain) Removed() bool { return c.RemovedAt != nil }
 // Rows are never deleted. Runs record which route fired them (D11), so
 // deleting a route would either fail against the foreign key or erase the
 // provenance of everything it ever caused.
-func (s *Store) ReplaceRoutes(ctx context.Context, chains []Chain, routes []Route) error {
+func (s *Store) ReplaceRoutes(ctx context.Context, source string, chains []Chain, routes []Route) error {
 	tx, err := s.state.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback() // no-op after a successful Commit
 
+	// Scoped to one source (D22). Loading the weather repo must not tombstone
+	// the wiring the home repo installed, which a whole-table sweep would do
+	// silently and completely.
 	at := formatTime(time.Now())
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE routes SET removed_at = ? WHERE removed_at IS NULL`, at); err != nil {
+		`UPDATE routes SET removed_at = ? WHERE removed_at IS NULL AND source_name = ?`,
+		at, source); err != nil {
 		return fmt.Errorf("tombstoning routes: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE chains SET removed_at = ? WHERE removed_at IS NULL`, at); err != nil {
+		`UPDATE chains SET removed_at = ? WHERE removed_at IS NULL AND source = ?`,
+		at, source); err != nil {
 		return fmt.Errorf("tombstoning chains: %w", err)
 	}
 
 	for _, c := range chains {
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO chains (name, description, file_path, loaded_at, removed_at)
-			VALUES (?, ?, ?, ?, NULL)
+			INSERT INTO chains (name, source, description, file_path, loaded_at, removed_at)
+			VALUES (?, ?, ?, ?, ?, NULL)
 			ON CONFLICT (name) DO UPDATE SET
+				source      = excluded.source,
 				description = excluded.description,
 				file_path   = excluded.file_path,
 				loaded_at   = excluded.loaded_at,
 				removed_at  = NULL`,
-			c.Name, nullString(c.Description), c.FilePath, at,
+			c.Name, source, nullString(c.Description), c.FilePath, at,
 		); err != nil {
 			return fmt.Errorf("recording chain %s: %w", c.Name, err)
 		}
@@ -101,11 +117,12 @@ func (s *Store) ReplaceRoutes(ctx context.Context, chains []Chain, routes []Rout
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO routes (
 				target_job_id, match, route_hash, chain_name, step_index,
-				source, file_path, enabled, load_error, removed_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+				source, source_name, file_path, enabled, load_error, removed_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
 			ON CONFLICT (chain_name, step_index) WHERE chain_name IS NOT NULL
 			DO UPDATE SET
 				target_job_id = excluded.target_job_id,
+				source_name   = excluded.source_name,
 				match         = excluded.match,
 				route_hash    = excluded.route_hash,
 				source        = excluded.source,
@@ -114,7 +131,7 @@ func (s *Store) ReplaceRoutes(ctx context.Context, chains []Chain, routes []Rout
 				load_error    = excluded.load_error,
 				removed_at    = NULL`,
 			r.TargetJobID, string(r.Match), r.RouteHash, nullString(r.ChainName), r.StepIndex,
-			r.Source, r.FilePath, r.Enabled, nullString(r.LoadError),
+			r.Authored, source, r.FilePath, r.Enabled, nullString(r.LoadError),
 		); err != nil {
 			return fmt.Errorf("recording route %s step %d: %w", r.ChainName, r.StepIndex, err)
 		}
@@ -124,7 +141,7 @@ func (s *Store) ReplaceRoutes(ctx context.Context, chains []Chain, routes []Rout
 
 const selectRoute = `
 	SELECT r.id, r.target_job_id, j.name, r.match, r.route_hash,
-	       r.chain_name, r.step_index, r.source, r.file_path,
+	       r.chain_name, r.source_name, r.step_index, r.source, r.file_path,
 	       r.enabled, r.load_error, r.removed_at
 	FROM routes r
 	JOIN jobs j ON j.id = r.target_job_id`
@@ -171,7 +188,7 @@ func scanRoute(sc scanner) (Route, error) {
 		removedAt sql.NullString
 	)
 	if err := sc.Scan(&r.ID, &r.TargetJobID, &r.TargetSlug, &match, &r.RouteHash,
-		&chainName, &stepIndex, &r.Source, &r.FilePath, &r.Enabled, &loadErr,
+		&chainName, &r.Source, &stepIndex, &r.Authored, &r.FilePath, &r.Enabled, &loadErr,
 		&removedAt); err != nil {
 		return Route{}, err
 	}

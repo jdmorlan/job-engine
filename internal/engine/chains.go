@@ -103,7 +103,7 @@ func (e *Engine) Chains(ctx context.Context) ([]ChainView, error) {
 
 // Chain returns one chain. sql.ErrNoRows means there is no such chain.
 func (e *Engine) Chain(ctx context.Context, name string) (ChainView, error) {
-	c, err := e.store.ChainByName(ctx, name)
+	c, err := e.resolveChain(ctx, name)
 	if err != nil {
 		return ChainView{}, err
 	}

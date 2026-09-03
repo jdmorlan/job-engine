@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/jdmorlan/job-engine/internal/model"
+	"github.com/jdmorlan/job-engine/internal/store"
 )
 
 // EventDefinitionsSynced records a definition reload (P1, D11).
@@ -37,25 +39,75 @@ const syncTimeout = 5 * time.Second
 // the whole sync and the last good state keeps serving, because a configuration
 // that exists in no file is the one you cannot reason about at 2am.
 func (e *Engine) Sync(ctx context.Context) (LoadResult, error) {
-	result, err := e.LoadFromDisk(ctx)
+	sources, err := e.store.Sources(ctx)
 	if err != nil {
-		// Nothing was written. Recorded as an event anyway, because a sync that
-		// was refused is a fact about the system: the files on disk and the
-		// definitions in force have diverged, and the divergence is the thing
-		// somebody needs to see.
-		e.recordSync(ctx, LoadResult{Source: e.opts.Layout.Jobs}, err)
 		return LoadResult{}, err
 	}
+
+	// Atomicity is per source (D22), which is a change worth being explicit
+	// about: it used to be global. A weather repo that will not parse keeps its
+	// own last good tree serving, and the home jobs -- which are fine, and
+	// which the author may not even have touched -- keep loading. Making one
+	// broken file anywhere stop every source loading anywhere would be a
+	// stricter rule that protects nothing.
+	var (
+		total    LoadResult
+		failed   []string
+		firstErr error
+	)
+	for _, src := range sources {
+		result, err := e.loadRegistered(ctx, src)
+		if err != nil {
+			failed = append(failed, src.Name)
+			if firstErr == nil {
+				firstErr = fmt.Errorf("%s: %w", src.Name, err)
+			}
+			if recordErr := e.store.RecordSourceSync(ctx, src.Name, src.Revision, err.Error()); recordErr != nil {
+				e.log.Error("recording a failed source sync", "source", src.Name, "error", recordErr)
+			}
+			e.recordSync(ctx, LoadResult{Source: src.Name}, err)
+			continue
+		}
+		if err := e.store.RecordSourceSync(ctx, src.Name, result.Revision, ""); err != nil {
+			e.log.Error("recording a source sync", "source", src.Name, "error", err)
+		}
+
+		total.Loaded += result.Loaded
+		total.Removed += result.Removed
+		total.Chains += result.Chains
+		total.Routes += result.Routes
+		total.Misconfig = append(total.Misconfig, result.Misconfig...)
+		total.Source = result.Source
+		total.Revision = result.Revision
+	}
+	total.Sources = len(sources)
+	total.FailedSources = failed
 
 	// Definitions are committed; the schedule table is not. Until the scheduler
 	// rebuilds it, a newly added `every: 15m` is loaded but silently not
 	// firing, which is exactly the class of quiet nothing-happening P1 exists
 	// to eliminate.
-	applied := e.requestScheduleReload(ctx)
-	result.SchedulesApplied = applied
+	total.SchedulesApplied = e.requestScheduleReload(ctx)
 
-	e.recordSync(ctx, result, nil)
-	return result, nil
+	if firstErr != nil {
+		// Reported even though other sources loaded. The caller asked for the
+		// world to be reloaded and it was not, and returning success with a
+		// count somewhere in the payload is how that gets missed.
+		e.recordSync(ctx, total, firstErr)
+		return total, firstErr
+	}
+	e.recordSync(ctx, total, nil)
+	return total, nil
+}
+
+// loadRegistered loads whichever kind of source this is.
+func (e *Engine) loadRegistered(ctx context.Context, src store.Source) (LoadResult, error) {
+	switch src.Kind {
+	case store.SourceKindDir:
+		return e.loadDir(ctx, src, e.SourceDir(src))
+	default:
+		return LoadResult{}, fmt.Errorf("unknown source kind %q", src.Kind)
+	}
 }
 
 // requestScheduleReload asks a running scheduler to rebuild its table and waits

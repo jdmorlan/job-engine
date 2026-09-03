@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -25,6 +26,12 @@ type LoadResult struct {
 	Chains int `json:"chains"`
 	Routes int `json:"routes"`
 
+	// Sources is how many registered places were read, and FailedSources names
+	// the ones that would not load. Named rather than counted: "1 source
+	// failed" sends somebody looking, and "weather failed" tells them where.
+	Sources       int      `json:"sources,omitempty"`
+	FailedSources []string `json:"failed_sources,omitempty"`
+
 	// SchedulesApplied reports whether a running scheduler rebuilt its table
 	// from these definitions.
 	//
@@ -42,7 +49,7 @@ type LoadResult struct {
 // and the last good state keeps serving. Partial application would leave the
 // engine running a configuration that exists in no commit and that no file
 // describes, which is the state you cannot reason about at 2am.
-func (e *Engine) Load(ctx context.Context, src jobdef.Source) (LoadResult, error) {
+func (e *Engine) Load(ctx context.Context, registered store.Source, src jobdef.Source) (LoadResult, error) {
 	snap, err := src.Load(ctx)
 	if err != nil {
 		// Deliberately no partial write. The error names the file.
@@ -79,8 +86,13 @@ func (e *Engine) Load(ctx context.Context, src jobdef.Source) (LoadResult, error
 					strings.Join(missing, ", "), missing[0])
 			}
 		}
+		// Identity carries the source (D22). For the built-in local source that
+		// is the bare slug, so the common case reads the way it always did.
+		qualified := registered.Qualify(def.Slug)
+
 		job, err := e.store.UpsertJob(ctx, store.Job{
-			Slug:           def.Slug,
+			Slug:           qualified,
+			Source:         registered.Name,
 			DefinitionHash: hash,
 			Definition:     snapshot,
 			FilePath:       def.FilePath(),
@@ -92,17 +104,20 @@ func (e *Engine) Load(ctx context.Context, src jobdef.Source) (LoadResult, error
 			return LoadResult{}, err
 		}
 
+		// Keyed by the bare slug: a chain resolves job names within its own
+		// source, so this map is that source's name space.
 		jobIDs[def.Slug] = job.ID
-		slugs = append(slugs, def.Slug)
+		slugs = append(slugs, qualified)
 		result.Loaded++
 		if configErr != "" {
-			result.Misconfig = append(result.Misconfig, def.Slug)
+			result.Misconfig = append(result.Misconfig, qualified)
 		}
 	}
 
 	// A job whose file has gone is disabled, never deleted (D19). Reverting a
-	// commit must not erase the timeline.
-	removed, err := e.store.DeleteJobsExcept(ctx, slugs)
+	// commit must not erase the timeline. Scoped to this source (D22): a repo
+	// that lost a file must not tombstone another repo's jobs.
+	removed, err := e.store.DeleteJobsExceptInSource(ctx, registered.Name, slugs)
 	if err != nil {
 		return LoadResult{}, err
 	}
@@ -111,7 +126,7 @@ func (e *Engine) Load(ctx context.Context, src jobdef.Source) (LoadResult, error
 	// Routes after jobs, because a route points at a job id. The order is not
 	// an implementation detail: it is why a chain naming a job that does not
 	// exist is a load error rather than a foreign key violation at 3am.
-	if result.Chains, result.Routes, err = e.loadRoutes(ctx, snap, jobIDs); err != nil {
+	if result.Chains, result.Routes, err = e.loadRoutes(ctx, registered, snap, jobIDs); err != nil {
 		return LoadResult{}, err
 	}
 
@@ -129,13 +144,14 @@ func (e *Engine) Load(ctx context.Context, src jobdef.Source) (LoadResult, error
 // refused a step naming a job that does not exist, so a missing id at this
 // point would be a bug in this package rather than a mistake in a file, and it
 // is reported as such.
-func (e *Engine) loadRoutes(ctx context.Context, snap jobdef.Snapshot, jobIDs map[string]int64) (chains, routes int, err error) {
+func (e *Engine) loadRoutes(ctx context.Context, registered store.Source, snap jobdef.Snapshot, jobIDs map[string]int64) (chains, routes int, err error) {
 	storedChains := make([]store.Chain, 0, len(snap.Chains))
 	storedRoutes := make([]store.Route, 0, len(snap.Chains))
 
 	for _, chain := range snap.Chains {
 		storedChains = append(storedChains, store.Chain{
-			Name:        chain.Name,
+			Name:        registered.Qualify(chain.Name),
+			Source:      registered.Name,
 			Description: chain.Description,
 			FilePath:    chain.FilePath(),
 		})
@@ -145,28 +161,34 @@ func (e *Engine) loadRoutes(ctx context.Context, snap jobdef.Snapshot, jobIDs ma
 				return 0, 0, fmt.Errorf("chain %s step %d targets unknown job %q",
 					chain.Name, i+1, step.Run)
 			}
-			match, err := step.MatchJSON()
+
+			// The file names jobs bare; the events carry qualified names. The
+			// rule is stored resolved, so a repo registered under two names
+			// wires itself correctly both times without either copy of the
+			// file mentioning a source (D22).
+			match := step.On.Qualify(registered.Qualify)
+			encoded, err := json.Marshal(match)
 			if err != nil {
 				return 0, 0, err
 			}
-			hash, err := step.RouteHash()
+			hash, err := jobdef.RouteHash(match, registered.Qualify(step.Run))
 			if err != nil {
 				return 0, 0, err
 			}
 			storedRoutes = append(storedRoutes, store.Route{
 				TargetJobID: targetID,
-				Match:       match,
+				Match:       encoded,
 				RouteHash:   hash,
-				ChainName:   chain.Name,
+				ChainName:   registered.Qualify(chain.Name),
 				StepIndex:   i + 1,
-				Source:      store.RouteSourceChainFile,
+				Authored:    store.AuthoredInChainFile,
 				FilePath:    chain.FilePath(),
 				Enabled:     true,
 			})
 		}
 	}
 
-	if err := e.store.ReplaceRoutes(ctx, storedChains, storedRoutes); err != nil {
+	if err := e.store.ReplaceRoutes(ctx, registered.Name, storedChains, storedRoutes); err != nil {
 		return 0, 0, err
 	}
 	if err := e.reloadRoutes(ctx); err != nil {
@@ -175,20 +197,40 @@ func (e *Engine) loadRoutes(ctx context.Context, snap jobdef.Snapshot, jobIDs ma
 	return len(storedChains), len(storedRoutes), nil
 }
 
-// LoadFromDisk is the convenience path for the local source, which is source #1.
+// LoadFromDisk loads the built-in local source, which is source #1.
 func (e *Engine) LoadFromDisk(ctx context.Context) (LoadResult, error) {
-	dir := e.opts.Layout.Jobs
+	local, err := e.store.SourceByName(ctx, store.LocalSource)
+	if err != nil {
+		return LoadResult{}, err
+	}
+	return e.loadDir(ctx, local, e.opts.Layout.Jobs)
+}
+
+// loadDir loads one directory-backed source.
+func (e *Engine) loadDir(ctx context.Context, registered store.Source, dir string) (LoadResult, error) {
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		// Not an error: a fresh install has no jobs directory and must start.
 		return LoadResult{Source: dir}, nil
 	} else if err != nil {
-		return LoadResult{}, fmt.Errorf("reading jobs directory: %w", err)
+		return LoadResult{}, fmt.Errorf("reading %s: %w", dir, err)
 	}
-	return e.Load(ctx, jobdef.FSSource{
+	return e.Load(ctx, registered, jobdef.FSSource{
 		FS:   os.DirFS(dir),
 		Root: ".",
 		Name: dir,
 	})
+}
+
+// SourceDir is where a directory-backed source reads from.
+//
+// The built-in local source has no location of its own: it means "wherever the
+// jobs directory is configured to be", so JE_JOBS_DIR keeps working and nobody
+// has to register anything to write their first job.
+func (e *Engine) SourceDir(src store.Source) string {
+	if src.Location == "" {
+		return e.opts.Layout.Jobs
+	}
+	return src.Location
 }
 
 // Definition returns the parsed definition a job currently runs under.
@@ -197,7 +239,7 @@ func (e *Engine) LoadFromDisk(ctx context.Context) (LoadResult, error) {
 // engine reports is what the engine would execute -- if the file has since
 // changed and not been reloaded, this shows the loaded version, not the edit.
 func (e *Engine) Definition(ctx context.Context, slug string) (*jobdef.Definition, store.Job, error) {
-	job, err := e.store.JobBySlug(ctx, slug)
+	job, err := e.resolveJob(ctx, slug)
 	if err != nil {
 		return nil, store.Job{}, err
 	}

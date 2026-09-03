@@ -68,23 +68,47 @@ func (c *Chain) FilePath() string { return c.filePath }
 // canonicalisation pass -- which matters because it is what gets hashed.
 func (s Step) MatchJSON() ([]byte, error) { return json.Marshal(s.On) }
 
-// RouteHash identifies the rule, for the run rows that record which rule fired
+// RouteHash identifies a rule, for the run rows that record which rule fired
 // them (D11).
 //
 // It covers the match and the target and deliberately not the step's position:
 // reordering the steps in a file does not make them different rules, and a run
 // that says "fired by this route" should keep pointing at the same rule when
 // somebody inserts a step above it.
-func (s Step) RouteHash() (string, error) {
+//
+// It takes the resolved match and target rather than reading them off the Step,
+// because what identifies a rule is what it does, and the same chain file
+// registered from two sources is two different rules pointing at two different
+// jobs (D22).
+func RouteHash(match Match, target string) (string, error) {
 	body, err := json.Marshal(struct {
 		On  Match  `json:"on"`
 		Run string `json:"run"`
-	}{s.On, s.Run})
+	}{match, target})
 	if err != nil {
 		return "", err
 	}
 	sum := sha256.Sum256(body)
 	return hex.EncodeToString(sum[:16]), nil
+}
+
+// Qualify returns this pattern with any job name in it resolved by qualify.
+//
+// A chain file never writes a source name: it names jobs in its own source, so
+// the same repo registered under two names wires itself both times and stays
+// portable (D22). Resolution therefore happens here, at load, rather than in
+// the file -- the stored rule matches the qualified name the events actually
+// carry.
+func (m Match) Qualify(qualify func(string) string) Match {
+	if !NamesAJob[m.Event] || m.Where["job"] == "" {
+		return m
+	}
+	out := Match{Event: m.Event, Where: make(map[string]string, len(m.Where))}
+	for k, v := range m.Where {
+		out.Where[k] = v
+	}
+	out.Where["job"] = qualify(out.Where["job"])
+	return out
 }
 
 // String renders a pattern the way a file would write it: "run.succeeded
@@ -277,7 +301,13 @@ func (c *Chain) Validate() error {
 	// engine loading anything" is a disproportionate answer to an empty list.
 	for i, s := range c.Steps {
 		if !slugPattern.MatchString(s.Run) {
-			return fmt.Errorf("step %d: run: %q is not a job name", i+1, s.Run)
+			// Named without a source on purpose. A chain resolves job names
+			// within its own source, which is what keeps a repo self-contained
+			// and portable: the same files wire themselves the same way
+			// wherever they are registered (D22).
+			return fmt.Errorf(
+				"step %d: run: %q is not a job name -- a chain names jobs in its own "+
+					"source, so this is a bare name like \"daily-rollup\"", i+1, s.Run)
 		}
 	}
 	return nil
@@ -289,14 +319,15 @@ func ChainNameFromPath(path string) string {
 	return strings.TrimSuffix(base, filepath.Ext(base))
 }
 
-// runEventTypes are the event types whose payload names the job that produced
-// them, which is what makes a chain's shape statically knowable.
+// NamesAJob lists the event types whose payload names the job that produced
+// them, which is what makes a chain's shape statically knowable and what tells
+// qualification which `where` values are job names.
 //
 // A step matching one of these is an edge from that job to the step's target.
 // A step matching a job-emitted event is not, because nothing in the files says
 // which job emits `weather.ingested` -- that is why the runtime depth guard
 // stays even though the static check exists.
-var runEventTypes = map[string]bool{
+var NamesAJob = map[string]bool{
 	"run.succeeded": true,
 	"run.failed":    true,
 	"run.skipped":   true,
@@ -317,7 +348,7 @@ func checkCycles(chains []*Chain) error {
 	graph := map[string][]edge{}
 	for _, c := range chains {
 		for i, s := range c.Steps {
-			if !runEventTypes[s.On.Event] {
+			if !NamesAJob[s.On.Event] {
 				continue
 			}
 			from := s.On.Where["job"]

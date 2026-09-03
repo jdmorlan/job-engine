@@ -10,8 +10,14 @@ import (
 
 // Job is a loaded definition as the database holds it.
 type Job struct {
-	ID             int64           `json:"id"`
-	Slug           string          `json:"slug"`
+	ID   int64  `json:"id"`
+	Slug string `json:"slug"`
+
+	// Source is which registered place this definition came from (D22).
+	// Authority is per source, so every sweep over "what is still here" is
+	// scoped by it.
+	Source string `json:"source"`
+
 	DefinitionHash string          `json:"definition_hash"`
 	Definition     json.RawMessage `json:"definition,omitempty"`
 	FilePath       string          `json:"file_path"`
@@ -28,6 +34,15 @@ type Job struct {
 	// `je explain` (P3). Stored beside the definition rather than in it,
 	// because a line number describes the file and not the job.
 	Declared map[string]int `json:"declared,omitempty"`
+}
+
+// sourceOrLocal defaults the source, so a caller that predates sources (a test,
+// an embedding consumer) still writes a valid row.
+func (j Job) sourceOrLocal() string {
+	if j.Source == "" {
+		return LocalSource
+	}
+	return j.Source
 }
 
 // Removed reports whether this job's definition file is gone.
@@ -67,9 +82,10 @@ func (s *Store) UpsertJob(ctx context.Context, j Job) (Job, error) {
 	}
 
 	err = tx.QueryRowContext(ctx, `
-		INSERT INTO jobs (name, definition_hash, file_path, enabled, loaded_at, load_error, config_error, declared)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO jobs (name, source, definition_hash, file_path, enabled, loaded_at, load_error, config_error, declared)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (name) DO UPDATE SET
+			source          = excluded.source,
 			definition_hash = excluded.definition_hash,
 			file_path       = excluded.file_path,
 			enabled         = excluded.enabled,
@@ -82,7 +98,7 @@ func (s *Store) UpsertJob(ctx context.Context, j Job) (Job, error) {
 			-- to be as safe as the revert was.
 			removed_at      = NULL
 		RETURNING id`,
-		j.Slug, j.DefinitionHash, j.FilePath, j.Enabled,
+		j.Slug, j.sourceOrLocal(), j.DefinitionHash, j.FilePath, j.Enabled,
 		formatTime(time.Now()), nullString(j.LoadError), nullString(j.ConfigError),
 		string(declared),
 	).Scan(&j.ID)
@@ -93,7 +109,7 @@ func (s *Store) UpsertJob(ctx context.Context, j Job) (Job, error) {
 }
 
 const selectJob = `
-	SELECT j.id, j.name, j.definition_hash, v.definition, j.file_path,
+	SELECT j.id, j.name, j.source, j.definition_hash, v.definition, j.file_path,
 	       j.enabled, j.loaded_at, j.load_error, j.config_error, j.removed_at,
 	       j.declared
 	FROM jobs j
@@ -173,7 +189,7 @@ func scanJob(sc scanner) (Job, error) {
 		removedAt  sql.NullString
 		declared   sql.NullString
 	)
-	if err := sc.Scan(&j.ID, &j.Slug, &j.DefinitionHash, &definition, &j.FilePath,
+	if err := sc.Scan(&j.ID, &j.Slug, &j.Source, &j.DefinitionHash, &definition, &j.FilePath,
 		&j.Enabled, &loadedAt, &loadErr, &configErr, &removedAt, &declared); err != nil {
 		return Job{}, err
 	}

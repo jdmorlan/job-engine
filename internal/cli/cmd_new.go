@@ -42,6 +42,7 @@ func runNew(ctx context.Context, env *Env, args []string) error {
 		every       = fs.String("every", "", "run on an interval, e.g. 15m")
 		cron        = fs.String("cron", "", "run on a cron schedule, e.g. \"0 3 * * *\"")
 		runsOn      = fs.String("runs-on", "", "the worker label this job needs, e.g. macos")
+		dir         = fs.String("dir", "", "the jobs repository to write into (default: this one, or the engine's)")
 	)
 	rest, err := parseArgs(fs, args)
 	if err != nil {
@@ -52,10 +53,15 @@ func runNew(ctx context.Context, env *Env, args []string) error {
 	}
 	name := rest[0]
 
-	if *chain {
-		return writeChainFile(env, name, *description)
+	root, err := jobsRoot(env, *dir)
+	if err != nil {
+		return err
 	}
-	return writeJobFile(env, name, jobTemplate{
+
+	if *chain {
+		return writeChainFile(env, root, name, *description)
+	}
+	return writeJobFile(env, root, name, jobTemplate{
 		description: *description,
 		command:     *command,
 		every:       *every,
@@ -63,6 +69,28 @@ func runNew(ctx context.Context, env *Env, args []string) error {
 		runsOn:      *runsOn,
 		script:      *script,
 	})
+}
+
+// jobsRoot decides which repository a new file belongs in.
+//
+// The rule is the one somebody would guess: if you are standing in a jobs
+// repository, that is the one you meant. `je init` creates a chains/ directory,
+// so its presence is what a repository looks like from here -- and the path
+// written is always printed, so a wrong guess is visible immediately rather
+// than being discovered when the job does not appear.
+func jobsRoot(env *Env, override string) (string, error) {
+	if override != "" {
+		return filepath.Abs(override)
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return env.Layout.Jobs, nil //nolint:nilerr // no cwd is not a reason to fail
+	}
+	if info, err := os.Stat(filepath.Join(cwd, "chains")); err == nil && info.IsDir() {
+		return cwd, nil
+	}
+	return env.Layout.Jobs, nil
 }
 
 type jobTemplate struct {
@@ -74,7 +102,7 @@ type jobTemplate struct {
 	script      bool
 }
 
-func writeJobFile(env *Env, name string, t jobTemplate) error {
+func writeJobFile(env *Env, root, name string, t jobTemplate) error {
 	if err := checkName(name, "job"); err != nil {
 		return err
 	}
@@ -95,9 +123,9 @@ func writeJobFile(env *Env, name string, t jobTemplate) error {
 		}
 	}
 
-	jobPath := filepath.Join(env.Layout.Jobs, name+".yaml")
+	jobPath := filepath.Join(root, name+".yaml")
 	scriptRel := filepath.Join("scripts", name+".sh")
-	scriptPath := filepath.Join(env.Layout.Jobs, scriptRel)
+	scriptPath := filepath.Join(root, scriptRel)
 
 	if err := refuseToClobber(jobPath); err != nil {
 		return err
@@ -137,7 +165,7 @@ func writeJobFile(env *Env, name string, t jobTemplate) error {
 		fmt.Fprintf(&b, "\non:\n  - cron: \"%s\"\n", t.cron)
 	}
 
-	if err := os.MkdirAll(env.Layout.Jobs, 0o755); err != nil {
+	if err := os.MkdirAll(root, 0o755); err != nil {
 		return fmt.Errorf("creating jobs directory: %w", err)
 	}
 	if err := os.WriteFile(jobPath, []byte(b.String()), 0o644); err != nil {
@@ -170,11 +198,11 @@ func writeJobFile(env *Env, name string, t jobTemplate) error {
 	return tw.Flush()
 }
 
-func writeChainFile(env *Env, name, description string) error {
+func writeChainFile(env *Env, root, name, description string) error {
 	if err := checkName(name, "chain"); err != nil {
 		return err
 	}
-	path := filepath.Join(env.Layout.Chains(), name+".yaml")
+	path := filepath.Join(root, "chains", name+".yaml")
 	if err := refuseToClobber(path); err != nil {
 		return err
 	}

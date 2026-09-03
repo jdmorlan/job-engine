@@ -19,7 +19,7 @@ func (e *Engine) Jobs(ctx context.Context) ([]store.Job, error) {
 
 // Job returns one job by slug.
 func (e *Engine) Job(ctx context.Context, slug string) (store.Job, error) {
-	return e.store.JobBySlug(ctx, slug)
+	return e.resolveJob(ctx, slug)
 }
 
 // Runs returns recent runs, newest first. A zero jobID means all jobs.

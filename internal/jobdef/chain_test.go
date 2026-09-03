@@ -41,7 +41,7 @@ steps:
 
 	// The rule's identity is its match and its target, so moving it down the
 	// file must not make it a different rule.
-	hash, err := step.RouteHash()
+	hash, err := jobdef.RouteHash(step.On, step.Run)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,12 +52,29 @@ steps:
   - on: { event: run.succeeded, where: { job: extract } }
     run: rollup
 `)
-	moved, err := same.Steps[1].RouteHash()
+	moved, err := jobdef.RouteHash(same.Steps[1].On, same.Steps[1].Run)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if hash != moved {
 		t.Error("moving a step down the file changed its route hash")
+	}
+
+	// The same file registered from two sources is two different rules, wiring
+	// two different pairs of jobs (D22), so their hashes have to differ.
+	qualified := step.On.Qualify(func(slug string) string { return "weather/" + slug })
+	remote, err := jobdef.RouteHash(qualified, "weather/"+step.Run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if remote == hash {
+		t.Error("the same chain file in two sources produced one rule identity")
+	}
+	if qualified.Where["job"] != "weather/extract" {
+		t.Errorf("qualified where = %v, want the job name resolved to its source", qualified.Where)
+	}
+	if step.On.Where["job"] != "extract" {
+		t.Error("Qualify mutated the pattern it was given")
 	}
 }
 

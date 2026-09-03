@@ -226,7 +226,11 @@ func (w *Worker) execute(ctx context.Context, d engine.Dispatch) {
 	// It lives here, on the machine where the job runs, so D6 is unchanged by
 	// the network: the job writes to local files exactly as it always did and
 	// never learns that the engine is somewhere else.
-	scratch, err := os.MkdirTemp("", fmt.Sprintf("je-%s-%d-%d-", d.JobSlug, d.RunID, d.Attempt))
+	// The slug carries its source (D22), and a source-qualified name has a
+	// slash in it -- which MkdirTemp rejects as a path separator rather than
+	// treating as a name.
+	scratch, err := os.MkdirTemp("", fmt.Sprintf("je-%s-%d-%d-",
+		strings.ReplaceAll(d.JobSlug, "/", "-"), d.RunID, d.Attempt))
 	if err != nil {
 		w.report(ctx, d, engine.Completion{
 			ExecError: fmt.Sprintf("creating scratch directory: %v", err),
@@ -244,7 +248,7 @@ func (w *Worker) execute(ctx context.Context, d engine.Dispatch) {
 		"JOB_EVENTS_FILE="+ch.events,
 	)
 
-	workdir, err := w.resolveWorkdir(d.Workdir)
+	workdir, err := w.resolveWorkdir(d.Workdir, d.SourceRoot)
 	if err != nil {
 		w.report(ctx, d, engine.Completion{ExecError: err.Error()})
 		return
@@ -389,18 +393,36 @@ func workerID(name string) string { return "worker-" + name }
 // its definition needs those files on the worker. Splitting the engine in two
 // splits the definition from the code it runs, and closing that gap properly is
 // D22's job (sources), not something to paper over with a path.
-func (w *Worker) resolveWorkdir(declared string) (string, error) {
+func (w *Worker) resolveWorkdir(declared, sourceRoot string) (string, error) {
 	expanded, err := expandHome(declared)
 	if err != nil {
 		return "", err
 	}
+
+	// A job from a registered source runs in that source's tree, because its
+	// code arrived with its definition and lives beside it there (D22). Only
+	// the built-in local source falls back to this worker's jobs directory.
+	base := w.opts.JobsDir
+	if sourceRoot != "" {
+		if _, err := os.Stat(sourceRoot); err != nil {
+			// Said rather than papered over. Falling back to this worker's own
+			// jobs directory would run the command somewhere its files are
+			// not, and "command not found" three layers down is a much worse
+			// version of this sentence.
+			return "", fmt.Errorf(
+				"this job's code is in %s, which this worker cannot see: %w",
+				sourceRoot, err)
+		}
+		base = sourceRoot
+	}
+
 	switch {
 	case expanded == "":
-		return w.opts.JobsDir, nil
+		return base, nil
 	case filepath.IsAbs(expanded):
 		return expanded, nil
 	default:
-		return filepath.Join(w.opts.JobsDir, expanded), nil
+		return filepath.Join(base, expanded), nil
 	}
 }
 

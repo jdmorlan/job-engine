@@ -88,6 +88,16 @@ type Dispatch struct {
 	// resolved by whoever will use it.
 	Workdir string `json:"workdir"`
 
+	// SourceRoot is the root of the registered source this job came from, when
+	// that is a directory (D22). A job with no declared workdir runs here, not
+	// in the worker's own jobs directory -- code travels with definitions, so
+	// "beside the definition" means beside it *in its own repository*.
+	//
+	// Unresolved, like Workdir: it is a path on the control plane, and whether
+	// this worker can see it is a question only the worker can answer. It says
+	// so rather than guessing when it cannot.
+	SourceRoot string `json:"source_root,omitempty"`
+
 	// Env is the complete environment minus the four values the worker can
 	// only know locally: JOB_WORKDIR and the three output channel paths (D6).
 	// The worker creates the scratch directory and appends them, which is what
@@ -273,19 +283,34 @@ func (e *Engine) dispatchFor(ctx context.Context, p Prepared, worker store.Worke
 	}
 	e.rememberRedactor(p.Run.ID, newRedactor(resolved))
 
+	// Where this job's code lives, which is a fact about its source rather than
+	// about this worker (D22). Absent for the built-in local source, whose root
+	// is the jobs directory the worker already knows.
+	var sourceRoot string
+	if p.Job.Source != "" && p.Job.Source != store.LocalSource {
+		src, err := e.store.SourceByName(ctx, p.Job.Source)
+		if err != nil {
+			return nil, fmt.Errorf("job %s: reading its source: %w", p.Job.Slug, err)
+		}
+		if src.Kind == store.SourceKindDir {
+			sourceRoot = e.SourceDir(src)
+		}
+	}
+
 	e.log.Info("dispatched",
 		"job", p.Job.Slug, "run", p.Run.ID, "attempt", attempt.Number, "worker", worker.Name)
 
 	return &Dispatch{
-		RunID:   p.Run.ID,
-		Attempt: attempt.Number,
-		JobSlug: p.Job.Slug,
-		Command: p.Def.Command,
-		Workdir: p.Def.Workdir,
-		Env:     env,
-		Timeout: p.Def.Timeout.D,
-		Grace:   executor.DefaultGrace,
-		Lease:   LeaseTTL,
+		RunID:      p.Run.ID,
+		Attempt:    attempt.Number,
+		JobSlug:    p.Job.Slug,
+		Command:    p.Def.Command,
+		Workdir:    p.Def.Workdir,
+		SourceRoot: sourceRoot,
+		Env:        env,
+		Timeout:    p.Def.Timeout.D,
+		Grace:      executor.DefaultGrace,
+		Lease:      LeaseTTL,
 	}, nil
 }
 

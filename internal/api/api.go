@@ -46,6 +46,7 @@ func (s *Server) Handler() http.Handler {
 	s.registerSecrets(mux)
 	s.registerWorkers(mux)
 	s.registerRuns(mux)
+	s.registerSources(mux)
 	return mux
 }
 
