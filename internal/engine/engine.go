@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jdmorlan/job-engine/internal/ca"
 	"github.com/jdmorlan/job-engine/internal/lockfile"
 	"github.com/jdmorlan/job-engine/internal/model"
 	"github.com/jdmorlan/job-engine/internal/paths"
@@ -59,8 +60,17 @@ type Engine struct {
 	now     func() time.Time
 	store   *store.Store
 	secrets *secrets.Store
-	lock    *lockfile.Lock
-	broker  *logBroker
+
+	// authority issues worker identities, and tokens are the one-time
+	// credentials that let a machine ask for one (D25 step 5). Both are
+	// created lazily: a deployment that never enrols a worker never writes a
+	// CA key, and nothing about the plaintext path needs either.
+	authorityOnce sync.Once
+	authority     *ca.Authority
+	authorityErr  error
+	tokens        *ca.Tokens
+	lock          *lockfile.Lock
+	broker        *logBroker
 
 	// inflight tracks runs a worker currently holds (D20). See the type.
 	inflightMu sync.Mutex
@@ -139,6 +149,7 @@ func New(opts Options) (*Engine, error) {
 		now:     opts.Now,
 		store:   st,
 		secrets: secrets.Open(opts.Layout.Data),
+		tokens:  ca.NewTokens(),
 		lock:    lock,
 		broker:  newLogBroker(),
 

@@ -58,6 +58,7 @@ func runWorker(ctx context.Context, env *Env, args []string) error {
 	useDocker := fs.Bool("docker", false, "join as a container instead of a native service")
 	native := fs.Bool("native", false, "join as a native service (launchd or systemd)")
 	printOnly := fs.Bool("print", false, "print what would be done, and do nothing")
+	token := fs.String("token", "", "an enrolment token from `je enrol` on the control plane")
 	positional, err := parseArgs(fs, args)
 	if err != nil {
 		return err
@@ -105,6 +106,19 @@ func runWorker(ctx context.Context, env *Env, args []string) error {
 			target = daemon.DefaultAddr
 		default:
 			return adviseNoControlPlane(err)
+		}
+	}
+
+	// Redeeming happens once the address is resolved and before anything else:
+	// `run` and `join` both want an identity in place, and enrolling is the
+	// step that puts one there.
+	//
+	// It uses `target` rather than the CLI's own resolution, because a machine
+	// that is becoming a worker has no control plane of its own to look up --
+	// that is the entire situation enrolment exists for.
+	if *token != "" {
+		if err := enrolAt(ctx, env, target, *token); err != nil {
+			return err
 		}
 	}
 

@@ -32,7 +32,23 @@ type Worker struct {
 	RegisteredAt time.Time  `json:"registered_at"`
 	LastSeenAt   time.Time  `json:"last_seen_at"`
 	GoneAt       *time.Time `json:"gone_at,omitempty"`
+
+	// EnrolledAt is when this identity was issued, and Fingerprint is the
+	// certificate it presents (D25 step 5).
+	//
+	// Both nil for a worker that registered by claiming a name, which is what
+	// every worker did before enrolment existed and what any worker on a
+	// plaintext listener still does. Absent rather than faked: "this identity
+	// was issued" is a different fact from "this worker said it was called
+	// that", and the view should not blur them.
+	EnrolledAt  *time.Time `json:"enrolled_at,omitempty"`
+	Fingerprint string     `json:"cert_fingerprint,omitempty"`
 }
+
+// Enrolled reports whether this worker's identity was issued rather than
+// claimed. Only an enrolled worker's labels can be trusted, because only those
+// were decided by somebody other than the worker.
+func (w Worker) Enrolled() bool { return w.EnrolledAt != nil }
 
 // Online reports whether the lease was renewed recently enough.
 //
@@ -60,7 +76,17 @@ func (s *Store) RegisterWorker(ctx context.Context, w Worker) (Worker, error) {
 		INSERT INTO workers (id, name, labels, version, roles, registered_at, last_seen_at, gone_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
 		ON CONFLICT(id) DO UPDATE SET
-			name = excluded.name, labels = excluded.labels,
+			-- An enrolled worker cannot rename itself or change what it can do.
+			-- Its name and labels were decided by whoever minted its enrolment
+			-- token, and registration is only "I am here" (D25).
+			--
+			-- Enforced here rather than in the engine because this is the write:
+			-- a caller that forgot the rule cannot get round it, and there is
+			-- exactly one place to look to know whether the rule holds.
+			name = CASE WHEN workers.enrolled_at IS NULL
+			            THEN excluded.name ELSE workers.name END,
+			labels = CASE WHEN workers.enrolled_at IS NULL
+			              THEN excluded.labels ELSE workers.labels END,
 			version = excluded.version, roles = excluded.roles,
 			last_seen_at = excluded.last_seen_at, gone_at = NULL`,
 		w.ID, w.Name, string(labels), w.Version, string(roles),
@@ -68,7 +94,13 @@ func (s *Store) RegisterWorker(ctx context.Context, w Worker) (Worker, error) {
 	if err != nil {
 		return Worker{}, fmt.Errorf("registering worker: %w", err)
 	}
-	return w, nil
+	// Read back rather than returning what was sent: for an enrolled worker the
+	// two differ, and the stored row is the true one.
+	stored, err := s.WorkerByID(ctx, w.ID)
+	if err != nil {
+		return Worker{}, err
+	}
+	return stored, nil
 }
 
 // TouchWorker renews a lease (C5).
@@ -88,7 +120,8 @@ func (s *Store) TouchWorker(ctx context.Context, id string, at time.Time) error 
 // Workers lists every registration, most recently seen first.
 func (s *Store) Workers(ctx context.Context) ([]Worker, error) {
 	rows, err := s.state.QueryContext(ctx, `
-		SELECT id, name, labels, version, roles, registered_at, last_seen_at, gone_at
+		SELECT id, name, labels, version, roles, registered_at, last_seen_at, gone_at,
+		       enrolled_at, cert_fingerprint
 		FROM workers ORDER BY last_seen_at DESC`)
 	if err != nil {
 		return nil, err
@@ -99,12 +132,20 @@ func (s *Store) Workers(ctx context.Context) ([]Worker, error) {
 	for rows.Next() {
 		var w Worker
 		var labels, roles string
-		var goneAt sql.NullString
+		var goneAt, enrolledAt, fingerprint sql.NullString
 		var registered, lastSeen string
 		if err := rows.Scan(&w.ID, &w.Name, &labels, &w.Version, &roles,
-			&registered, &lastSeen, &goneAt); err != nil {
+			&registered, &lastSeen, &goneAt, &enrolledAt, &fingerprint); err != nil {
 			return nil, err
 		}
+		if enrolledAt.Valid {
+			at, err := parseTime(enrolledAt.String)
+			if err != nil {
+				return nil, err
+			}
+			w.EnrolledAt = &at
+		}
+		w.Fingerprint = fingerprint.String
 		if err := json.Unmarshal([]byte(labels), &w.Labels); err != nil {
 			return nil, err
 		}
@@ -326,3 +367,40 @@ const (
 	RoleExecute = "execute"
 	RoleReceive = "receive"
 )
+
+// EnrolWorker writes an identity before the worker has ever connected.
+//
+// The row exists first, and that ordering is the point: what this machine may
+// call itself and what capabilities it may advertise are decided here, by
+// whoever minted its enrolment token, and registration can then only report
+// that it is alive (D25).
+//
+// Re-enrolment overwrites the fingerprint and keeps the row, so a rebuilt
+// machine rejoining is visible as a changed certificate rather than as a second
+// worker with the same name.
+func (s *Store) EnrolWorker(ctx context.Context, w Worker) error {
+	labels, err := json.Marshal(w.Labels)
+	if err != nil {
+		return err
+	}
+	roles, err := json.Marshal(w.Roles)
+	if err != nil {
+		return err
+	}
+	now := formatTime(w.RegisteredAt)
+	_, err = s.state.ExecContext(ctx, `
+		INSERT INTO workers (id, name, labels, version, roles,
+		                     registered_at, last_seen_at, gone_at,
+		                     enrolled_at, cert_fingerprint)
+		VALUES (?, ?, ?, '', ?, ?, ?, NULL, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			name = excluded.name, labels = excluded.labels, roles = excluded.roles,
+			enrolled_at = excluded.enrolled_at,
+			cert_fingerprint = excluded.cert_fingerprint`,
+		w.ID, w.Name, string(labels), string(roles),
+		now, now, now, w.Fingerprint)
+	if err != nil {
+		return fmt.Errorf("enrolling worker: %w", err)
+	}
+	return nil
+}

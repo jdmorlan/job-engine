@@ -64,6 +64,20 @@ func Connect(l paths.Layout) (*Client, error) {
 	}, nil
 }
 
+// DialAddr connects to a control plane named directly, skipping the resolution
+// Connect does.
+//
+// For the one case where this machine's data directory cannot answer the
+// question: enrolling, where the whole point is that this machine is not a
+// control plane and has been told where one is.
+func DialAddr(addr string) (*Client, error) {
+	base, err := url.Parse("http://" + addr)
+	if err != nil {
+		return nil, fmt.Errorf("bad control plane address %q: %w", addr, err)
+	}
+	return &Client{base: base, http: &http.Client{}}, nil
+}
+
 // resolveAddr finds the control plane, in the order that puts the most
 // authoritative answer first.
 //
@@ -191,6 +205,9 @@ func withTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
 // get it wrong.
 
 func (c *Client) Source() string { return "control plane at " + c.base.Host }
+
+// Addr is where this client is pointed, for instructions a person will retype.
+func (c *Client) Addr() string { return c.base.Host }
 
 func (c *Client) Jobs(ctx context.Context) ([]store.Job, error) {
 	out, err := do[struct {
@@ -339,4 +356,15 @@ func (c *Client) Workers(ctx context.Context) ([]engine.WorkerView, error) {
 // Sync reloads definitions on the control plane (D2, D19).
 func (c *Client) Sync(ctx context.Context) (engine.LoadResult, error) {
 	return do[engine.LoadResult](ctx, c, http.MethodPost, "/v1/sync", nil)
+}
+
+// MintEnrolment asks the control plane for a one-time worker token.
+func (c *Client) MintEnrolment(ctx context.Context, req api.MintEnrolmentRequest) (api.MintEnrolmentResponse, error) {
+	return do[api.MintEnrolmentResponse](ctx, c, http.MethodPost, "/v1/enrol/tokens", req)
+}
+
+// Enrol redeems one. The request carries a public key and a token; nothing
+// secret travels in either direction.
+func (c *Client) Enrol(ctx context.Context, req api.EnrolRequest) (api.EnrolResponse, error) {
+	return do[api.EnrolResponse](ctx, c, http.MethodPost, "/v1/enrol", req)
 }

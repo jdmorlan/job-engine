@@ -607,6 +607,7 @@ func (e *Engine) forgetRedactor(runID int64) {
 // Event types for the data plane's own lifecycle (P2, C8).
 const (
 	EventWorkerRegistered = "worker.registered"
+	EventWorkerEnrolled   = "worker.enrolled"
 	EventWorkerLost       = "worker.lost"
 	EventRunLost          = "run.lost"
 
