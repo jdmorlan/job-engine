@@ -167,36 +167,44 @@ engine should do quietly.
 
 ```console
 $ ./je demo
-wrote 12 files to /Users/you/.je/jobs
+registered github.com/jdmorlan/job-engine/demo as "demo" at a3f81c2f
 
-  demo-hello    prints a line and exits           the smallest job that exists
-  demo-counter  keeps a cursor and advances it    what other schedulers leave to you
-  demo-flaky    fails about one run in three      watch the cursor NOT move
-  demo-tick     runs every minute                 gives the scheduler something to do
-  demo-ingest   emits an event when it finishes   the start of a chain
-  demo-report   runs because that event happened  no clock, no polling
-  demo-archive  runs after the report succeeds    and not at all if it doesn't
+  demo/demo-hello    prints a line and exits           the smallest job that exists
+  demo/demo-counter  keeps a cursor and advances it    what other schedulers leave to you
+  demo/demo-flaky    fails about one run in three      watch the cursor NOT move
+  demo/demo-tick     runs every minute                 gives the scheduler something to do
+  demo/demo-ingest   emits an event when it finishes   the start of a chain
+  demo/demo-report   runs because that event happened  no clock, no polling
+  demo/demo-archive  runs after the report succeeds    and not at all if it doesn't
 
 and one chain, which runs nothing itself:
-  chains/demo-pipeline.yaml  wires the three above into one named flow
+  demo/demo-pipeline  wires the three above into one named flow
 ```
 
-They are ordinary files. Read them, change them, break them, `je demo --remove`
+Ordinary files in an ordinary directory — which is the point. The examples
+arrive the way your own jobs would: registered as a source, pinned to a commit,
+and named for where they came from. Fork them, break them, and `je demo --remove`
 when you are done.
 
-The tour that matters is `demo-flaky`. Run it eight times and look at what
+They are registered as a **subpath** — `--path demo` — rather than as a
+repository of their own. That pins them to the tag of the binary that registered
+them, so the examples can never reference something your engine does not have.
+It is also the same mechanism that lets one repository hold `python-jobs/` and
+`typescript-jobs/` and register them as two sources with different names.
+
+The tour that matters is `demo/demo-flaky`. Run it eight times and look at what
 happened:
 
 ```console
-$ je runs demo-flaky
-RUN  JOB         STATUS     STARTED              DURATION
-8    demo-flaky  succeeded  2026-09-02 14:13:20  11ms
-7    demo-flaky  succeeded  2026-09-02 14:13:19  14ms
-6    demo-flaky  failed     2026-09-02 14:13:18  15ms
-5    demo-flaky  succeeded  2026-09-02 14:13:17  11ms
+$ je runs demo/demo-flaky
+RUN  JOB              STATUS     STARTED              DURATION
+8    demo/demo-flaky  succeeded  2026-09-02 14:13:20  11ms
+7    demo/demo-flaky  succeeded  2026-09-02 14:13:19  14ms
+6    demo/demo-flaky  failed     2026-09-02 14:13:18  15ms
+5    demo/demo-flaky  succeeded  2026-09-02 14:13:17  11ms
 ...
 
-$ je state history demo-flaky
+$ je state history demo/demo-flaky
 v6  2026-09-02 14:13:20  run 8          processed -> 5
 v5  2026-09-02 14:13:19  run 7          processed -> 4
 v4  2026-09-02 14:13:17  run 5          processed -> 3
@@ -254,7 +262,7 @@ Early, but it runs jobs on a schedule, unattended, and runs them off each
 other's events.
 
 ```
-je demo           write a handful of example jobs, a chain, and a tour
+je demo           register a repo of example jobs, a chain, and a tour
 je upgrade        install the latest release, checksum-verified
 je quickstart     a control plane and a worker, in this terminal
 je control-plane run    the control plane: schedules, history, the API

@@ -12,28 +12,20 @@ import (
 	"github.com/jdmorlan/job-engine/internal/paths"
 )
 
-func demoEnv(t *testing.T) (*Env, *bytes.Buffer) {
-	t.Helper()
-	dir := t.TempDir()
-	out := &bytes.Buffer{}
-	return &Env{
-		Stdout: out,
-		Stderr: &bytes.Buffer{},
-		Stdin:  strings.NewReader(""),
-		Layout: paths.Layout{Data: dir, Jobs: filepath.Join(dir, "jobs")},
-	}, out
-}
+// demoDir is the examples as they sit in this repository, which is the whole
+// reason they live here rather than in a repository of their own: keeping them
+// under this CI keeps proving they parse.
+const demoDir = "../../demo"
 
-// TestDemoJobsAreValid is the test that matters most here. The examples are
-// the first thing anybody runs, and an example that does not load is worse
-// than no example at all -- it teaches that the tool is broken.
+// TestDemoJobsAreValid is the test that matters most here. The examples are the
+// first thing anybody runs, and an example that does not load is worse than no
+// example at all -- it teaches that the tool is broken.
+//
+// It reads the directory directly now. `je demo` registers a source over the
+// network, which a unit test must not do; the files are right here, and what
+// needs proving is that they are valid, not that HTTP works.
 func TestDemoJobsAreValid(t *testing.T) {
-	env, _ := demoEnv(t)
-	if err := runDemo(context.Background(), env, nil); err != nil {
-		t.Fatalf("je demo: %v", err)
-	}
-
-	src := jobdef.FSSource{FS: os.DirFS(env.Layout.Jobs), Root: "."}
+	src := jobdef.FSSource{FS: os.DirFS(demoDir), Root: "."}
 	snap, err := src.Load(context.Background())
 	if err != nil {
 		t.Fatalf("the example jobs do not load: %v", err)
@@ -51,8 +43,8 @@ func TestDemoJobsAreValid(t *testing.T) {
 		}
 		want[def.Slug] = true
 
-		// Every example must be runnable as written, with nothing installed
-		// and nothing configured.
+		// Every example must be runnable as written, with nothing installed and
+		// nothing configured.
 		if got := def.ConfigError(); got != "" {
 			t.Errorf("%s is not runnable out of the box: %s", def.Slug, got)
 		}
@@ -62,14 +54,14 @@ func TestDemoJobsAreValid(t *testing.T) {
 	}
 	for slug, found := range want {
 		if !found {
-			t.Errorf("example %s was not written", slug)
+			t.Errorf("example %s is missing", slug)
 		}
 	}
 
 	// The chain is loaded by the same source as the jobs, so this also pins
 	// that its steps name jobs that exist and that it does not close a loop --
-	// both of which are load errors, and both of which the examples would
-	// otherwise be the first place anybody hit.
+	// both load errors, and both of which the examples would otherwise be the
+	// first place anybody hit.
 	if len(snap.Chains) != 1 || snap.Chains[0].Name != "demo-pipeline" {
 		t.Fatalf("chains = %+v, want the demo-pipeline example", snap.Chains)
 	}
@@ -79,75 +71,98 @@ func TestDemoJobsAreValid(t *testing.T) {
 }
 
 func TestDemoScriptsAreExecutableAndPresent(t *testing.T) {
-	env, _ := demoEnv(t)
-	if err := runDemo(context.Background(), env, nil); err != nil {
-		t.Fatal(err)
-	}
-
 	for _, name := range []string{"counter.sh", "flaky.sh", "ingest.sh"} {
-		path := filepath.Join(env.Layout.Jobs, "scripts", name)
+		path := filepath.Join(demoDir, "scripts", name)
 		info, err := os.Stat(path)
 		if err != nil {
-			t.Fatalf("%s was not written: %v", name, err)
+			t.Fatalf("%s is missing: %v", name, err)
 		}
+		// Committed executable, because the tarball preserves the mode and a
+		// script that arrives without it fails as "permission denied" on
+		// somebody else's machine.
 		if info.Mode().Perm()&0o100 == 0 {
-			t.Errorf("%s is not executable, so reading and running it by hand does not work", name)
+			t.Errorf("%s is not executable, so it will not run once fetched", name)
 		}
 	}
 }
 
-// TestDemoDoesNotClobber protects the thing that makes these files useful:
-// once written they are yours, and editing one must not be undone by running
-// the command again.
-func TestDemoDoesNotClobber(t *testing.T) {
-	env, out := demoEnv(t)
-	if err := runDemo(context.Background(), env, nil); err != nil {
-		t.Fatal(err)
-	}
-
-	edited := filepath.Join(env.Layout.Jobs, "demo-hello.yaml")
-	mine := "command: [\"/bin/sh\", \"-c\", \"echo mine\"]\n"
-	if err := os.WriteFile(edited, []byte(mine), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	out.Reset()
-	if err := runDemo(context.Background(), env, nil); err != nil {
-		t.Fatal(err)
-	}
-
-	body, err := os.ReadFile(edited)
+// The examples must not need a secret. A first run that asks for credentials is
+// not a demo, and D10 would correctly refuse to schedule the job.
+func TestDemoNeedsNoSecrets(t *testing.T) {
+	src := jobdef.FSSource{FS: os.DirFS(demoDir), Root: "."}
+	snap, err := src.Load(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(body) != mine {
-		t.Error("running je demo twice overwrote an edited example")
+	for _, def := range snap.Definitions {
+		if len(def.Secrets) > 0 {
+			t.Errorf("%s declares %v; the examples must run with nothing configured",
+				def.Slug, def.Secrets)
+		}
 	}
 }
 
-func TestDemoRemoveLeavesOtherFilesAlone(t *testing.T) {
-	env, _ := demoEnv(t)
-	if err := runDemo(context.Background(), env, nil); err != nil {
-		t.Fatal(err)
+func TestTheDemoIsARegisteredSubpathNotEmbeddedFiles(t *testing.T) {
+	if !strings.HasPrefix(DemoRepo, "github.com/") {
+		t.Errorf("DemoRepo = %q, want a repository the engine can fetch", DemoRepo)
 	}
+	if DemoPath == "" {
+		t.Error("the demo is registered as a subpath; that is what exercises --path")
+	}
+	if DemoSource == "" {
+		t.Fatal("the demo source needs a name; it is the prefix on every example job")
+	}
+}
 
-	// A job of the user's own, which removal must not touch.
-	own := filepath.Join(env.Layout.Jobs, "my-job.yaml")
-	if err := os.WriteFile(own, []byte("command: [\"true\"]\n"), 0o644); err != nil {
-		t.Fatal(err)
+// A release pins the examples to its own tag, so a v0.4 binary cannot be handed
+// examples written for v0.6. A dev build has no tag and tracks the default
+// branch, which D22 asks the repository for rather than assuming is "main".
+func TestTheDemoPinsToTheBinarysVersion(t *testing.T) {
+	if got := demoRef("v0.4.2"); got != "v0.4.2" {
+		t.Errorf("demoRef(v0.4.2) = %q, want the examples pinned to that release", got)
 	}
+	for _, version := range []string{"dev", ""} {
+		if got := demoRef(version); got != "" {
+			t.Errorf("demoRef(%q) = %q, want the default branch asked for rather than assumed",
+				version, got)
+		}
+	}
+}
 
-	if err := runDemo(context.Background(), env, []string{"--remove"}); err != nil {
-		t.Fatalf("je demo --remove: %v", err)
-	}
+// The tour has to name jobs the way they will actually be named once they
+// arrive from a source -- qualified (D22). An unqualified name that happens to
+// resolve today teaches the wrong thing and breaks as soon as a second source
+// has a job with the same slug.
+func TestTheTourUsesQualifiedNames(t *testing.T) {
+	env, out := demoEnv(t)
+	printDemoTour(env)
 
-	if _, err := os.Stat(own); err != nil {
-		t.Errorf("--remove deleted a job it did not write: %v", err)
+	tour := out.String()
+	for _, want := range []string{
+		"je run " + DemoSource + "/demo-hello",
+		"je run " + DemoSource + "/demo-ingest",
+		"je sources",
+		"je quickstart", // nothing below it works until the engine is running
+	} {
+		if !strings.Contains(tour, want) {
+			t.Errorf("the tour does not mention %q", want)
+		}
 	}
-	if _, err := os.Stat(filepath.Join(env.Layout.Jobs, "demo-hello.yaml")); !os.IsNotExist(err) {
-		t.Error("--remove left an example behind")
+	if strings.Contains(tour, "je run demo-hello\n") {
+		t.Error("the tour still uses an unqualified job name")
 	}
-	if _, err := os.Stat(filepath.Join(env.Layout.Chains(), "demo-pipeline.yaml")); !os.IsNotExist(err) {
-		t.Error("--remove left the example chain behind")
-	}
+}
+
+// demoEnv is shared with the other CLI tests, which is why it outlived the
+// demo's own file-copying tests.
+func demoEnv(t *testing.T) (*Env, *bytes.Buffer) {
+	t.Helper()
+	dir := t.TempDir()
+	out := &bytes.Buffer{}
+	return &Env{
+		Stdout: out,
+		Stderr: &bytes.Buffer{},
+		Stdin:  strings.NewReader(""),
+		Layout: paths.Layout{Data: dir, Jobs: filepath.Join(dir, "jobs")},
+	}, out
 }

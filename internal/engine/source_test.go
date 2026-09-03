@@ -290,6 +290,62 @@ func githubStub(t *testing.T, sha string, files map[string]string) *httptest.Ser
 // The control plane has to be able to hand a pinned tree to a worker that
 // cannot see its disk, and to refuse the two cases that have no tree to give
 // (D25).
+// A source registered with --path is a real thing to want -- one repository
+// holding python-jobs/ and typescript-jobs/, registered separately -- and until
+// the demo used one, nothing exercised it (D22).
+//
+// Two bugs hid behind that. The secrets file was looked up at
+// <subpath>/<subpath>/, because SourceDir already joins the subpath. And the
+// tree served to a worker was the repository root rather than the source root,
+// so a remote worker would have run every job one directory above its code.
+func TestASubpathSourceLoadsAndServesItsOwnRoot(t *testing.T) {
+	ctx := context.Background()
+	e, _ := chainFixture(t, nil, nil)
+
+	const sha = "b4c92d1ffffffffffffffffffffffffffffffffff"
+	server := githubStub(t, sha, map[string]string{
+		"README.md":             "not a job\n",
+		"demo/hello.yaml":       "command: [\"/bin/sh\", \"-c\", \"true\"]\n",
+		"demo/scripts/hello.sh": "#!/bin/sh\necho hi\n",
+		"other/ignored.yaml":    "command: [\"/bin/sh\", \"-c\", \"true\"]\n",
+	})
+	defer server.Close()
+	engine.SetGitHubBaseURLForTest(e, server.URL)
+
+	if _, err := e.AddSource(ctx, store.Source{
+		Name: "demo", Kind: store.SourceKindGitHub, Location: "you/jobs", Subpath: "demo",
+	}); err != nil {
+		t.Fatalf("registering a subpath source: %v", err)
+	}
+
+	// Only the subpath's definitions load -- the sibling directory is not this
+	// source's, and a repository root full of other things is the normal case.
+	jobs, err := e.Jobs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var slugs []string
+	for _, j := range jobs {
+		slugs = append(slugs, j.Slug)
+	}
+	if len(slugs) != 1 || slugs[0] != "demo/hello" {
+		t.Fatalf("jobs = %v, want just demo/hello from the subpath", slugs)
+	}
+
+	// What a worker is served must be the source root, not the repository root.
+	dir, err := e.SourceTreeDir(ctx, "demo", sha)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "hello.yaml")); err != nil {
+		t.Errorf("the served tree is not the source root: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "demo")); err == nil {
+		t.Error("the served tree is the repository root, so a worker would run " +
+			"every job one directory above its code")
+	}
+}
+
 func TestAPinnedTreeIsServableAndAnythingElseIsRefused(t *testing.T) {
 	ctx := context.Background()
 	e, _ := chainFixture(t, nil, nil)

@@ -314,7 +314,11 @@ func (e *Engine) SourceTreeDir(ctx context.Context, name, revision string) (stri
 			"source %q is a %s, which has no revision to serve -- its files are on the control plane's own disk",
 			name, src.Kind)
 	}
-	dir := e.opts.Layout.SourceTree(name, revision)
+	// The source *root*, which is the subpath when there is one -- not the
+	// whole repository. A worker resolves a job's workdir against whatever it
+	// receives, so serving the repository root would run every job from one
+	// directory above where its code actually is (D22/D25).
+	dir := filepath.Join(e.opts.Layout.SourceTree(name, revision), src.Subpath)
 	if _, err := os.Stat(dir); err != nil {
 		return "", fmt.Errorf("this control plane does not have %s at revision %s", name, revision)
 	}
@@ -332,7 +336,9 @@ func (e *Engine) sourceSecrets(src store.Source) (names, recipients []string, pr
 	if dir == "" {
 		return nil, nil, ""
 	}
-	body, err := os.ReadFile(filepath.Join(dir, src.Subpath, secretfile.Name))
+	// SourceDir has already joined Subpath -- joining it again looked correct
+	// and pointed at <path>/<path>/ for any source that used one.
+	body, err := os.ReadFile(filepath.Join(dir, secretfile.Name))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil, ""
 	}
