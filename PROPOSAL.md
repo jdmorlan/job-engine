@@ -199,7 +199,8 @@ architecture), **D16** (daemon lifecycle and generic event ingress).
 | D20 | Control plane + workers / universal execution | **AGREED in shape (v0.6) — 3 questions open, partly v1** |
 | D21 | Shim injection | **NEW (v0.5) — one open question** |
 | D22 | Job sources | **NEW (v0.5) — two open questions** |
-| D23 | The web client | **NEW (v0.7) — agreed, phase 1 building** |
+| D23 | The web client | **NEW (v0.7) — agreed, phase 1 shipped** |
+| D24 | Worker version coherence | **NEW (v0.7) — phase 1 shipped, 3 questions open** |
 | N1 | Non-goals | AGREED |
 | N2 | v1 done | AGREED |
 | Q1 | Storage adapters | AGREED — SQLite only, no adapter |
@@ -2840,6 +2841,150 @@ take effort to give that up rather than effort to keep it — but it is a
 phrasing was used in this item to justify embedding the web assets, the honest
 reason is simpler and does not mention Docker at all: one artifact, one version,
 one release process.
+
+**Your response:**
+
+```
+
+```
+
+---
+
+### D24. Worker version coherence — NEW
+
+**Status:** NEW (v0.7) — phase 1 shipped; three open questions
+
+**Your observation:**
+
+> *"I wonder if from the control plane we could send a message to a worker to
+> update itself? If I have these running in multiple places, it sure would be
+> nice to go to the web UI and see that they are out of date with the control
+> plane and upgrade them."*
+
+**This starts from a bug, not a blank page.** C10 says version skew is refused
+loudly, and it is — but only at `RegisterWorker`, which a worker calls exactly
+once, at startup. `Heartbeat` and `Claim` never check. So a worker that was
+registered before a control-plane upgrade **keeps claiming and executing work at
+the old version indefinitely**, because it never re-registers and nothing
+re-examines it.
+
+That is not academic across the versions that exposed it: v0.4.0 added sources,
+and a dispatch now carries revision and tree information a v0.3.x worker knows
+nothing about. A stale worker claiming a repo-backed job is exactly the silent
+incompatibility C10 exists to prevent.
+
+So this item has a floor and a ceiling. The floor is making C10 true. The ceiling
+is the fleet view you actually asked for.
+
+#### What already exists
+
+Three things, and they change what needs designing:
+
+- **The channel.** `HeartbeatResponse` already carries `Revoked` — the control
+  plane already instructs workers on every heartbeat. A worker holds no state and
+  opens no ports (C2); it dials out, which is what makes a laptop behind NAT
+  reachable at all. That property survives untouched: instructing a fleet is a
+  field on a response they are already asking for, not a new transport and not an
+  inbound connection.
+- **The download path.** `selfupdate` has `Latest`, `AssetFor`, `Download` with
+  SHA-256, `ParseChecksums` and `ExtractBinary` already, because `je upgrade`
+  needed them.
+- **The facts.** Worker rows carry `Version`, and the control plane knows its
+  own. Nothing new is required to *see* skew.
+
+#### The rule that matters
+
+> **The control plane sends a version. It never sends bytes.**
+
+The worker fetches from the release channel and verifies the published checksum
+itself. The control plane names a version; it does not ship software, and cannot
+hand a worker a binary that is not the released one.
+
+The security argument for this is narrower than it first appears and worth stating
+accurately rather than dramatically: **a control plane can already make a worker
+execute arbitrary commands** — that is what dispatch *is*. Remote code execution
+is not the new risk. The new thing is **persistence**: a dispatched job is
+transient, a replaced binary is not. That is what earns the checksum discipline.
+
+#### The primitive is drain-and-exit, not "upgrade"
+
+Replacing a binary does not change a running process. `je upgrade` already says
+so about the daemon — *"a running daemon keeps executing the old binary until it
+restarts; replacing a file does not replace a process."* The same is true here, so
+a self-update is really: stop claiming, finish in-flight runs, swap the binary,
+exit. What happens next is not the worker's decision:
+
+| How the worker runs | After it exits |
+|---|---|
+| Docker, `restart: unless-stopped` | comes back — on the **old image** |
+| launchd / systemd (`je worker join`) | comes back on the new binary |
+| `je worker run` in a terminal | does not come back at all |
+
+That table is most of the design. **"Restart this worker gracefully" is the
+feature**; upgrading is one reason to invoke it. It is independently worth having
+for a config change, a wedged worker, or draining a machine before a reboot — and
+C2 is what makes it cheap, since a worker holds nothing that has to survive.
+
+**A containerized worker cannot self-update, and should not pretend to.** Its
+binary comes from the image; replacing it in the container layer is discarded on
+restart, and the restart policy then hands back the *old* version. For those the
+honest answer is that the orchestrator owns the version: report it, and do not
+offer the button.
+
+Which lands somewhere worth noticing: **self-update matters for exactly the
+workers that are hardest to reach** — the Mac on a desk, the box on a LAN — and is
+unnecessary for the ones that are easy to redeploy. That is precisely D20's
+population, and it is the real argument for building this rather than a
+convenience.
+
+#### Phasing
+
+**Phase 1 — see it. Shipped with this item.** `je workers` grows a version
+column, marks any worker whose version differs from the control plane's, and says
+what that means and what to do about it. The web client shows the same on the
+worker panel. No new mechanism, no new risk, and it is what makes the rest safe:
+an upgrade button is not offerable before you can see who needs one.
+
+**Phase 2 — drain and restart on request.** The control plane asks a worker to
+stop claiming, finish what it holds, and exit. Most of the value, none of the
+supply-chain surface.
+
+**Phase 3 — self-update**, for supervised native workers, if it is still wanted
+after phase 2 exists.
+
+#### What this is not
+
+N1 keeps fleet management out, and that boundary is worth defending explicitly
+rather than quietly crossing. This is **version coherence**, which C10 already
+made the control plane's business, and it is the same shape as the fencing list
+the heartbeat already carries. It is not autoscaling, not placement optimization,
+not node-to-node communication, and not orchestration. Naming that here so the
+next item cannot cite D24 as precedent for any of them.
+
+#### Open questions for you
+
+1. **Does a worker consent to being restarted remotely?** I would have it declare
+   at registration whether it accepts remote lifecycle commands, derived from how
+   it was installed — a supervised worker yes, a terminal `je worker run` no,
+   since exiting would simply kill it and the fleet view would be offering a
+   button that silently removes a worker. The alternative is that the control
+   plane may always ask and the worker decides in the moment; I prefer the
+   declaration, because it is visible in the fleet view before you click.
+
+2. **Is an upgrade a job?** P2 says the engine's own work is jobs, which is
+   tempting and would come with runs, logs and history for free. But a job that
+   replaces the binary executing it is a strange object, and its final log line
+   can never be written by the process that earned it. I lean **worker lifecycle
+   operation, not job**, with the fleet view as its record — but P2 is a real
+   principle and this is the first place I want to depart from it, so it should be
+   your call rather than my default.
+
+3. **Should `Claim` enforce C10 now, before any of the above?** It is three lines:
+   `Claim` already loads the worker row, which carries `Version`. Doing it makes
+   the current silent skew loud immediately. Doing it *without* phase 2 means a
+   stale worker stops working and a human must go restart it by hand — which is
+   correct, and briefly worse than today's silence for anybody mid-upgrade. I
+   would do it, and say so in the release notes.
 
 **Your response:**
 

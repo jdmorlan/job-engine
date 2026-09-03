@@ -116,25 +116,57 @@ function Waiting({ state }) {
   )
 }
 
+// Same comparison the engine refuses on: ignore a leading v, otherwise exact
+// (internal/engine/dispatch.go sameVersion). Marking anything looser here would
+// have the fleet view disagree with what actually gets rejected.
+function sameVersion(a, b) {
+  return String(a).replace(/^v/, '') === String(b).replace(/^v/, '')
+}
+
 function Workers() {
   const state = usePoll(api.workers, [], 6000)
+  const health = usePoll(api.health, [], 15000)
+  const plane = health.data?.version
+
   return (
     <Panel title="Workers">
       <Load state={state} empty={(d) => (d.workers?.length ? null : 'no workers attached — nothing will run')}>
-        {(d) => (
-          <div className="pad" style={{ display: 'grid', gap: 8 }}>
-            {d.workers.map((w) => (
-              <div key={w.id} className="mono" style={{ fontSize: 11.5 }}>
-                <Dot status={w.online ? 'succeeded' : 'none'} />
-                {w.name}
-                <span className="faint"> · {w.labels?.join(', ')} · {w.version}</span>
-                <div className="faint" style={{ marginLeft: 14, fontSize: 11 }}>
-                  {w.online ? `seen ${ago(w.last_seen_at)}` : `offline, last seen ${ago(w.last_seen_at)}`}
+        {(d) => {
+          const stale = plane ? d.workers.filter((w) => !sameVersion(w.version, plane)) : []
+          return (
+            <div className="pad" style={{ display: 'grid', gap: 8 }}>
+              {d.workers.map((w) => {
+                const out = plane && !sameVersion(w.version, plane)
+                return (
+                  <div key={w.id} className="mono" style={{ fontSize: 11.5 }}>
+                    <Dot status={w.online ? 'succeeded' : 'none'} />
+                    {w.name}
+                    <span className="faint"> · {w.labels?.join(', ')} · </span>
+                    <span style={out ? { color: 'var(--wait)' } : { color: 'var(--dim)' }}>
+                      {w.version}
+                      {out ? ' · out of date' : ''}
+                    </span>
+                    <div className="faint" style={{ marginLeft: 14, fontSize: 11 }}>
+                      {w.online ? `seen ${ago(w.last_seen_at)}` : `offline, last seen ${ago(w.last_seen_at)}`}
+                    </div>
+                  </div>
+                )
+              })}
+
+              {/* C10 refuses skew at registration and nowhere else, so a worker
+                  running from before an upgrade keeps claiming at its old
+                  version. Phase 1 of D24 is saying so; the fix is a restart. */}
+              {stale.length > 0 && (
+                <div style={{ borderTop: '1px solid var(--line)', paddingTop: 8, fontSize: 11.5, color: 'var(--dim)' }}>
+                  {stale.length} worker{stale.length === 1 ? '' : 's'} out of date — the control plane is{' '}
+                  <span className="mono">{plane}</span>. A worker is only version-checked when it
+                  registers, so one that was already running keeps claiming work at its old
+                  version. Restart it to pick up <span className="mono">{plane}</span>.
                 </div>
-              </div>
-            ))}
-          </div>
-        )}
+              )}
+            </div>
+          )
+        }}
       </Load>
     </Panel>
   )

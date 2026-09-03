@@ -167,8 +167,18 @@ func runWorkers(ctx context.Context, env *Env, args []string) error {
 			return nil
 		}
 
+		// The control plane's own version, so skew can be named rather than
+		// left for somebody to spot by comparing two columns themselves (D24).
+		// A health call that fails is not worth failing the listing over: the
+		// table is still true, it just cannot mark anything.
+		var plane string
+		if health, err := c.Health(listCtx); err == nil {
+			plane = health.Version
+		}
+
+		stale := 0
 		tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(tw, "NAME\tROLES\tLABELS\tSESSION")
+		fmt.Fprintln(tw, "NAME\tROLES\tLABELS\tVERSION\tSESSION")
 		for _, w := range workers {
 			session := "offline"
 			if w.Online {
@@ -176,10 +186,36 @@ func runWorkers(ctx context.Context, env *Env, args []string) error {
 			} else if w.GoneAt != nil {
 				session = "offline since " + humanAge(*w.GoneAt)
 			}
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n",
-				w.Name, strings.Join(w.Roles, ", "), strings.Join(w.Labels, ", "), session)
+			version := w.Version
+			if version == "" {
+				version = "unknown"
+			}
+			if plane != "" && !sameVersion(w.Version, plane) {
+				version += " *"
+				stale++
+			}
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
+				w.Name, strings.Join(w.Roles, ", "), strings.Join(w.Labels, ", "),
+				version, session)
 		}
-		return tw.Flush()
+		if err := tw.Flush(); err != nil {
+			return err
+		}
+
+		if stale > 0 {
+			// C10 refuses skew at registration, but only there -- a worker that
+			// registered before an upgrade keeps claiming at its old version,
+			// because nothing re-checks it (D24). Saying so is the whole of
+			// phase 1: the fix is a restart, and you cannot ask for one you
+			// cannot see.
+			fmt.Fprintf(env.Stdout,
+				"\n* out of date -- the control plane is %s.\n"+
+					"  A worker is only version-checked when it registers, so one that was\n"+
+					"  running before the upgrade keeps claiming work at its old version.\n"+
+					"  Restart it to pick up %s:  je worker run   (or restart its container)\n",
+				plane, plane)
+		}
+		return nil
 	})
 }
 
