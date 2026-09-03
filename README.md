@@ -693,10 +693,17 @@ purpose: it is what lets `go build ./cmd/je` produce a working binary on a
 machine with no node toolchain, and what keeps the image a single static build.
 Only `make web-build` regenerates it, and only changes under `web/` need it.
 
-One direct Go dependency: `modernc.org/sqlite`, the pure-Go driver. That is what
-keeps the binary static and cgo-free, so one artifact is both the control plane
-and the worker, and runs in a terminal, in a container, in a cluster, and inside
-a Mac app (D18).
+Four direct Go dependencies, and the list is meant to stay short:
+`modernc.org/sqlite` (the pure-Go driver, which is what keeps the binary static
+and cgo-free, so one artifact is both the control plane and the worker and runs
+in a terminal, in a container, in a cluster, and inside a Mac app — D18),
+`filippo.io/age` for encrypted secrets (D25), plus `gopkg.in/yaml.v3` and
+`golang.org/x/term`.
+
+`age` was chosen over the SOPS library by measurement rather than taste:
+`filippo.io/age` pulls in 13 modules, `github.com/getsops/sops/v3/decrypt` pulls
+in 341 — 187 of them AWS, Azure, GCP and Vault SDKs this project will never
+call. The file format keeps SOPS's useful shape anyway (see D25).
 
 The component that genuinely needs the native path is the **worker**: a job that
 drives Apple Shortcuts or reaches a device on your LAN cannot run in a container,
