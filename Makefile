@@ -4,7 +4,7 @@
 VERSION ?= dev
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
-.PHONY: build test vet fmt check image release-dry clean
+.PHONY: build test vet fmt check image release-dry clean web web-build
 
 build: ## build ./je for this machine
 	go build -trimpath -ldflags "$(LDFLAGS)" -o je ./cmd/je
@@ -20,6 +20,19 @@ fmt:
 
 # What CI runs, and what to run before asking for a review.
 check: fmt vet test
+
+# The web client (D23). A second client of the same API, so it needs a control
+# plane running and nothing else. JE_ADDR points it somewhere other than the
+# default.
+# The Vite dev server, for iterating on the client with hot reload. It proxies
+# /v1 to a control plane; `je web run` is the shipped path and needs no npm.
+web:
+	cd web && npm install && JE_ADDR=$${JE_ADDR:-http://127.0.0.1:7620} npm run dev
+
+# Rebuild the assets the binary embeds. The output lands in internal/webui/dist
+# and is committed, so this is only needed after changing anything under web/.
+web-build:
+	cd web && npm install && npm run build
 
 image:
 	docker build --build-arg VERSION=$(VERSION) -t job-engine:$(VERSION) .

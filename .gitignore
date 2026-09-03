@@ -1,6 +1,12 @@
 # Build output
 /je
 /dist/
+web/node_modules
+
+# NOT ignored: internal/webui/dist. The built client is committed on purpose --
+# it is what lets `go build ./cmd/je` produce a working binary on a machine with
+# no npm, and what keeps the image a single static build (D23). Regenerate it
+# with `make web-build`.
 
 # The secret store, in case JE_DATA_DIR is ever pointed at the repo.
 secrets.json

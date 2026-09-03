@@ -199,6 +199,7 @@ architecture), **D16** (daemon lifecycle and generic event ingress).
 | D20 | Control plane + workers / universal execution | **AGREED in shape (v0.6) — 3 questions open, partly v1** |
 | D21 | Shim injection | **NEW (v0.5) — one open question** |
 | D22 | Job sources | **NEW (v0.5) — two open questions** |
+| D23 | The web client | **NEW (v0.7) — agreed, phase 1 building** |
 | N1 | Non-goals | AGREED |
 | N2 | v1 done | AGREED |
 | Q1 | Storage adapters | AGREED — SQLite only, no adapter |
@@ -1475,7 +1476,9 @@ you cannot explain at 2am (P1).
 
 ### D15. Daemon + API + CLI first
 
-**Status:** AGREED — binary is `je`, no web UI in v1
+**Status:** AGREED — binary is `je`, no web UI in v1 *(v0.7: the deferred
+web client is now specified in D23; the second-client architecture here is what
+made it additive)*
 
 This is the item your D2 and D12 answers implied but neither one asked directly:
 *if the CLI is the primary interface, what happens to the web UI?*
@@ -2394,7 +2397,7 @@ answered):**
 
 ### D12. The observability surface
 
-**Status:** AGREED (rendered through the CLI per D15)
+**Status:** AGREED (rendered through the CLI per D15; a second surface in D23)
 
 The seven requirements stand as written in v0.1 — live tailing, run timeline,
 causation chain, job health view, needs-attention triage, terminal-failure
@@ -2440,6 +2443,356 @@ Adopted, with one constraint I have to add:
 
 ---
 
+### D23. The web client — NEW
+
+**Status:** NEW (v0.7) — agreed in shape; phase 1 building
+
+**Your observation:**
+
+> *"I really think we are getting close to the point where a webapp for the
+> job-engine makes sense... we could use react-flow for describing chains/routes
+> and for creating them... the concept of not even having to look at a job
+> definition in its raw form is pretty powerful... but I think you should be able
+> to drop down into the raw view if it's needed... the idea that you can manage
+> (truly manage) these things from a web app is a pretty big selling point."*
+
+**Adopted.** D15 deferred this deliberately — *"a web UI, if we ever build it, is
+a second client of the same API, embedded, additive, not a rewrite, and we can
+decide in six months with real usage instead of now with none."* That deferral
+has now paid out, and this item spends it.
+
+#### What the deferral bought
+
+The read side is already a complete client contract. Nothing below needs an
+engine change:
+
+| View | Endpoint |
+|---|---|
+| Job list, health | `GET /v1/jobs` |
+| Resolved truth for one job | `GET /v1/jobs/{slug}/explain` |
+| Run history, duration trends | `GET /v1/runs`, `GET /v1/runs/{id}/detail` |
+| Live log tail | `GET /v1/runs/{id}/stream` (SSE) |
+| The waiting view (P1) | `GET /v1/waiting` |
+| Topology / the graph | `GET /v1/chains`, `GET /v1/chains/{name}` |
+| Cursor movement over time (D14) | `GET /v1/jobs/{slug}/state/history` |
+| Where definitions came from | `GET /v1/sources`, `GET /v1/workers` |
+
+This is worth stating plainly because it is the payoff for a discipline that
+cost something at the time: **a read-only web client is buildable today against
+the shipped API.** It also closes the one loss D15 admitted honestly — *"duration
+trends / sparklines: genuinely better in a browser"* — and gives the waiting view
+a surface it has been cramped in. P1 bets the whole differentiation of this
+engine on showing what *hasn't* run and what it's blocked on. That is a graph,
+and we have been rendering it as a table.
+
+Your "don't look at the raw form, but drop into it when needed" is P3 read in
+both directions, and it is the right reading. The file holds **intent**; the
+canvas renders **truth**. `explain` is already the truth-rendering endpoint. Raw
+view is not an escape hatch from the canvas — it is the other, equally real half.
+
+#### The write rule
+
+This is the part that needed deciding, and the answer is a single rule:
+
+> **Definitions are never authored into the database. They are authored into a
+> repository, and reach the database only by sync.**
+
+*(v0.7: this replaces an earlier phrasing — "the web client writes definitions to
+where they live, never to the control plane" — which was a proxy for the same
+invariant and broke as soon as the control plane could create a local repo. The
+rule above is what actually matters, and it holds for both backends.)*
+
+A `POST /v1/chains` that inserted rows would be erased by the next sync and
+should not exist. `Source.Load` and `ReplaceRoutes` are deliberately *whole-world*
+projections — every sync tombstones every route and re-asserts from files — so
+the database is downstream of definitions by construction. Authoring into it
+would make the engine the fourth authority in a system that has carefully kept
+exactly one per source (D22).
+
+So authoring in the browser resolves to a write against the source's own backing
+store, and the control plane's role in authoring is what it already is: **sync,
+then render what it projected.**
+
+**For a `github` source, the write is a commit, made as you.** The web client
+runs GitHub OAuth and holds the *user's* token. This is better than the
+alternative I first reached for (the control plane committing with the stored
+`TokenSecret`), and not marginally: it keeps GitOps intact, it needs no
+write-scoped bot credential in the secret store, and it makes D11 stronger rather
+than weaker — every definition change already resolves to a revision, and now it
+resolves to a revision *with an author*. `gitsource.Client` is GET-only today
+(`DefaultBranch`, `ResolveRef`, `Tarball`); this adds a write path beside them.
+
+**The `local` dir source is not written by the canvas at all** — see the
+resolution below. The inversion is worth recording, because I had it backwards
+when this item opened: GitHub is the *clean* write path and the local directory is
+the awkward one. `compose.yaml` mounts `./jobs` into the control plane `:ro`, on
+purpose, and the web client is a different container that cannot see it at all.
+Rather than undo either of those, the canvas authors into git and leaves the local
+directory to the CLI.
+
+One consequence worth having in writing: **optimistic concurrency comes free.**
+The GitHub contents API takes the blob SHA you read, so a stale write is rejected
+rather than silently clobbering. Two browsers, or a browser and a text editor,
+conflict honestly.
+
+**On round-trip and comments: I overplayed this and was wrong.** `description` is
+already a field on both jobs (`internal/jobdef/parse.go`) and chain steps
+(`internal/jobdef/chain.go`). Notes are structured data, not marginalia, so the
+canvas serializes a model and there is no comment-preservation problem to solve.
+Where a note genuinely belongs to a definition, it has a field; where it doesn't,
+raw view is right there. Struck from the concerns list.
+
+#### Saving is a proposal, not a deploy
+
+> *"We could do PRs for changes... which is a good posture versus someone just
+> changing the files and pushing. So we would be helping set good practices around
+> managing the git configurations, which most gitops tools don't do. I understand
+> they don't want to take it on... but I don't think that means we shouldn't."*
+
+**Adopted, and it overrides my recommendation.** I argued for committing straight
+to the tracked ref, on the grounds that a PR makes the canvas lie for as long as
+it is open — you edit the graph and the graph does not change. That objection is
+real but it is a *design requirement, not a reason to refuse*, and the framing
+above is the better one: a tool that only ever renders GitOps is a viewer, and a
+tool that helps you practice it well is worth using. Most GitOps tooling declines
+this because taking a position on someone's branching model is a support burden.
+That is a reason for *them* to decline it, not an argument that it's wrong.
+
+So: **a save on a `github` source opens a branch and a pull request.** It does
+not push to the tracked ref, and merging is the deploy.
+
+What that costs us is the honest thing my objection was pointing at, and P1 says
+we pay it before we build the mechanism rather than after: **the canvas has two
+layers, live and proposed, and it must render both without ambiguity.** The
+engine already has the vocabulary — a source records `Ref` (what was asked for)
+and `Revision` (what it resolved to), *"because the difference between them is the
+whole risk of tracking a moving branch."* An open PR is exactly that difference,
+made deliberate: a second revision that is not live yet.
+
+This is the same shape as the waiting view, and I think that is the strongest
+argument for it. P1's claim is that every engine can show what ran and none can
+show what *didn't run yet and why*. **An open pull request is a pending change to
+the topology, and rendering it is the same feature applied to definitions instead
+of runs.** A canvas showing "these three routes exist; this fourth one is proposed
+in PR #12 and is not firing" is doing the thing this engine is for.
+
+> *"Plus it's an enhancement, not a requirement — use our tooling and life gets
+> better, but you aren't trapped only using our tooling for managing job
+> definitions/code."*
+
+**That rider is what makes taking the position affordable**, and it belongs in
+the item rather than in the conversation. The repository stays a plain
+repository. A file the canvas commits is indistinguishable from one you wrote in
+Vim, because it is the same file format that already exists; the branch and PR
+are ordinary GitHub objects; nothing the web client produces is legible only to
+us. Push straight to `main` from your terminal and the engine syncs it exactly as
+before — the canvas does not notice, because there is nothing for it to notice.
+
+We are therefore not imposing a branching model, which is the actual thing GitOps
+tools are avoiding when they decline this. We are making the reviewed path the
+easy one and leaving every other path exactly as open as it is today. **The test
+for anything built here: if the web client disappeared, every definition it wrote
+still works and every workflow it encouraged is still available by hand.** That
+is also the honest reason this is safe to build — it can be wrong without being
+expensive.
+
+Three riders:
+
+- **The proposed layer is read from the PR, not remembered by us.** The web
+  client holds no draft state and the control plane holds none either; open PRs
+  touching the source's path *are* the queue of pending changes, and closing one
+  in GitHub is how you discard a draft. Nothing to reconcile, nothing to leak,
+  and no fifth authority.
+- **Local dir sources have no PR, and no canvas write either.** Editing them
+  stays a `je new` and a text editor, where a save is immediate. That is not an
+  inconsistency to paper over — it is the right split, and it matches D22 making
+  authority per-source rather than global. `local` is the scratch loop where you
+  want the edit live in a second; a registered repo is the managed one where you
+  want review. The canvas must say which kind of source it is showing, since only
+  one of them is editable there.
+
+#### Authentication, precisely
+
+**GitHub OAuth is a git write credential, not an application login.** N1's
+"multi-user / auth / RBAC" non-goal stands untouched: the web client binds to
+loopback or a trusted network exactly as the control plane does (D19), and
+signing in to GitHub authorizes *commits and pull requests against your repos*,
+nothing about the engine. Anyone who can reach the API can already do everything
+the API does. If Q1 ever changes, that is where app auth gets designed — not
+here, as a side effect of an editor.
+
+#### Monaco, scoped honestly
+
+The editor is the cheap part and not the selling point. What makes the raw view
+worth dropping into is what the control plane can serve it:
+
+- a JSON Schema for job and chain files, generated from `jobdef` rather than
+  maintained beside it;
+- `explain` as a live checker — a cron expression showing its next five fire
+  times inline, a `runs_on` label with no worker carrying it underlined at the
+  point of the mistake, an unresolvable job reference reported *with the source
+  list that was searched* (D22).
+
+That is a control-plane feature that happens to render in Monaco, and it should
+be built in that order.
+
+#### What P1 demands before the canvas exists
+
+The Visibility Rule has teeth in both directions: if we can't describe the view
+we don't build the mechanism, and a canvas is a view that must render failure as
+fluently as success. Before it is built, it must have an answer for:
+
+- a step that failed, and the run that failed it;
+- a route that is **waiting**, and on what;
+- a route whose file is gone — rows are tombstoned, never deleted, because runs
+  record which route fired them (D11), so `RemovedAt` is a state the graph has to
+  draw rather than a row it can omit;
+- a definition that failed to parse (`LoadError`) — the job is known, the wiring
+  is not;
+- a source that failed to sync (`LastError`), where the graph on screen is
+  therefore *stale rather than wrong*, and must say which;
+- a change that is **proposed and not merged**, per the two-layer requirement
+  above — including the case where two open PRs propose conflicting wiring.
+
+#### Delivery
+
+`je web` follows the path `control-plane` and `worker` already take: a third
+component of the same image, pinned to the binary's own version, joined to the
+`je` network, published on loopback. `je web run` serves it in the foreground and
+`je web start` runs the container, which is the same `run`/`install` shape the
+other two components have.
+
+**The assets are embedded, reversing what this section first said.** I argued for
+a separate container and rejected `go:embed` on the grounds that it makes the web
+assets non-optional in the cluster image. Once both sides were built the trade
+went the other way: the assets cost about 1.5 MB in a 12 MB binary — the measured
+difference is invisible — and embedding buys something the container version
+cannot have, which is that `je web run` works natively with no Docker and no npm,
+exactly as `je control-plane run` does. The image is unchanged: same `FROM
+scratch`, same single binary, one more component it can be invoked as.
+
+The built client is therefore committed under `internal/webui/dist`. That is a
+generated artifact in version control, which is a real cost and worth naming:
+`make web-build` regenerates it, and the payoff is that `go build ./cmd/je`
+produces a working binary on a machine with no node toolchain, and the Dockerfile
+stays a single static build with no node stage in it.
+
+**The web process proxies `/v1` to the control plane** rather than the browser
+addressing it directly. That is what keeps it a client: one origin for the
+browser, no CORS, and a server that forwards API calls without knowing what any
+of them mean. It holds no state and opens no database handle.
+
+**Phasing.** Phase 1 is read-only and ships against the API as it stands today —
+history, schedules, live logs, the waiting view, the topology graph, raw view.
+Phase 2 is authoring: OAuth, the branch-and-PR write path, and the two-layer
+canvas.
+
+#### Amends N1
+
+N1's "Workflow DSLs and DAGs" bullet lists **visual pipeline editing** as a
+permanent non-goal. That clause is withdrawn. The reason it was there was the
+fear behind D17 and D3 — that a visual editor drags in a workflow language,
+imperative orchestration, and a topology object with its own lifecycle. That
+fear was correct and is unaddressed by anything here: the canvas edits *routes*,
+which are event patterns and target jobs, and a chain remains a display grouping
+that nothing consults at runtime. **The rest of the bullet stands.** A canvas
+that could express something the file format cannot would be the failure mode,
+and is the test to hold it to.
+
+#### Resolved: the canvas authors into git only
+
+> *"I think I want to commit to the github strategy... it's not hard to spin up a
+> new repo and write something, so I don't think that's a huge barrier, especially
+> if we help them do it quickly... this is a dev tool, so the amount of people that
+> don't have a GitHub account is pretty low."*
+
+**Taken, and it settles the open question in the direction I did not recommend —
+correctly.** The question was whether the web client gets a write path to the
+`local` dir, and committing to git as the authoring path answers it: **it does
+not.** Local sources are read-only on the canvas.
+
+That is the better outcome, not a compromise. Every alternative cost something
+real — a shared read-write mount between two containers, or a definition write
+endpoint on the control plane that the write rule otherwise refuses. This costs
+nothing in the engine, and the rule above keeps its "never" with no exception
+clause attached.
+
+**Local is not left homeless; the CLI already owns it.** `je init` and `je new`
+write to the jobs directory today, and that is the scratch loop. The split
+becomes a statement about intent rather than a limitation of the tool: **local is
+where you start, a repo is where you have decided to keep it.** That is the same
+line D22 drew when it made authority per-source, and it now explains the
+immediate-save-vs-PR difference better than the mechanical reason does.
+
+**The graduation path is the part worth building.** The gap this creates is that
+local jobs are *visible* on the canvas and not editable, which is a confusing
+surface if left bare. The answer is **"promote to a repo"**: the canvas takes the
+local definitions, creates or picks a repository, commits them, and registers the
+source — after which they are git-managed and fully editable. Same helper, moved
+to the moment it is actually wanted. It also makes the read-only layer legible:
+not *"you cannot edit this"* but *"this is not in a repo yet."*
+
+#### Resolved: git both ways, and the API owns making one
+
+> *"When running the control plane locally could we set it in host mode, that way
+> we could write a git repo in their documents folder... could the API understand
+> how to generate a repo either in GitHub or locally, that way the UI and CLI
+> didn't have to care about the logic — it would be a flag?"*
+
+**Both adopted.** This reconciles the two halves the item had been treating as a
+trade, and it withdraws the open question above rather than answering it: **the
+demo objection was about GitHub, not about repositories**, and a locally created
+repo is offline, accountless, instant, and still removable. `je demo` and `je
+init` keep every property I was defending while gaining a real revision.
+
+- **Host mode largely exists.** `je control-plane run` is native by default
+  (`--docker` is opt-in), so a locally run control plane already has the host
+  filesystem. The container case is one mount flag:
+  `env.Layout.Jobs:/var/lib/je/jobs:ro` becomes `:rw`. `compose.yaml` already
+  records why that bind is safe — no SQLite is involved.
+- **Repository creation is an API capability, not a client one.** `POST
+  /v1/sources` exists today as *register*; this adds *create*, taking the backend
+  as a flag. Neither the CLI nor the web client knows anything about git, which is
+  D15 applied literally: every capability is an endpoint and both interfaces are
+  clients of it.
+- **The canvas is editable for every source again.** The read-only local layer and
+  the "promote to a repo" bridge both stop being necessary, because there is one
+  authoring model with two backends rather than an editable kind and a viewable
+  one.
+- **The proposed layer generalizes.** "Proposed" is *commits not on the tracked
+  ref* — an open pull request remotely, an unmerged branch locally. One concept,
+  one rendering.
+
+**This makes D11 true where it currently isn't.** `sourceRevision` returns empty
+for the local source — *"or empty for a job that is just a file on disk"*
+(`internal/engine/sources.go`). Today "which version of this definition ran" is
+answerable only for GitHub-backed jobs. Backing local with a repository makes
+every run record a commit, on every source. That is a correctness win rather than
+an ergonomic one, and it is the best argument for the whole idea.
+
+**What a local repository does not give you is review.** Branches and merges, yes;
+a pull request, no. The posture degrades to "a branch you merge yourself" —
+still history, attribution, revert, and a real revision, but not the reviewed path
+GitHub sources get. Stated plainly rather than implied as parity.
+
+**Git operations shell out to `git` for now**, behind an interface. The image is
+`FROM scratch` and `go.mod` has exactly one direct dependency, so the alternative
+is `go-git` — pure Go, `CGO_ENABLED=0`-safe, and a real transitive tree. Deferred
+on the same grounds D20 and D21 defer things: not before something demands it.
+The cost is honest and worth writing down: **a containerized control plane cannot
+author local repositories**, which cuts against D19's "the same artifact runs
+everywhere." A container control plane is the cluster case, where sources are
+GitHub, so the gap is tolerable until it isn't — and the interface makes taking
+`go-git` a swap rather than a rewrite.
+
+**Your response:**
+
+```
+
+```
+
+---
+
 ## Part 6 — Scope
 
 ### N1. Non-goals — revised
@@ -2479,8 +2832,10 @@ control plane stays the sole writer. Terminology also moved on: the entity is a
 - **Durable/replayable workflows.** No execution replay. (D5.)
 - **Workflow DSLs and DAGs.** ~~Fan-in~~ — **removed as a non-goal per D3.** Fan-in
   is in, as declarative standing queries over the event log. Still out: a workflow
-  language, imperative orchestration code, compensation/rollback semantics, and
-  visual pipeline editing.
+  language, imperative orchestration code, and compensation/rollback semantics.
+  ~~Visual pipeline editing~~ — **withdrawn per D23**, which builds a canvas over
+  routes and chains as they already exist. The rest of this bullet is exactly what
+  that canvas is held to: it may not express anything the file format cannot.
 - **Building container images from source.** You bring an image or a command.
 - **A hosted/cloud version.** (See Q1 — you left the door open; I'd still keep it
   shut for v1.)

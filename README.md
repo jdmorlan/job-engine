@@ -213,6 +213,41 @@ failure reprocesses that batch instead of silently skipping it.
 
 That is the entire pitch, and it is four commands.
 
+## In a browser
+
+The same facts, rendered where a terminal renders them worse (D23):
+
+```console
+$ je web run
+web client    http://127.0.0.1:7621
+control plane http://127.0.0.1:7620
+
+ctrl-c to stop
+```
+
+No Docker, no npm, no separate install — the client is embedded in the binary
+you already have, and `je web run` serves it and forwards `/v1` to the control
+plane. It is a **client of the same API the CLI uses**: it holds no state, owns
+no database, and can do nothing `je` cannot.
+
+What it is for is the part a table cannot do well:
+
+- **Chains as a canvas.** The trigger job, each step, and the *event pattern* on
+  every edge — `run.succeeded · job=demo-report` — because that pattern is the
+  wiring, not decoration.
+- **The waiting view**, broken out into scheduled, queued, running and blocked.
+  What the engine intends to do and has not done yet is the thing most schedulers
+  cannot show you at all.
+- **Resolved vs. definition.** Every field of a job with the file and line where
+  somebody chose it, or the word *default* where the engine did. The file holds
+  intent; the tool renders truth.
+
+`je web start` runs it as a container instead, and `docker compose up -d` brings
+it up beside the control plane and worker.
+
+Authoring from the browser is not in this first cut. When it lands it will write
+to a git repository and sync, never into the database — see D23.
+
 ## Status
 
 Early, but it runs jobs on a schedule, unattended, and runs them off each
@@ -647,9 +682,17 @@ make build        # ./je
 make check        # fmt, vet, test
 make image        # a scratch container image (D19)
 make release-dry  # build every release artifact locally, as CI does
+make web          # the client's dev server, with hot reload
+make web-build    # rebuild the assets the binary embeds
 ```
 
-One direct dependency: `modernc.org/sqlite`, the pure-Go driver. That is what
+The web client's built assets are committed under `internal/webui/dist` and
+embedded by `go:embed`. That is a generated artifact in version control on
+purpose: it is what lets `go build ./cmd/je` produce a working binary on a
+machine with no node toolchain, and what keeps the image a single static build.
+Only `make web-build` regenerates it, and only changes under `web/` need it.
+
+One direct Go dependency: `modernc.org/sqlite`, the pure-Go driver. That is what
 keeps the binary static and cgo-free, which is in turn why one artifact is both
 the control plane and the worker, and runs in a terminal, in a `FROM scratch`
 image, in a cluster, and inside a Mac app (D18).

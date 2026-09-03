@@ -2,3 +2,12 @@
 .github
 *.md
 Makefile
+
+# The client's sources and toolchain are not needed to build the image: the
+# built assets are committed under internal/webui/dist and embedded by the Go
+# build, which is what keeps this a single-stage static build with no node in it.
+web/node_modules
+web/src
+web/index.html
+web/package*.json
+web/vite.config.js
