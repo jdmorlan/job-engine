@@ -81,7 +81,7 @@ A control plane with no worker attached runs **nothing**, and says so:
 $ je status
 control plane  running (v0.3.0)
 workers        NONE -- nothing will run
-               start one:  je worker
+               start one:  je worker run
 ```
 
 ### Running it
@@ -133,13 +133,13 @@ $ je waiting
 WAITING FOR A WORKER  (queued for a label nothing is serving)
   runs_on: macos
     3 run(s), jobs: water-plants
-    start one:  je worker --labels macos
+    start one:  je worker run --labels macos
 ```
 
 To run a worker on your Mac:
 
 ```console
-$ je worker --labels macos
+$ je worker run --labels macos
 ```
 
 It opens no ports and dials out, so it works from a laptop behind NAT. It holds
@@ -215,9 +215,9 @@ Early, but it runs jobs on a schedule, unattended.
 je demo           write four example jobs and a tour
 je upgrade        install the latest release, checksum-verified
 je quickstart     a control plane and a worker, in this terminal
-je serve          run the control plane: schedules fire, API serves
-je worker         run a worker: this is what actually executes jobs
-je workers        what is attached, and what it can run
+je control-plane run    the control plane: schedules, history, the API
+je worker run           a worker: the thing that executes jobs
+je workers              what is attached, and what it can run
 je sync           reload job definitions, atomically
 je waiting        what has not happened yet, and what is stuck
 je run <job>      run a job now and follow its output

@@ -11,7 +11,7 @@ services:
   control-plane:
     build: .
     image: job-engine:dev
-    command: ["serve", "--addr", "0.0.0.0:7620"]
+    command: ["control-plane", "run", "--addr", "0.0.0.0:7620"]
     ports:
       # Published on loopback only. The trust boundary moved from the process
       # to the network (D19's rider on N1), and binding 0.0.0.0 on your laptop
@@ -43,7 +43,7 @@ services:
     image: job-engine:dev
     # Only the control plane holds state, so the worker needs no volume at all
     # (C2). Losing this container costs its in-flight runs and nothing else.
-    command: ["worker", "--addr", "control-plane:7620", "--name", "system", "--labels", "default"]
+    command: ["worker", "run", "--addr", "control-plane:7620", "--name", "system", "--labels", "default"]
     environment:
       TZ: ${TZ:-UTC}
     depends_on:

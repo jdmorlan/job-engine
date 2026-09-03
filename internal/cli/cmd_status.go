@@ -47,7 +47,7 @@ func runStatus(ctx context.Context, env *Env, args []string) error {
 	// prevent, so it is stated on the default view and stated as a problem.
 	if health.Workers == 0 {
 		fmt.Fprintf(tw, "workers\tNONE -- nothing will run\n")
-		fmt.Fprintf(tw, "\tstart one:  je worker\n")
+		fmt.Fprintf(tw, "\tstart one:  je worker run\n")
 	} else {
 		fmt.Fprintf(tw, "workers\t%d online (%s)\n",
 			health.Workers, strings.Join(health.Labels, ", "))

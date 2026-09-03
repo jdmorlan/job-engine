@@ -84,7 +84,7 @@ func runWaiting(ctx context.Context, env *Env, args []string) error {
 				"WAITING FOR A WORKER  (queued for a label nothing is serving)")
 			for _, u := range w.Unservable {
 				fmt.Fprintf(env.Stdout, "  runs_on: %s\n    %d run(s), jobs: %s\n"+
-					"    start one:  je worker --labels %s\n",
+					"    start one:  je worker run --labels %s\n",
 					u.Label, len(u.Runs), strings.Join(u.Jobs, ", "), u.Label)
 			}
 			fmt.Fprintln(env.Stdout)

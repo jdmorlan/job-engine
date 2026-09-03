@@ -31,7 +31,7 @@ import (
 //
 // Named for the component (F1, v0.6) rather than for "daemon". That word is a
 // deployment form, not a component: the thing you cannot reach is the same
-// whether it is a container, a foreground `je serve`, or a registered service.
+// whether it is a container, a foreground `je control-plane run`, or a service.
 var ErrNoControlPlane = errors.New("no control plane is running")
 
 // Client is the CLI's only way to reach the system (D20/C11).

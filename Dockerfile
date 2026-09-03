@@ -33,8 +33,8 @@ ENV TZ=UTC
 VOLUME /var/lib/je
 EXPOSE 7620
 
-# One image, two components (D20). `serve` is the control plane and `worker` is
-# a worker; compose.yaml runs both from this image, and so does a cluster.
+# One image, two components (D20). `control-plane run` and `worker run` are the
+# two halves; compose.yaml runs both from this image, and so does a cluster.
 #
 # Shipping them together is C10 made cheap: there is one artifact and one
 # version, so the skew the control plane refuses to tolerate cannot arise by
@@ -50,4 +50,4 @@ EXPOSE 7620
 # loopback interface (D19's rider on N1). Nothing here weakens the local
 # default, which stays 127.0.0.1.
 ENTRYPOINT ["/je"]
-CMD ["serve", "--addr", "0.0.0.0:7620"]
+CMD ["control-plane", "run", "--addr", "0.0.0.0:7620"]
