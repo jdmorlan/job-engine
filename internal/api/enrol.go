@@ -71,6 +71,13 @@ func (s *Server) handleMintEnrolment(w http.ResponseWriter, r *http.Request) {
 type EnrolRequest struct {
 	Token     string `json:"token"`
 	PublicKey string `json:"public_key"` // PEM, PKIX
+
+	// Name and Labels are honoured only for a bootstrap token, where the
+	// enrolling process is on the control plane's own machine and names itself.
+	// For every other token they are ignored, because what the identity may be
+	// was decided when the token was minted.
+	Name   string   `json:"name,omitempty"`
+	Labels []string `json:"labels,omitempty"`
 }
 
 // EnrolResponse is the issued identity and the authority to verify the control
@@ -85,7 +92,7 @@ func (s *Server) handleEnrol(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(s, w, r, &req) {
 		return
 	}
-	cert, caPEM, err := s.engine.Enrol(r.Context(), req.Token, []byte(req.PublicKey))
+	cert, caPEM, err := s.engine.Enrol(r.Context(), req.Token, []byte(req.PublicKey), req.Name, req.Labels)
 	switch {
 	case errors.Is(err, ca.ErrBadToken):
 		// One status and one sentence for expired, used and never-issued

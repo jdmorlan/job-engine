@@ -26,7 +26,7 @@ func TestAnEnrolledWorkerCannotChooseItsOwnLabels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := e.Enrol(ctx, token, publicKeyPEM(t)); err != nil {
+	if _, _, err := e.Enrol(ctx, token, publicKeyPEM(t), "", nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -84,7 +84,7 @@ func TestAnIssuedCertificateNamesTheEnrolledWorker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	certPEM, caPEM, err := e.Enrol(ctx, token, publicKeyPEM(t))
+	certPEM, caPEM, err := e.Enrol(ctx, token, publicKeyPEM(t), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,10 +119,10 @@ func TestATokenCannotBeRedeemedTwice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := e.Enrol(ctx, token, publicKeyPEM(t)); err != nil {
+	if _, _, err := e.Enrol(ctx, token, publicKeyPEM(t), "", nil); err != nil {
 		t.Fatal(err)
 	}
-	_, _, err = e.Enrol(ctx, token, publicKeyPEM(t))
+	_, _, err = e.Enrol(ctx, token, publicKeyPEM(t), "", nil)
 	if err == nil {
 		t.Fatal("a token enrolled a second machine")
 	}
@@ -141,7 +141,7 @@ func TestEnrolmentIsRecordedAsAnEvent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := e.Enrol(ctx, token, publicKeyPEM(t)); err != nil {
+	if _, _, err := e.Enrol(ctx, token, publicKeyPEM(t), "", nil); err != nil {
 		t.Fatal(err)
 	}
 

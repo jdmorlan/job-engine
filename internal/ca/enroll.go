@@ -34,12 +34,32 @@ var ErrBadToken = errors.New("enrolment token is not valid")
 type Tokens struct {
 	mu     sync.Mutex
 	issued map[string]pending
+
+	// bootstrap is the hash of the token written into the data directory for
+	// workers on this machine. Empty until one is minted.
+	bootstrap string
 }
 
 type pending struct {
-	worker  string
-	labels  []string
+	grant   Grant
 	expires time.Time
+}
+
+// Grant is what a redeemed token entitles the holder to.
+type Grant struct {
+	// Worker and Labels are fixed by whoever minted the token, and are what the
+	// enrolled identity becomes. Empty on a bootstrap grant.
+	Worker string
+	Labels []string
+
+	// SelfNamed means the holder chooses its own name and labels.
+	//
+	// True only for a bootstrap token, which lives in the control plane's data
+	// directory beside the CA private key. Anybody who can read it could read
+	// that key and issue any certificate they liked, so requiring them to be
+	// told a name as well would protect nothing -- it would only add a step to
+	// the case that has no second party to protect anything from (D25).
+	SelfNamed bool
 }
 
 func NewTokens() *Tokens { return &Tokens{issued: map[string]pending{}} }
@@ -65,10 +85,34 @@ func (t *Tokens) Issue(worker string, labels []string) (string, error) {
 	defer t.mu.Unlock()
 	t.sweepLocked()
 	t.issued[hash(token)] = pending{
-		worker:  worker,
-		labels:  append([]string(nil), labels...),
+		grant: Grant{
+			Worker: worker,
+			Labels: append([]string(nil), labels...),
+		},
 		expires: time.Now().Add(TokenLifetime),
 	}
+	return token, nil
+}
+
+// IssueBootstrap mints the token a control plane leaves in its own data
+// directory for workers on the same machine (D25).
+//
+// Reusable, and long-lived for as long as this process is. Both would be wrong
+// for a token that crosses a network and are unremarkable for one that does
+// not: it never leaves a directory whose other contents include the key that
+// signs everything, so it grants nothing that reading that directory did not
+// already grant. Making it single-use would mean a worker restarting on the
+// same machine needed a human, which is exactly the friction this removes.
+func (t *Tokens) IssueBootstrap() (string, error) {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	token := base64.RawURLEncoding.EncodeToString(raw)
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.bootstrap = hash(token)
 	return token, nil
 }
 
@@ -77,25 +121,29 @@ func (t *Tokens) Issue(worker string, labels []string) (string, error) {
 // One use only: the token is deleted whether or not the enrolment that follows
 // succeeds. A token that could be retried is a token that can be replayed, and
 // a failed enrolment is cheap to reissue.
-func (t *Tokens) Redeem(token string) (worker string, labels []string, err error) {
+func (t *Tokens) Redeem(token string) (Grant, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.sweepLocked()
 
 	key := hash(token)
+
+	// The bootstrap token is not consumed: see IssueBootstrap. Compared in
+	// constant time because it is the one token that stays valid, so a timing
+	// difference here would be worth somebody measuring.
+	if t.bootstrap != "" && subtle.ConstantTimeCompare([]byte(key), []byte(t.bootstrap)) == 1 {
+		return Grant{SelfNamed: true}, nil
+	}
+
 	found, ok := t.issued[key]
 	if !ok {
-		// Constant-time compared against nothing is still worth doing: the map
-		// lookup already leaked, so the guard that matters is that every
-		// failure returns the same error at the same cost.
-		subtle.ConstantTimeCompare([]byte(key), []byte(key))
-		return "", nil, ErrBadToken
+		return Grant{}, ErrBadToken
 	}
 	delete(t.issued, key)
 	if time.Now().After(found.expires) {
-		return "", nil, ErrBadToken
+		return Grant{}, ErrBadToken
 	}
-	return found.worker, found.labels, nil
+	return found.grant, nil
 }
 
 // Outstanding reports how many tokens are live, for `je worker token --list`

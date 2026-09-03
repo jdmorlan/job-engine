@@ -109,6 +109,15 @@ func (l Layout) CADir() string { return filepath.Join(l.Data, "ca") }
 func (l Layout) CAKey() string  { return filepath.Join(l.CADir(), "ca.key") }
 func (l Layout) CACert() string { return filepath.Join(l.CADir(), "ca.crt") }
 
+// BootstrapToken is the enrolment token a running control plane leaves for
+// workers on this machine (D25).
+//
+// In the data directory rather than anywhere else, because that directory is
+// what the token means: it is 0700 and holds the CA private key, so anybody who
+// can read this could sign their own certificates regardless. Written on start
+// and removed on clean shutdown, like the runtime file.
+func (l Layout) BootstrapToken() string { return filepath.Join(l.Data, "bootstrap.token") }
+
 // Identity is this machine's own key material, whichever role it plays: the
 // age key that reads encrypted secrets, and the certificate that proves which
 // worker it is.

@@ -22,7 +22,7 @@ func TestRenewalIssuesAFreshCertificateForTheSameIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, _, err := e.Enrol(ctx, token, publicKeyPEM(t))
+	first, _, err := e.Enrol(ctx, token, publicKeyPEM(t), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +69,7 @@ func TestRenewalUpdatesTheRecordedFingerprint(t *testing.T) {
 	e, _ := chainFixture(t, nil, nil)
 
 	token, _ := e.MintEnrolment(ctx, "laptop", nil)
-	if _, _, err := e.Enrol(ctx, token, publicKeyPEM(t)); err != nil {
+	if _, _, err := e.Enrol(ctx, token, publicKeyPEM(t), "", nil); err != nil {
 		t.Fatal(err)
 	}
 	before := workerNamed(t, e, "laptop").Fingerprint

@@ -101,19 +101,22 @@ func TestATokenEnrolsExactlyOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	worker, labels, err := tokens.Redeem(token)
+	grant, err := tokens.Redeem(token)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if worker != "macbook" {
-		t.Errorf("worker = %q, want macbook", worker)
+	if grant.Worker != "macbook" {
+		t.Errorf("worker = %q, want macbook", grant.Worker)
 	}
-	if len(labels) != 1 || labels[0] != "macos" {
-		t.Errorf("labels = %v, want [macos] as chosen by whoever minted the token", labels)
+	if len(grant.Labels) != 1 || grant.Labels[0] != "macos" {
+		t.Errorf("labels = %v, want [macos] as chosen by whoever minted the token", grant.Labels)
+	}
+	if grant.SelfNamed {
+		t.Error("a token minted for a named worker let the holder name itself")
 	}
 
 	// Replay is the attack a bearer token invites, so one use is one use.
-	if _, _, err := tokens.Redeem(token); err == nil {
+	if _, err := tokens.Redeem(token); err == nil {
 		t.Fatal("a token enrolled a second worker")
 	}
 }
@@ -126,12 +129,12 @@ func TestEveryBadTokenFailsIdentically(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := tokens.Redeem(used); err != nil {
+	if _, err := tokens.Redeem(used); err != nil {
 		t.Fatal(err)
 	}
 
 	for _, token := range []string{used, "never-existed", ""} {
-		_, _, err := tokens.Redeem(token)
+		_, err := tokens.Redeem(token)
 		if err == nil {
 			t.Fatalf("token %q was accepted", token)
 		}
@@ -154,7 +157,7 @@ func TestTokensAreNotStoredInUsableForm(t *testing.T) {
 	}
 	// The only handle the API offers is a count -- there is deliberately no way
 	// to ask which tokens exist.
-	if _, _, err := tokens.Redeem(token); err != nil {
+	if _, err := tokens.Redeem(token); err != nil {
 		t.Fatal(err)
 	}
 	if tokens.Outstanding() != 0 {
@@ -239,5 +242,86 @@ func TestTheFingerprintIdentifiesTheAuthority(t *testing.T) {
 	}
 	if ca.FingerprintPEM([]byte("not a certificate")) != "" {
 		t.Error("garbage produced a fingerprint, which would compare equal to nothing safely")
+	}
+}
+
+// The bootstrap token is what removes the setup step for a worker on the
+// control plane's own machine. It behaves differently from every other token,
+// and each difference is deliberate (D25).
+func TestTheBootstrapTokenLetsAHolderNameItself(t *testing.T) {
+	tokens := ca.NewTokens()
+
+	token, err := tokens.IssueBootstrap()
+	if err != nil {
+		t.Fatal(err)
+	}
+	grant, err := tokens.Redeem(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !grant.SelfNamed {
+		t.Fatal("a bootstrap grant did not let its holder name itself")
+	}
+	if grant.Worker != "" || len(grant.Labels) != 0 {
+		t.Errorf("grant = %+v, want no fixed identity", grant)
+	}
+
+	// Reusable, unlike every other token: a worker restarting on this machine
+	// must not need a human, which is the friction this exists to remove.
+	if _, err := tokens.Redeem(token); err != nil {
+		t.Error("the bootstrap token was consumed; a restarting local worker " +
+			"would need a person")
+	}
+}
+
+// It must not be a skeleton key for tokens generally: anything that is not this
+// exact token still fails the same way everything else does.
+func TestABootstrapTokenDoesNotWeakenOtherTokens(t *testing.T) {
+	tokens := ca.NewTokens()
+	if _, err := tokens.IssueBootstrap(); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, token := range []string{"", "guess", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"} {
+		if _, err := tokens.Redeem(token); err == nil {
+			t.Errorf("token %q was accepted once a bootstrap token existed", token)
+		}
+	}
+
+	// And a named token minted alongside it still fixes its own identity.
+	named, err := tokens.Issue("fixed", []string{"macos"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	grant, err := tokens.Redeem(named)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if grant.SelfNamed {
+		t.Error("a named token became self-naming because a bootstrap token exists")
+	}
+	if grant.Worker != "fixed" {
+		t.Errorf("worker = %q, want fixed", grant.Worker)
+	}
+}
+
+// Reissuing replaces the previous one, so a restarted control plane does not
+// leave an older token valid.
+func TestReissuingTheBootstrapTokenInvalidatesTheOldOne(t *testing.T) {
+	tokens := ca.NewTokens()
+	first, err := tokens.IssueBootstrap()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := tokens.IssueBootstrap()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := tokens.Redeem(first); err == nil {
+		t.Error("a bootstrap token outlived the control plane process that wrote it")
+	}
+	if _, err := tokens.Redeem(second); err != nil {
+		t.Errorf("the current bootstrap token was refused: %v", err)
 	}
 }

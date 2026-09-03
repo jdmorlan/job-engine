@@ -3478,13 +3478,24 @@ order:
    were decided at enrolment and reissuing is not an opportunity to revisit them.
    A new keypair each time, so a leaked key stops being useful when its
    certificate expires rather than living as long as the worker.
-2. **Local bootstrap must cost nothing.** The trust anchor to use: **a process
-   that can read the data directory is the control plane's owner** — the CA key
-   is in there, so filesystem access already implies everything a token would
-   grant. A worker sharing the data directory, or the compose volume, enrols
-   itself with no token; only a *remote* worker needs one. That keeps `je
-   quickstart` and `docker compose up` at zero extra steps, which is where the
-   friction would otherwise be felt.
+2. ~~**Local bootstrap must cost nothing.**~~ **Shipped.** A control plane
+   serving TLS writes a bootstrap token into its own data directory at 0600, and
+   a worker on that machine enrols itself with it. The trust anchor is exactly
+   what it looks like: **the token sits beside the CA private key**, so anybody
+   who can read it could sign their own certificates regardless — which is why
+   the holder is allowed to name itself, and why requiring them to be told a name
+   would protect nothing. `je quickstart --tls` is one command that ends with a
+   worker holding a real identity and nothing pasted.
+
+   Reusable and process-lifetime, unlike every other token: single-use would mean
+   a worker restarting on the same machine needed a person, which is the friction
+   this removes. Reissued on each start, so an older one stops working, and
+   removed on clean shutdown so a stale file cannot outlive the process that
+   honoured it.
+
+   **Only when serving TLS.** A plaintext control plane has no transport on which
+   an identity means anything, so it offers none and creates no authority to
+   offer it with.
 3. **Clock skew** currently fails as an opaque handshake error and needs a real
    sentence.
 4. The daemon test harness assumes plaintext.

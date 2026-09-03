@@ -125,6 +125,25 @@ func Run(ctx context.Context, cfg Config) error {
 		return err
 	}
 
+	// A worker on this machine enrols with no token of its own: it reads this
+	// one, which it can only do if it already has the access that would let it
+	// read the CA key (D25). Removed on the way out so a stale file cannot
+	// outlive the process that honoured it.
+	//
+	// Only when serving TLS. A plaintext control plane has no transport on
+	// which an identity means anything, so offering one would hand a worker a
+	// certificate it cannot present -- and creating an authority it will never
+	// use to do it.
+	if cfg.TLS {
+		if token, err := eng.BootstrapToken(); err != nil {
+			cfg.Logger.Warn("could not prepare local enrolment", "error", err)
+		} else if err := os.WriteFile(cfg.Layout.BootstrapToken(), []byte(token+"\n"), 0o600); err != nil {
+			cfg.Logger.Warn("could not write the local enrolment token", "error", err)
+		} else {
+			defer os.Remove(cfg.Layout.BootstrapToken())
+		}
+	}
+
 	srv := &http.Server{
 		Handler:           api.New(eng, cfg.Logger).Handler(),
 		ReadHeaderTimeout: 10 * time.Second, // cheap protection against a stuck client

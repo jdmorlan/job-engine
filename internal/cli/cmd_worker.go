@@ -121,6 +121,13 @@ func runWorker(ctx context.Context, env *Env, args []string) error {
 		if err := enrolAt(ctx, env, target, *token, *caPin); err != nil {
 			return err
 		}
+	} else if positional[0] == "run" {
+		// No token asked for. If this worker shares a machine with the control
+		// plane it can enrol itself, which is what keeps `je quickstart` and
+		// `docker compose up` at zero extra steps (D25).
+		if err := autoEnrol(ctx, env, target, *name, splitLabels(*labels)); err != nil {
+			return err
+		}
 	}
 
 	if positional[0] == "join" {

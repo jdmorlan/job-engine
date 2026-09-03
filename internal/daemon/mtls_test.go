@@ -317,3 +317,93 @@ func TestARunningWorkerRenewsItselfUnattended(t *testing.T) {
 	}
 	t.Fatal("a running worker did not renew its own certificate before it expired")
 }
+
+// A worker on the control plane's own machine gets an identity with nobody
+// asked for anything -- which is what has to be true before certificates can be
+// required at all, since `je quickstart` and `docker compose up` must stay at
+// zero extra steps (D25).
+func TestALocalWorkerEnrolsItselfFromTheDataDirectory(t *testing.T) {
+	_, layout := startTLSDaemon(t)
+
+	token, err := os.ReadFile(layout.BootstrapToken())
+	if err != nil {
+		t.Fatalf("the control plane left no token for local workers: %v", err)
+	}
+
+	// The trust anchor, made explicit: this file sits in a directory whose
+	// other contents include the key that signs everything.
+	info, err := os.Stat(layout.BootstrapToken())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("bootstrap token mode = %o, want 0600", perm)
+	}
+	if _, err := os.Stat(layout.CAKey()); err != nil {
+		t.Fatalf("the CA key is not beside the token, so reading it proves nothing: %v", err)
+	}
+	if len(strings.TrimSpace(string(token))) == 0 {
+		t.Fatal("the bootstrap token is empty")
+	}
+}
+
+// The token is removed when the control plane stops, so a stale file cannot
+// outlive the process that honoured it.
+func TestTheBootstrapTokenDoesNotOutliveTheControlPlane(t *testing.T) {
+	dir := t.TempDir()
+	layout := paths.Layout{Data: dir, Jobs: filepath.Join(dir, "jobs")}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ready := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- daemon.Run(ctx, daemon.Config{
+			Layout: layout, Addr: "127.0.0.1:0", Version: "test", TLS: true,
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+			Ready:  ready,
+		})
+	}()
+	<-ready
+
+	if _, err := os.Stat(layout.BootstrapToken()); err != nil {
+		t.Fatalf("no token while running: %v", err)
+	}
+	cancel()
+	<-done
+
+	if _, err := os.Stat(layout.BootstrapToken()); !os.IsNotExist(err) {
+		t.Error("the bootstrap token survived the control plane that wrote it")
+	}
+}
+
+// A plaintext control plane offers no local enrolment, and creates no authority
+// to offer it with.
+//
+// Without this it wrote a token, a worker read it, and tried to enrol over
+// HTTPS against a server speaking HTTP -- surviving only because the failure
+// was non-fatal, and leaving a warning on every plaintext start. An identity is
+// meaningless without a transport that presents it (D25).
+func TestAPlaintextControlPlaneOffersNoLocalEnrolment(t *testing.T) {
+	dir := t.TempDir()
+	layout := paths.Layout{Data: dir, Jobs: filepath.Join(dir, "jobs")}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ready := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- daemon.Run(ctx, daemon.Config{
+			Layout: layout, Addr: "127.0.0.1:0", Version: "test", // TLS off
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+			Ready:  ready,
+		})
+	}()
+	<-ready
+	t.Cleanup(func() { cancel(); <-done })
+
+	if _, err := os.Stat(layout.BootstrapToken()); !os.IsNotExist(err) {
+		t.Error("a plaintext control plane offered a certificate a worker could not present")
+	}
+	if _, err := os.Stat(layout.CAKey()); !os.IsNotExist(err) {
+		t.Error("a plaintext control plane created an authority it will never use")
+	}
+}

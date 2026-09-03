@@ -58,10 +58,25 @@ func (e *Engine) MintEnrolment(ctx context.Context, name string, labels []string
 // ordering that matters: registration afterwards can only report liveness,
 // because name and labels are already decided and the store refuses to let a
 // registration change them.
-func (e *Engine) Enrol(ctx context.Context, token string, publicKeyPEM []byte) (certPEM, caPEM []byte, err error) {
-	name, labels, err := e.tokens.Redeem(token)
+func (e *Engine) Enrol(ctx context.Context, token string, publicKeyPEM []byte, asName string, asLabels []string) (certPEM, caPEM []byte, err error) {
+	grant, err := e.tokens.Redeem(token)
 	if err != nil {
 		return nil, nil, err
+	}
+
+	name, labels := grant.Worker, grant.Labels
+	if grant.SelfNamed {
+		// A bootstrap token from this machine's own data directory. The holder
+		// names itself, because the person running the worker is the person
+		// running the control plane -- there is no second party here for a
+		// fixed name to protect (D25).
+		name, labels = asName, asLabels
+		if name == "" {
+			return nil, nil, errors.New("a worker enrolling locally must say what it is called")
+		}
+		if len(labels) == 0 {
+			labels = []string{store.DefaultLabel}
+		}
 	}
 	authority, err := e.Authority()
 	if err != nil {
@@ -168,4 +183,19 @@ func (e *Engine) Renew(ctx context.Context, name string, publicKeyPEM []byte) (c
 	}
 	e.log.Info("worker certificate renewed", "worker", name)
 	return certPEM, nil
+}
+
+// BootstrapToken mints the token this control plane leaves in its own data
+// directory, for workers on the same machine (D25).
+//
+// The trust anchor is the filesystem: the directory it lands in is 0700 and
+// already contains the CA private key, so a process that can read the token
+// could sign its own certificates anyway. Recognising that is what removes the
+// setup step from `je quickstart` and `docker compose up` without inventing a
+// weaker rule to justify it.
+func (e *Engine) BootstrapToken() (string, error) {
+	if _, err := e.Authority(); err != nil {
+		return "", err
+	}
+	return e.tokens.IssueBootstrap()
 }

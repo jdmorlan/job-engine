@@ -152,7 +152,43 @@ func fetchAuthority(ctx context.Context, addr, pin string) ([]byte, error) {
 // The private key is generated here and never leaves: what crosses the network
 // is a public key and a token, and what comes back is a certificate. A control
 // plane that is compromised can refuse to issue, and cannot learn this key.
+// autoEnrol gives a worker on the control plane's own machine an identity,
+// with nobody asked for anything (D25).
+//
+// Skipped silently when there is nothing to do: no token file means either a
+// remote control plane or an older one, and both are cases where the worker
+// carries on exactly as it did before. An identity already present means there
+// is nothing to bootstrap.
+func autoEnrol(ctx context.Context, env *Env, target, name string, labels []string) error {
+	if _, err := os.Stat(env.Layout.IdentityCert()); err == nil {
+		return nil
+	}
+	token, err := os.ReadFile(env.Layout.BootstrapToken())
+	if err != nil {
+		return nil
+	}
+
+	// Verified against the CA on disk, which this process can read for the same
+	// reason it could read the token. No pin is needed: locality is the proof,
+	// and there is no network for anybody to sit in the middle of.
+	caPEM, caErr := os.ReadFile(env.Layout.CACert())
+	var c *Client
+	if caErr == nil {
+		c, err = DialVerified(target, caPEM)
+	} else {
+		c, err = DialAddr(target)
+	}
+	if err != nil {
+		return err
+	}
+	return enrolWorkerAs(ctx, env, c, strings.TrimSpace(string(token)), name, labels)
+}
+
 func enrolWorker(ctx context.Context, env *Env, c *Client, token string) error {
+	return enrolWorkerAs(ctx, env, c, token, "", nil)
+}
+
+func enrolWorkerAs(ctx context.Context, env *Env, c *Client, token, name string, labels []string) error {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return err
@@ -165,7 +201,9 @@ func enrolWorker(ctx context.Context, env *Env, c *Client, token string) error {
 
 	reqCtx, cancel := withTimeout(ctx)
 	defer cancel()
-	out, err := c.Enrol(reqCtx, api.EnrolRequest{Token: token, PublicKey: string(pubPEM)})
+	out, err := c.Enrol(reqCtx, api.EnrolRequest{
+		Token: token, PublicKey: string(pubPEM), Name: name, Labels: labels,
+	})
 	if err != nil {
 		return err
 	}
@@ -192,6 +230,22 @@ func enrolWorker(ctx context.Context, env *Env, c *Client, token string) error {
 		}
 	}
 
-	fmt.Fprintf(env.Stdout, "enrolled; identity written to %s\n", env.Layout.IdentityCert())
+	fmt.Fprintf(env.Stderr, "enrolled as %s; identity written to %s\n",
+		certName(out.Certificate), env.Layout.IdentityCert())
 	return nil
+}
+
+// certName reads back what the control plane decided this identity is called,
+// which for a bootstrap enrolment is what was asked for and for a token
+// enrolment may not be.
+func certName(certPEM string) string {
+	block, _ := pem.Decode([]byte(certPEM))
+	if block == nil {
+		return "?"
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return "?"
+	}
+	return cert.Subject.CommonName
 }

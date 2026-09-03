@@ -32,6 +32,7 @@ func runQuickstart(ctx context.Context, env *Env, args []string) error {
 	fs := newFlagSet(cmd, env)
 	addr := fs.String("addr", daemon.DefaultAddr, "address for the control plane")
 	labels := fs.String("labels", jobdef.DefaultRunsOn, "labels for the worker it starts")
+	useTLS := fs.Bool("tls", false, "serve HTTPS; the worker enrols itself and presents a certificate")
 	verbose := fs.Bool("v", false, "log at debug level")
 	if extra, err := parseArgs(fs, args); err != nil {
 		return err
@@ -56,6 +57,7 @@ func runQuickstart(ctx context.Context, env *Env, args []string) error {
 			Addr:    *addr,
 			Version: env.Version,
 			Logger:  logger,
+			TLS:     *useTLS,
 			Ready:   ready,
 		})
 	}()
@@ -83,7 +85,15 @@ func runQuickstart(ctx context.Context, env *Env, args []string) error {
 		return err
 	}
 
-	client, err := worker.Dial(info.Address)
+	// The local case, so the worker enrols itself from the token the control
+	// plane just wrote into the data directory they share -- no token to paste
+	// and no step to explain. Nothing to do when TLS is off, and nothing that
+	// fails the start if there is (D25).
+	if err := autoEnrol(ctx, env, info.Address, defaultWorkerName(), splitLabels(*labels)); err != nil {
+		logger.Warn("could not enrol this worker locally", "error", err)
+	}
+
+	client, err := dialControlPlane(env, info.Address)
 	if err != nil {
 		cancel()
 		<-planeDone
