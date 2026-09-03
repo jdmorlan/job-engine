@@ -47,7 +47,8 @@ func runStatus(ctx context.Context, env *Env, args []string) error {
 	// prevent, so it is stated on the default view and stated as a problem.
 	if health.Workers == 0 {
 		fmt.Fprintf(tw, "workers\tNONE -- nothing will run\n")
-		fmt.Fprintf(tw, "\tstart one:  je worker run\n")
+		fmt.Fprintf(tw, "\tattach one:  je worker join   (registered, survives a reboot)\n")
+		fmt.Fprintf(tw, "\t             je worker run    (foreground, this terminal)\n")
 	} else {
 		fmt.Fprintf(tw, "workers\t%d online (%s)\n",
 			health.Workers, strings.Join(health.Labels, ", "))

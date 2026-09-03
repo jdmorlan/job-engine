@@ -10,13 +10,14 @@ import (
 
 	"github.com/jdmorlan/job-engine/internal/daemon"
 	"github.com/jdmorlan/job-engine/internal/jobdef"
+	"github.com/jdmorlan/job-engine/internal/service"
 	"github.com/jdmorlan/job-engine/internal/worker"
 )
 
 func init() {
 	register(&Command{
 		Name:  "worker",
-		Args:  "run",
+		Args:  "run|join|status|remove",
 		Usage: "a worker: the thing that actually executes jobs",
 		Long: "A worker executes jobs. The control plane never does (D20/C11), so a\n" +
 			"deployment with no worker runs nothing at all -- `je status` says so.\n\n" +
@@ -26,7 +27,13 @@ func init() {
 			"It holds no state and opens no ports: it dials the control plane and\n" +
 			"keeps asking for work, which is why it works from a laptop behind NAT.\n\n" +
 			"subcommands:\n" +
-			"  run    run it in the foreground, in this terminal\n\n" +
+			"  run       run it in the foreground, in this terminal\n" +
+			"  join      register it with launchd or systemd, attached to a control plane\n" +
+			"  status    is it registered, and is it up\n" +
+			"  remove    unregister it; nothing else on this machine is touched\n\n" +
+			"`join` rather than `install` because a worker attaches to a control plane\n" +
+			"that already exists -- with no argument it joins the one this data\n" +
+			"directory records, which is the local case.\n\n" +
 			"`je workers` lists the ones already attached.",
 		Run: runWorker,
 	})
@@ -50,15 +57,27 @@ func runWorker(ctx context.Context, env *Env, args []string) error {
 		return err
 	}
 	if len(positional) == 0 {
-		return usagef("usage: je worker run")
+		return usagef("usage: je worker run|join|status|remove")
 	}
+
 	switch positional[0] {
-	case "run":
+	case "run", "join":
 		if len(positional) != 1 {
 			return usagef("unexpected argument %q", positional[1])
 		}
+	case "status":
+		if len(positional) != 1 {
+			return usagef("unexpected argument %q", positional[1])
+		}
+		return componentStatus(env, service.Worker)
+	case "remove":
+		if len(positional) != 1 {
+			return usagef("unexpected argument %q", positional[1])
+		}
+		return removeComponent(env, service.Worker)
 	default:
-		return usagef("unknown subcommand %q; expected run", positional[0])
+		return usagef("unknown subcommand %q; expected run, join, status or remove",
+			positional[0])
 	}
 
 	target := *addr
@@ -70,6 +89,10 @@ func runWorker(ctx context.Context, env *Env, args []string) error {
 			return adviseNoControlPlane(err)
 		}
 		target = resolved
+	}
+
+	if positional[0] == "join" {
+		return joinWorker(ctx, env, *name, target, splitLabels(*labels), *concurrency)
 	}
 
 	client, err := worker.Dial(target)
