@@ -96,6 +96,25 @@ func (l Layout) SourceTree(source, revision string) string {
 	return filepath.Join(l.Data, "sources", source, revision)
 }
 
+// CA is where the control plane keeps the certificate authority it issues
+// worker identities from (D25).
+//
+// Inside the data directory, at 0700 like the secret store, because the key
+// here is what makes every issued identity trustworthy. It is deliberately not
+// a separate configurable path: a CA somebody can point somewhere else is a CA
+// somebody can point at a directory that is backed up to the wrong place.
+func (l Layout) CADir() string { return filepath.Join(l.Data, "ca") }
+
+// CAKey and CACert are the authority's private key and its own certificate.
+func (l Layout) CAKey() string  { return filepath.Join(l.CADir(), "ca.key") }
+func (l Layout) CACert() string { return filepath.Join(l.CADir(), "ca.crt") }
+
+// Identity is this machine's own key material, whichever role it plays: the
+// age key that reads encrypted secrets, and the certificate that proves which
+// worker it is.
+func (l Layout) IdentityCert() string { return filepath.Join(l.Data, "worker.crt") }
+func (l Layout) IdentityKey() string  { return filepath.Join(l.Data, "worker.key") }
+
 // Chains is where chain files live -- one flow per file, filename is the
 // chain name (D17).
 func (l Layout) Chains() string { return filepath.Join(l.Jobs, "chains") }
