@@ -44,6 +44,17 @@ FROM scratch
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=build /je /je
 
+# A writable /tmp, which an empty base does not have and every run needs: the
+# worker makes a per-attempt scratch directory there for D6's three output
+# channels. Without it `docker compose up` produces a deployment where no job
+# can run -- it fails with "creating scratch directory: stat /tmp: no such file
+# or directory", which names the symptom and not the cause.
+#
+# Copied from the build stage because there is no shell here to mkdir with.
+# That is the empty base being a convenience with a price, exactly as the note
+# above says (D23).
+COPY --from=build --chmod=1777 /tmp /tmp
+
 ENV JE_DATA_DIR=/var/lib/je
 ENV TZ=UTC
 VOLUME /var/lib/je

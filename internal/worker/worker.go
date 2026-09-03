@@ -499,14 +499,28 @@ func (w *Worker) resolveWorkdir(declared, sourceRoot string) (string, error) {
 		base = sourceRoot
 	}
 
+	var dir string
 	switch {
 	case expanded == "":
-		return base, nil
+		dir = base
 	case filepath.IsAbs(expanded):
-		return expanded, nil
+		dir = expanded
 	default:
-		return filepath.Join(base, expanded), nil
+		dir = filepath.Join(base, expanded)
 	}
+
+	// Checked here, because exec does not say this. A command started in a
+	// directory that does not exist fails with ENOENT attributed to the
+	// *binary*: "fork/exec /bin/sh: no such file or directory", which sends
+	// somebody looking for a missing shell that is right where it always was.
+	if _, err := os.Stat(dir); err != nil {
+		return "", fmt.Errorf(
+			"this job runs in %s, which this worker cannot see: %w\n"+
+				"A job from a directory source only runs on a worker that can reach "+
+				"that directory; one from a repository travels to the worker itself",
+			dir, err)
+	}
+	return dir, nil
 }
 
 // expandHome resolves a leading ~ in a configured path.

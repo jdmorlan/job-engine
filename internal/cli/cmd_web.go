@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -103,7 +104,12 @@ func withScheme(addr string) string {
 }
 
 func serveWeb(ctx context.Context, env *Env, addr string, base *url.URL) error {
-	handler, built, err := webui.Handler(base)
+	// Read if present, absent otherwise: a plaintext control plane needs none,
+	// and a missing file on an https target is reported by the handler rather
+	// than guessed around.
+	caPEM, _ := os.ReadFile(env.Layout.BootstrapCA())
+
+	handler, built, err := webui.Handler(base, caPEM)
 	if err != nil {
 		return err
 	}

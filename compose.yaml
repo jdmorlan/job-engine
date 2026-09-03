@@ -11,7 +11,10 @@ services:
   control-plane:
     build: .
     image: job-engine:dev
-    command: ["control-plane", "run", "--addr", "0.0.0.0:7620"]
+    # --tls-host names how OTHER containers reach this one. A wildcard bind has
+    # no name of its own, and the service name is not something the process can
+    # discover -- so it is told (D25).
+    command: ["control-plane", "run", "--addr", "0.0.0.0:7620", "--tls", "--tls-host", "control-plane"]
     ports:
       # Published on loopback only. The trust boundary moved from the process
       # to the network (D19's rider on N1), and binding 0.0.0.0 on your laptop
@@ -30,6 +33,11 @@ services:
       # Definitions are read-only and safe to bind: no SQLite involved, and
       # editing job YAML on the host is the point (P3).
       - ./jobs:/var/lib/je/jobs:ro
+      # What a worker needs to enrol itself: the token, and the authority to
+      # verify this control plane with (D25). Its own volume rather than sharing
+      # the data one, because the databases and the secret store live there and
+      # a worker has no business reading either.
+      - je-bootstrap:/var/lib/je/bootstrap
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "/je", "status"]
@@ -46,6 +54,16 @@ services:
     command: ["worker", "run", "--addr", "control-plane:7620", "--name", "system", "--labels", "default"]
     environment:
       TZ: ${TZ:-UTC}
+    volumes:
+      # It enrols itself from here on every start, and writes its identity to
+      # the container's own layer -- which it may lose freely, because
+      # re-enrolling is free and C2 says a worker holds nothing worth keeping.
+      - je-bootstrap:/var/lib/je/bootstrap:ro
+      # The same definitions the control plane reads. A job from a *directory*
+      # source runs only on a worker that can see that directory (D22), so a
+      # worker without this can run nothing from ./jobs. A job from a repository
+      # needs none of this: its tree travels to the worker (D25).
+      - ./jobs:/var/lib/je/jobs:ro
     depends_on:
       control-plane:
         condition: service_started
@@ -57,7 +75,12 @@ services:
   web:
     build: .
     image: job-engine:dev
-    command: ["web", "run", "--addr", "0.0.0.0:7621", "--control-plane", "control-plane:7620"]
+    command: ["web", "run", "--addr", "0.0.0.0:7621", "--control-plane", "https://control-plane:7620"]
+    volumes:
+      # The authority only. The web client presents no certificate: it is not a
+      # worker and has no identity to prove -- it just has to know it is talking
+      # to the right control plane.
+      - je-bootstrap:/var/lib/je/bootstrap:ro
     ports:
       - "127.0.0.1:7621:7621"
     depends_on:
@@ -67,3 +90,4 @@ services:
 
 volumes:
   je-data:
+  je-bootstrap:

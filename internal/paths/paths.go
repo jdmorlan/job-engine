@@ -109,14 +109,26 @@ func (l Layout) CADir() string { return filepath.Join(l.Data, "ca") }
 func (l Layout) CAKey() string  { return filepath.Join(l.CADir(), "ca.key") }
 func (l Layout) CACert() string { return filepath.Join(l.CADir(), "ca.crt") }
 
-// BootstrapToken is the enrolment token a running control plane leaves for
-// workers on this machine (D25).
+// BootstrapDir holds what a worker needs to enrol itself: the token, and the
+// authority to verify the control plane with (D25).
 //
-// In the data directory rather than anywhere else, because that directory is
-// what the token means: it is 0700 and holds the CA private key, so anybody who
-// can read this could sign their own certificates regardless. Written on start
-// and removed on clean shutdown, like the runtime file.
-func (l Layout) BootstrapToken() string { return filepath.Join(l.Data, "bootstrap.token") }
+// Its own directory rather than loose in the data directory, because it is the
+// one part of a control plane's state that another process is *meant* to read.
+// The rest -- the databases, and the secret store -- is not, so a deployment
+// that shares this one can do so without handing over everything else. In
+// Compose that is a volume mounted into the worker; on one machine it is simply
+// a subdirectory the worker can already see.
+func (l Layout) BootstrapDir() string { return filepath.Join(l.Data, "bootstrap") }
+
+// BootstrapToken is the enrolment token a running control plane leaves for
+// workers that can read BootstrapDir. Written on start, removed on clean
+// shutdown, like the runtime file.
+func (l Layout) BootstrapToken() string { return filepath.Join(l.BootstrapDir(), "token") }
+
+// BootstrapCA is the authority's certificate, published beside the token so a
+// worker can verify the control plane before it enrols. Public by nature: it is
+// what a client checks against, not a secret.
+func (l Layout) BootstrapCA() string { return filepath.Join(l.BootstrapDir(), "ca.crt") }
 
 // Identity is this machine's own key material, whichever role it plays: the
 // age key that reads encrypted secrets, and the certificate that proves which

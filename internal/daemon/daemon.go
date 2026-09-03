@@ -39,6 +39,14 @@ type Config struct {
 	// clients too and read endpoints need no identity.
 	TLS bool
 
+	// TLSHosts are additional names the control plane will be reached by, for
+	// its own certificate.
+	//
+	// A wildcard bind has no name of its own, and the address a client uses is
+	// not something this process can discover: in Compose it is the service
+	// name, in a cluster the Service DNS name, on a LAN an IP. So it is told.
+	TLSHosts []string
+
 	// Ready, if set, is closed once the daemon is listening and the runtime
 	// file is published. Tests use it to avoid polling; nothing else needs it.
 	Ready chan<- struct{}
@@ -135,11 +143,12 @@ func Run(ctx context.Context, cfg Config) error {
 	// certificate it cannot present -- and creating an authority it will never
 	// use to do it.
 	if cfg.TLS {
-		if token, err := eng.BootstrapToken(); err != nil {
+		if err := publishBootstrap(eng, cfg); err != nil {
 			cfg.Logger.Warn("could not prepare local enrolment", "error", err)
-		} else if err := os.WriteFile(cfg.Layout.BootstrapToken(), []byte(token+"\n"), 0o600); err != nil {
-			cfg.Logger.Warn("could not write the local enrolment token", "error", err)
 		} else {
+			// Only the token goes; the authority stays, because a worker that
+			// enrolled needs it to keep verifying this control plane after it
+			// restarts.
 			defer os.Remove(cfg.Layout.BootstrapToken())
 		}
 	}
@@ -156,16 +165,16 @@ func Run(ctx context.Context, cfg Config) error {
 			ln.Close()
 			return fmt.Errorf("preparing the certificate authority: %w", err)
 		}
-		host, _, splitErr := net.SplitHostPort(cfg.Addr)
-		if splitErr != nil || host == "" || host == "0.0.0.0" || host == "::" {
-			// A wildcard bind has no name of its own to certify. Loopback is
-			// always added, and anything else is reached by an address this
-			// process cannot know -- so it is named at the client instead.
-			host = ""
-		}
-		var hosts []string
-		if host != "" {
+		hosts := append([]string(nil), cfg.TLSHosts...)
+		if host, _, splitErr := net.SplitHostPort(cfg.Addr); splitErr == nil &&
+			host != "" && host != "0.0.0.0" && host != "::" {
 			hosts = append(hosts, host)
+		}
+		// The machine's own name, which in a container is usually the name
+		// other containers reach it by. Cheap, and it covers the common case
+		// without anybody having to know to pass a flag.
+		if name, err := os.Hostname(); err == nil && name != "" {
+			hosts = append(hosts, name)
 		}
 		tlsConfig, err := authority.ServerTLS(hosts)
 		if err != nil {
@@ -220,4 +229,26 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 		return nil
 	}
+}
+
+// publishBootstrap writes what a worker needs to enrol itself: the authority to
+// verify this control plane, and a token that says it may (D25).
+func publishBootstrap(eng *engine.Engine, cfg Config) error {
+	authority, err := eng.Authority()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(cfg.Layout.BootstrapDir(), 0o755); err != nil {
+		return err
+	}
+	// 0644: a certificate is what clients check against, not a secret.
+	if err := os.WriteFile(cfg.Layout.BootstrapCA(), authority.CertPEM(), 0o644); err != nil {
+		return err
+	}
+
+	token, err := eng.BootstrapToken()
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(cfg.Layout.BootstrapToken(), []byte(token+"\n"), 0o600)
 }

@@ -171,7 +171,7 @@ func autoEnrol(ctx context.Context, env *Env, target, name string, labels []stri
 	// Verified against the CA on disk, which this process can read for the same
 	// reason it could read the token. No pin is needed: locality is the proof,
 	// and there is no network for anybody to sit in the middle of.
-	caPEM, caErr := os.ReadFile(env.Layout.CACert())
+	caPEM, caErr := os.ReadFile(env.Layout.BootstrapCA())
 	var c *Client
 	if caErr == nil {
 		c, err = DialVerified(target, caPEM)

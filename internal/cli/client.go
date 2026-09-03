@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -70,7 +71,7 @@ func Connect(l paths.Layout) (*Client, error) {
 		}}
 	}
 
-	base, err := url.Parse(scheme + addr)
+	base, err := url.Parse(scheme + dialable(addr))
 	if err != nil {
 		return nil, fmt.Errorf("bad engine address %q: %w", addr, err)
 	}
@@ -80,6 +81,26 @@ func Connect(l paths.Layout) (*Client, error) {
 		// deadlines belong on the context the caller passes.
 		http: &http.Client{Transport: transport},
 	}, nil
+}
+
+// dialable turns a recorded bind address into one a client can connect to and
+// verify.
+//
+// A control plane that bound 0.0.0.0 records exactly that, and it is a bind
+// address rather than a destination: nothing certifies it, so a TLS client
+// checking the hostname rejects a certificate that is otherwise perfectly
+// correct. Whoever wrote 0.0.0.0 meant "every interface", and a client on the
+// same machine reaching "every interface" means loopback.
+func dialable(addr string) string {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr
+	}
+	switch host {
+	case "0.0.0.0", "::", "":
+		return net.JoinHostPort("127.0.0.1", port)
+	}
+	return addr
 }
 
 // usesTLS reports whether the control plane this layout points at serves HTTPS.
@@ -97,11 +118,17 @@ func usesTLS(l paths.Layout) bool {
 // it is talking to the right control plane, which this gives it without any
 // public CA or system trust store being involved.
 func authorityPool(l paths.Layout) (*x509.CertPool, error) {
+	// The control plane's own copy first, then the one it publishes for
+	// workers. A CLI beside the control plane has the first; one beside a
+	// worker has only the second.
 	body, err := os.ReadFile(l.CACert())
 	if err != nil {
+		body, err = os.ReadFile(l.BootstrapCA())
+	}
+	if err != nil {
 		return nil, fmt.Errorf(
-			"this control plane serves TLS, and its authority is not readable at %s: %w",
-			l.CACert(), err)
+			"this control plane serves TLS, and its authority is not readable at %s or %s: %w",
+			l.CACert(), l.BootstrapCA(), err)
 	}
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(body) {

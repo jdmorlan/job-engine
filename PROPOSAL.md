@@ -3496,9 +3496,17 @@ order:
    **Only when serving TLS.** A plaintext control plane has no transport on which
    an identity means anything, so it offers none and creates no authority to
    offer it with.
-3. **Clock skew** currently fails as an opaque handshake error and needs a real
+3. ~~**Compose.**~~ **Shipped.** `docker compose up -d` now brings up a mTLS
+   deployment whose worker enrolled itself. The bootstrap material moved into its
+   own directory so it can be its own volume: the databases and the secret store
+   live in the data volume and a worker has no business reading either, so it
+   mounts only what it is meant to. The worker keeps no volume of its own and
+   re-enrols on every start, which C2 already permits — it holds nothing worth
+   keeping.
+
+4. **Clock skew** currently fails as an opaque handshake error and needs a real
    sentence.
-4. The daemon test harness assumes plaintext.
+5. The daemon test harness assumes plaintext.
 
 Then the plaintext path can go — a breaking change worth a version bump, and one
 that rewrites D19's *"the trust boundary is the network"* into **"the trust
