@@ -140,3 +140,25 @@ func decodeError(resp *http.Response) error {
 		Message: fmt.Sprintf("control plane returned %s: %s", resp.Status, bytes.TrimSpace(body)),
 	}
 }
+
+// SourceTree downloads one pinned source tree. The caller closes the body.
+//
+// Not routed through do[T]: this is an archive, not JSON, and buffering a
+// repository into memory to hand back a []byte would be a size limit waiting to
+// be discovered.
+func (c *Client) SourceTree(ctx context.Context, name, revision string) (io.ReadCloser, error) {
+	url := c.base.String() + "/v1/sources/" + url.PathEscape(name) + "/tree/" + url.PathEscape(revision)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 400 {
+		defer resp.Body.Close()
+		return nil, decodeError(resp)
+	}
+	return resp.Body, nil
+}

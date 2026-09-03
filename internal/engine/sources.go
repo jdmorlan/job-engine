@@ -281,3 +281,26 @@ func (e *Engine) sourceRevision(ctx context.Context, job store.Job) (string, err
 	}
 	return src.Revision, nil
 }
+
+// SourceTreeDir is where a pinned revision of a source is unpacked, if this
+// control plane actually has it.
+//
+// Only registered sources with a real revision can be served: a `dir` source has
+// no commit and is inherently local (D22's scratch loop), so asking for one is a
+// mistake worth naming rather than a tree worth inventing (D25).
+func (e *Engine) SourceTreeDir(ctx context.Context, name, revision string) (string, error) {
+	src, err := e.store.SourceByName(ctx, name)
+	if err != nil {
+		return "", fmt.Errorf("no source named %q", name)
+	}
+	if src.Kind != store.SourceKindGitHub {
+		return "", fmt.Errorf(
+			"source %q is a %s, which has no revision to serve -- its files are on the control plane's own disk",
+			name, src.Kind)
+	}
+	dir := e.opts.Layout.SourceTree(name, revision)
+	if _, err := os.Stat(dir); err != nil {
+		return "", fmt.Errorf("this control plane does not have %s at revision %s", name, revision)
+	}
+	return dir, nil
+}

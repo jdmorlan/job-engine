@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/jdmorlan/job-engine/internal/gitsource"
 	"github.com/jdmorlan/job-engine/internal/store"
 )
 
@@ -18,6 +19,7 @@ func (s *Server) registerSources(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/sources", s.handleAddSource)
 	mux.HandleFunc("POST /v1/sources/{name}/sync", s.handleSyncSource)
 	mux.HandleFunc("DELETE /v1/sources/{name}", s.handleRemoveSource)
+	mux.HandleFunc("GET /v1/sources/{name}/tree/{revision}", s.handleSourceTree)
 }
 
 func (s *Server) handleListSources(w http.ResponseWriter, r *http.Request) {
@@ -86,4 +88,34 @@ func (s *Server) handleRemoveSource(w http.ResponseWriter, r *http.Request) {
 	// The count is the part worth returning: removing a registration
 	// tombstones jobs, and how many is the thing somebody wants confirmed.
 	writeJSON(w, http.StatusOK, map[string]any{"tombstoned": removed})
+}
+
+// handleSourceTree serves one pinned source tree as a tarball, so a worker on
+// another machine can run a job whose code lives in a repository (D25).
+//
+// The worker fetches from here rather than from GitHub on purpose: it needs no
+// repository credential of its own -- a secret in order to get secrets -- and it
+// provably gets the revision the control plane recorded rather than re-resolving
+// a ref and possibly landing on a different commit (D11).
+//
+// Addressed by commit, so the response is immutable and a worker that already
+// has this revision never asks again.
+func (s *Server) handleSourceTree(w http.ResponseWriter, r *http.Request) {
+	name, revision := r.PathValue("name"), r.PathValue("revision")
+
+	dir, err := s.engine.SourceTreeDir(r.Context(), name, revision)
+	if err != nil {
+		s.writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/gzip")
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	if err := gitsource.Tar(dir, name+"-"+revision, w); err != nil {
+		// The status is already sent by now, so this cannot become a 500. The
+		// worker sees a truncated archive and gzip fails there, which is the
+		// honest outcome -- and it is logged here so the cause is not only
+		// visible on the other machine.
+		s.log.Error("streaming source tree", "source", name, "revision", revision, "error", err)
+	}
 }

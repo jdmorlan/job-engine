@@ -48,6 +48,11 @@ type Options struct {
 	// by whoever will use them).
 	JobsDir string
 
+	// CacheDir is where this machine keeps trees fetched from the control
+	// plane. Content-addressed by commit, so it is disposable: deleting it
+	// costs a re-download and nothing else (D25).
+	CacheDir string
+
 	Client *Client
 	Logger *slog.Logger
 }
@@ -98,6 +103,13 @@ func New(opts Options) (*Worker, error) {
 	if opts.Logger == nil {
 		opts.Logger = slog.New(slog.NewTextHandler(os.Stderr, nil))
 	}
+	if opts.CacheDir == "" {
+		// Beside the jobs directory rather than in it: fetched trees are not
+		// definitions this machine owns, and `je demo --remove` should never
+		// be able to reach them.
+		opts.CacheDir = filepath.Join(filepath.Dir(opts.JobsDir), "cache")
+	}
+
 	return &Worker{
 		opts:    opts,
 		log:     opts.Logger,
@@ -289,7 +301,12 @@ func (w *Worker) execute(ctx context.Context, d engine.Dispatch) {
 		"JOB_EVENTS_FILE="+ch.events,
 	)
 
-	workdir, err := w.resolveWorkdir(d.Workdir, d.SourceRoot)
+	root, err := w.sourceRoot(ctx, d)
+	if err != nil {
+		w.report(ctx, d, engine.Completion{ExecError: err.Error()})
+		return
+	}
+	workdir, err := w.resolveWorkdir(d.Workdir, root)
 	if err != nil {
 		w.report(ctx, d, engine.Completion{ExecError: err.Error()})
 		return

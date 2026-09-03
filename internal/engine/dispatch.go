@@ -94,9 +94,19 @@ type Dispatch struct {
 	// "beside the definition" means beside it *in its own repository*.
 	//
 	// Unresolved, like Workdir: it is a path on the control plane, and whether
-	// this worker can see it is a question only the worker can answer. It says
-	// so rather than guessing when it cannot.
+	// this worker can see it is a question only the worker can answer. A worker
+	// sharing the control plane's disk uses it directly.
 	SourceRoot string `json:"source_root,omitempty"`
+
+	// SourceName and SourceRevision identify a fetchable tree, for a worker that
+	// cannot see SourceRoot because it is on another machine.
+	//
+	// Set only for sources that have a commit to pin. That is what makes the
+	// tree immutable and the fetch cacheable, and it is why a `dir` source
+	// carries neither: it has no revision, so a remote worker still gets the
+	// honest refusal rather than an invented one (D25).
+	SourceName     string `json:"source_name,omitempty"`
+	SourceRevision string `json:"source_revision,omitempty"`
 
 	// Env is the complete environment minus the four values the worker can
 	// only know locally: JOB_WORKDIR and the three output channel paths (D6).
@@ -297,7 +307,7 @@ func (e *Engine) dispatchFor(ctx context.Context, p Prepared, worker store.Worke
 	// Where this job's code lives, which is a fact about its source rather than
 	// about this worker (D22). Absent for the built-in local source, whose root
 	// is the jobs directory the worker already knows.
-	var sourceRoot string
+	var sourceRoot, sourceName, sourceRevision string
 	if p.Job.Source != "" && p.Job.Source != store.LocalSource {
 		src, err := e.store.SourceByName(ctx, p.Job.Source)
 		if err != nil {
@@ -307,22 +317,32 @@ func (e *Engine) dispatchFor(ctx context.Context, p Prepared, worker store.Worke
 		// commit a fetched source is serving. Empty means the source has never
 		// been fetched, which the worker reports rather than guessing at.
 		sourceRoot = e.SourceDir(src)
+
+		// A pinned revision is fetchable, so a worker that cannot see the path
+		// above has somewhere to go (D25). A dir source deliberately carries
+		// neither: there is no commit, and inventing one would turn an honest
+		// refusal into a wrong answer.
+		if src.Kind == store.SourceKindGitHub && src.Revision != "" {
+			sourceName, sourceRevision = src.Name, src.Revision
+		}
 	}
 
 	e.log.Info("dispatched",
 		"job", p.Job.Slug, "run", p.Run.ID, "attempt", attempt.Number, "worker", worker.Name)
 
 	return &Dispatch{
-		RunID:      p.Run.ID,
-		Attempt:    attempt.Number,
-		JobSlug:    p.Job.Slug,
-		Command:    p.Def.Command,
-		Workdir:    p.Def.Workdir,
-		SourceRoot: sourceRoot,
-		Env:        env,
-		Timeout:    p.Def.Timeout.D,
-		Grace:      executor.DefaultGrace,
-		Lease:      LeaseTTL,
+		RunID:          p.Run.ID,
+		Attempt:        attempt.Number,
+		JobSlug:        p.Job.Slug,
+		Command:        p.Def.Command,
+		Workdir:        p.Def.Workdir,
+		SourceRoot:     sourceRoot,
+		SourceName:     sourceName,
+		SourceRevision: sourceRevision,
+		Env:            env,
+		Timeout:        p.Def.Timeout.D,
+		Grace:          executor.DefaultGrace,
+		Lease:          LeaseTTL,
 	}, nil
 }
 

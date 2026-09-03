@@ -128,6 +128,7 @@ func runWorker(ctx context.Context, env *Env, args []string) error {
 		Labels:      splitLabels(*labels),
 		Concurrency: *concurrency,
 		JobsDir:     env.Layout.Jobs,
+		CacheDir:    env.Layout.Data,
 		Version:     env.Version,
 		Client:      client,
 		Logger:      logger,

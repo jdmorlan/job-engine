@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
+	path0 "path"
 	"path/filepath"
 	"strings"
 )
@@ -164,4 +166,75 @@ func safeJoin(dest, rel string) (string, error) {
 		return "", fmt.Errorf("the archive contains a path that escapes its directory: %s", rel)
 	}
 	return target, nil
+}
+
+// Tar writes dir as a gzipped tarball, wrapped in a single top-level directory
+// named root.
+//
+// The inverse of Extract, and here rather than in a package of its own because
+// the two have to agree about a format, and a format agreed across a package
+// boundary is one that drifts.
+//
+// The wrapper is not decoration: GitHub wraps its tarballs the same way and
+// Extract strips exactly one leading component. Writing the wrapper means a
+// tree served by the control plane and a tree downloaded from GitHub unpack
+// through the same code, with the same path-escape rules, rather than through a
+// second extractor that has to re-derive them (D25).
+//
+// Only regular files and directories are written, matching what Extract will
+// accept: a symlink that could not survive the round trip is left out here
+// rather than discovered as a silent absence there.
+func Tar(dir, root string, w io.Writer) error {
+	gz := gzip.NewWriter(w)
+	defer gz.Close()
+	tw := tar.NewWriter(gz)
+
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		if !d.Type().IsRegular() && !d.IsDir() {
+			return nil // symlinks and devices, as above
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		header, err := tar.FileInfoHeader(info, "")
+		if err != nil {
+			return err
+		}
+		header.Name = path0.Join(root, filepath.ToSlash(rel))
+		if d.IsDir() {
+			header.Name += "/"
+		}
+		if err := tw.WriteHeader(header); err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		f, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		_, err = io.Copy(tw, f)
+		return err
+	})
+	if err != nil {
+		tw.Close()
+		return err
+	}
+	if err := tw.Close(); err != nil {
+		return err
+	}
+	return gz.Close()
 }

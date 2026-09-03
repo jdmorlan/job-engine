@@ -201,6 +201,7 @@ architecture), **D16** (daemon lifecycle and generic event ingress).
 | D22 | Job sources | **NEW (v0.5) — two open questions** |
 | D23 | The web client | **NEW (v0.7) — agreed, phase 1 shipped** |
 | D24 | Worker version coherence | **NEW (v0.7) — phase 1 shipped, C10 enforced** |
+| D25 | Secrets that travel with definitions | **NEW (v0.7) — step 1 shipped, 2 questions open** |
 | N1 | Non-goals | AGREED |
 | N2 | v1 done | AGREED |
 | Q1 | Storage adapters | AGREED — SQLite only, no adapter |
@@ -3011,6 +3012,182 @@ restarting into the same wall.
 The refusal publishes `worker.refused`, deduped on the worker and both versions,
 so a worker with four pull slots polling every few seconds produces exactly one
 event for the situation and a new one only when a version actually changes.
+
+**Your response:**
+
+```
+
+```
+
+---
+
+### D25. Secrets that travel with definitions — NEW
+
+**Status:** NEW (v0.7) — agreed in shape; step 1 shipped, steps 2-4 open
+
+**Your observation:**
+
+> *"For secrets I've been thinking about this concept of a vault that can be
+> passed around... why couldn't the job definitions/code repo have the secrets it
+> needs encrypted in it, something like SOPS... I'm wondering if we can utilize
+> step-ca for key management and identity."*
+
+**Adopted in shape.** Both halves aim at the same weakness, and pulling on them
+found a bug underneath that matters more than either.
+
+#### The bug this starts from
+
+**A worker cannot see a git source's code.** `Dispatch.SourceRoot` is a path on
+the *control plane*; the worker stats it and fails:
+
+```
+this job's code is in /var/lib/je/sources/a3f81c2, which this worker cannot see
+```
+
+That sentence is honest, and D20 is right that only the worker can answer where a
+path resolves. But the consequence has not been written down anywhere: **D20 and
+D22 do not compose.** Remote workers exist, git sources exist, and a job from a
+repository cannot run on a worker that is not the control plane's own machine.
+Two headline capabilities that do not work together, with nothing in the docs
+saying so.
+
+Secrets are the second beneficiary of fixing this. The first is that the feature
+pair starts working at all.
+
+#### The worker fetches the tree, not the repository
+
+The obvious reading of your idea is that the worker reaches git. It should not.
+The control plane already fetched that tree and cached it content-addressed by
+commit at `Layout.SourceTree(source, revision)`; the worker should fetch **from
+the control plane**, and the reasons are not stylistic:
+
+- **No bootstrap problem.** A worker pulling a private repo needs a repository
+  credential — a secret, in order to get secrets. Distributing tokens to every
+  machine is precisely the thing this item exists to stop doing.
+- **D22's token story survives.** Exactly one component talks to GitHub, which was
+  deliberate. Nothing about `TokenSecret` changes.
+- **D11 gets stronger.** The worker runs the revision the control plane
+  *recorded*, rather than resolving a ref itself and possibly getting a different
+  commit. "What ran?" stays answerable.
+- It is an endpoint, not a subsystem. The bytes are already on disk, already
+  pinned, already immutable.
+
+**Local `dir` sources keep today's behaviour.** A directory source is inherently
+local — it is D22's scratch loop — so a remote worker asking for one still gets
+the honest error above. Shipping it would require inventing a revision for a
+directory that has none, and the sentence is correct as it stands.
+
+#### Secrets ride along
+
+Once the worker receives the tree, the encrypted secrets file is *in* it. The
+control plane serves ciphertext and never needs the key; the worker decrypts what
+it was sent. That is the property worth having, and it arrives without the worker
+touching git at all:
+
+> **The control plane stops being a secret custodian.**
+
+A stolen `state.db` yields nothing. Which machines can read which secrets becomes
+a fact recorded in a repository rather than a state nobody can enumerate.
+
+This also closes a portability gap D22 left open and did not name: definitions and
+code travel, and secrets do not. Register the weather repo on a second control
+plane today and every secret is re-entered by hand.
+
+**D10's best property survives, which is the part I expected to lose.** SOPS
+encrypts values and leaves structure in cleartext, so the control plane can verify
+that `GITHUB_TOKEN` exists in the file *without holding any key*. A missing secret
+stays a definition error at load time rather than a cryptic exit code at 3am,
+which was D10's whole point.
+
+#### step-ca: identity yes, key management no
+
+There is an impedance mismatch to name before anything is built on it: **SOPS
+recipients are age, PGP or KMS — not X.509.** A certificate authority cannot be
+the keyring, however it is embedded. So the division of labour is:
+
+| Concern | Owner |
+|---|---|
+| Who is this worker? | the CA — mTLS, and `je worker join` is already a one-time-token enrollment moment in disguise |
+| Encrypting secret values | age — the worker holds a keypair |
+| Which identity owns which age key | the control plane, as the registry that binds the two |
+
+That third row is the interesting one, because of where it lands: **adding a
+worker as a recipient becomes a reviewed commit** in D23's pull-request flow.
+"This machine may now read production credentials" turns into a diff a human
+approves, rather than a configuration change nobody ever sees. The two items were
+designed independently and this is the first place they compound.
+
+**This weakens the case for embedding step-ca**, and the item should say so rather
+than leave the earlier enthusiasm standing. If it is not doing key management,
+what remains is issuance and renewal for a PKI that is degenerate by construction:
+one CA, one level, no chain, no cross-signing, and no revocation problem because
+certificates live hours. `crypto/x509` covers that. The middle path worth
+evaluating is smallstep's Go *libraries* for the primitives — same well-tested
+code, no second service, single binary intact — rather than running their server
+or shelling out to their CLI. Worth evaluating rather than assuming: what those
+packages actually offer needs checking before anything depends on them.
+
+Your framing is the one that keeps this honest and is adopted as the scope rule:
+
+> *"We aren't trying to solve PKI for every app out there — we just want an
+> encapsulated version of it for our system."*
+
+The moment workers want certificates for *their own* services, this is the wrong
+tool and step-ca is the right one. That is not this.
+
+#### What this breaks
+
+**Redaction has to move to the worker.** D10 redacts secret values from log lines
+*on write*, at the control plane, which requires knowing the values. A control
+plane that cannot decrypt cannot redact. The worker holds the plaintext and
+produces the lines, so redaction belongs there — arguably where it always
+belonged, since it means a secret is scrubbed before it crosses a network rather
+than after. But it is a real relocation of a D10 guarantee and is decided here
+rather than discovered later.
+
+#### What this is not
+
+N1 keeps multi-user, auth and RBAC out. This is **machine identity**: one
+component of the system authenticating itself to another, which C1 and C10 already
+do crudely by name and version. It says nothing about people, permissions or
+roles, and it is not a precedent for any of them.
+
+#### Sequencing
+
+1. **The worker fetches source trees from the control plane. Shipped.**
+   `GET /v1/sources/{name}/tree/{revision}` serves a pinned tree; a worker that
+   cannot see the dispatched `SourceRoot` fetches it once, keyed by commit, and a
+   worker that *can* see it uses it directly so the single-machine case is
+   unchanged. The tarball is wrapped the way GitHub wraps one, so it unpacks
+   through the same extractor with the same path-escape rules -- the control
+   plane is not a more trusted source of archive entries than GitHub is. Needed
+   no cryptography, and fixes the composition bug on its own.
+2. **mTLS and real worker identity.** Today a worker is whatever name it claims —
+   `workerID(name)` is `"worker-" + name` — and `ErrLabelTaken` only refuses a
+   second claimant while the first is online. This makes the trust model honest
+   instead of assumed, and it is the floor for step 4.
+3. **Encrypted secrets in the repository, control plane holding the key.** Closes
+   the portability gap; the control plane is still a custodian.
+4. **Workers as recipients.** The control plane stops being one. Needs 1–3.
+
+#### Open questions for you
+
+1. **Is the control plane holding the key (step 3) a resting place or a waypoint?**
+   If it is a resting place, step 3 is the destination and step 4 is optional
+   polish. If it is a waypoint, step 3 should be built so that the key location is
+   a strategy from the start rather than an assumption to unpick later. I lean
+   waypoint — "the control plane cannot read your secrets" is the sentence worth
+   being able to say — but it costs a little structure up front and you may
+   reasonably want the simpler thing that works.
+
+2. **Full SOPS format, or plain `age`?** SOPS costs a real dependency and gets
+   format compatibility: the `sops` CLI edits the files, and it is a format people
+   already know and can adopt without learning ours. Plain `age` is a much smaller
+   dependency and means our own file format, our own editing command, and nobody
+   else's tooling. Given D22 already decided a repository should be portable and
+   legible on its own, I lean **SOPS format** — but it is the larger commitment of
+   the two and the dependency conversation from D23 is fresh enough to be worth
+   repeating.
 
 **Your response:**
 

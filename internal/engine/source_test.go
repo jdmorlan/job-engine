@@ -287,6 +287,46 @@ func githubStub(t *testing.T, sha string, files map[string]string) *httptest.Ser
 	}))
 }
 
+// The control plane has to be able to hand a pinned tree to a worker that
+// cannot see its disk, and to refuse the two cases that have no tree to give
+// (D25).
+func TestAPinnedTreeIsServableAndAnythingElseIsRefused(t *testing.T) {
+	ctx := context.Background()
+	e, _ := chainFixture(t, nil, nil)
+
+	const sha = "a3f81c2ffffffffffffffffffffffffffffffffff"
+	server := githubStub(t, sha, map[string]string{
+		"ingest.yaml": "command: [\"/bin/sh\", \"-c\", \"true\"]\n",
+	})
+	defer server.Close()
+	engine.SetGitHubBaseURLForTest(e, server.URL)
+
+	if _, err := e.AddSource(ctx, store.Source{
+		Name: "weather", Kind: store.SourceKindGitHub, Location: "you/jobs",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	dir, err := e.SourceTreeDir(ctx, "weather", sha)
+	if err != nil {
+		t.Fatalf("a fetched revision was not servable: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "ingest.yaml")); err != nil {
+		t.Errorf("the served directory is not the tree: %v", err)
+	}
+
+	// A revision this control plane never fetched. Saying so beats serving an
+	// empty archive that fails as "command not found" on the other machine.
+	if _, err := e.SourceTreeDir(ctx, "weather", "0000000000000000000000000000000000000000"); err == nil {
+		t.Error("a revision that was never fetched was served anyway")
+	}
+
+	// The built-in local source has no commit, so there is nothing to pin.
+	if _, err := e.SourceTreeDir(ctx, store.LocalSource, sha); err == nil {
+		t.Error("a dir source was served as though it had a revision")
+	}
+}
+
 func TestAFetchedSourceRunsItsOwnCodeAndRecordsTheCommit(t *testing.T) {
 	ctx := context.Background()
 	e, layout := chainFixture(t, nil, nil)
