@@ -46,22 +46,10 @@ type Client struct {
 }
 
 // Connect locates the control plane for a data directory.
-//
-// Resolution order: the JE_ADDR environment variable, then the runtime file
-// the control plane publishes on start. There is no default fallback: guessing
-// the default port and then failing to connect produces a worse error message
-// than noticing there is no runtime file at all.
 func Connect(l paths.Layout) (*Client, error) {
-	addr := os.Getenv("JE_ADDR")
-	if addr == "" {
-		info, err := daemon.ReadRuntime(l.Runtime())
-		switch {
-		case os.IsNotExist(err):
-			return nil, fmt.Errorf("%w for %s", ErrNoControlPlane, l.Data)
-		case err != nil:
-			return nil, err
-		}
-		addr = info.Address
+	addr, err := resolveAddr(l)
+	if err != nil {
+		return nil, err
 	}
 
 	base, err := url.Parse("http://" + addr)
@@ -74,6 +62,43 @@ func Connect(l paths.Layout) (*Client, error) {
 		// deadlines belong on the context the caller passes.
 		http: &http.Client{},
 	}, nil
+}
+
+// resolveAddr finds the control plane, in the order that puts the most
+// authoritative answer first.
+//
+//  1. JE_ADDR, because an explicit override should always win.
+//  2. The runtime file, which a live local control plane wrote about itself
+//     after binding -- so it is right even when the port was 0.
+//  3. The endpoint file, which `je control-plane install` wrote when it set one
+//     up somewhere the runtime file cannot reach us from: a container writes
+//     its runtime file inside its own volume, and the host never sees it.
+//
+// There is still no guessing at the default port. A wrong guess produces a
+// connection error that says nothing about the real problem, which is worse
+// than saying plainly that we do not know where it is.
+func resolveAddr(l paths.Layout) (string, error) {
+	if addr := os.Getenv("JE_ADDR"); addr != "" {
+		return addr, nil
+	}
+
+	info, err := daemon.ReadRuntime(l.Runtime())
+	switch {
+	case err == nil:
+		return info.Address, nil
+	case !os.IsNotExist(err):
+		return "", err
+	}
+
+	endpoint, err := ReadEndpoint(l.Endpoint())
+	switch {
+	case err == nil && endpoint.Address != "":
+		return endpoint.Address, nil
+	case err != nil && !os.IsNotExist(err):
+		return "", err
+	}
+
+	return "", fmt.Errorf("%w for %s", ErrNoControlPlane, l.Data)
 }
 
 func (c *Client) Health(ctx context.Context) (engine.Health, error) {

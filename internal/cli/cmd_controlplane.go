@@ -60,7 +60,7 @@ func runControlPlane(ctx context.Context, env *Env, args []string) error {
 			docker: *useDocker, native: *native, printOnly: *printOnly,
 		})
 	case "status":
-		return componentStatus(env, service.ControlPlane)
+		return componentStatus(ctx, env, service.ControlPlane)
 	case "remove":
 		return removeComponent(ctx, env, service.ControlPlane)
 	default:
@@ -119,7 +119,9 @@ func installControlPlane(ctx context.Context, env *Env, addr string, mode instal
 				return err
 			}
 		}
-		return runDockerInstall(ctx, env, spec, mode, verify, next)
+		// The published address, which is how this host reaches it. Inside the
+		// container it binds 0.0.0.0, and that address is meaningless here.
+		return runDockerInstall(ctx, env, spec, mode, verify, next, addr)
 	}
 
 	return installComponent(ctx, env, installPlan{

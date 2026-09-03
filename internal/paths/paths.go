@@ -71,6 +71,20 @@ func (l Layout) Lock() string { return filepath.Join(l.Data, "lock") }
 // removed on clean shutdown; a stale file is a symptom, not an error.
 func (l Layout) Runtime() string { return filepath.Join(l.Data, "daemon.json") }
 
+// Endpoint records where the control plane for this data directory is, when
+// the control plane cannot say so itself.
+//
+// The runtime file above is written by a daemon into its own data directory,
+// which stops working the moment the control plane is a container: it writes
+// /var/lib/je/daemon.json inside its volume, and a CLI on the host sees
+// nothing. The container is running and every command reports that nothing is.
+//
+// So the thing that set it up writes down where it put it. That is the same
+// principle as generating the unit file rather than documenting it, and it is
+// the file `--context` will grow out of when a control plane can be on another
+// machine entirely (D19/R2).
+func (l Layout) Endpoint() string { return filepath.Join(l.Data, "endpoint.json") }
+
 // Chains is where chain files live -- one flow per file, filename is the
 // chain name (D17).
 func (l Layout) Chains() string { return filepath.Join(l.Jobs, "chains") }

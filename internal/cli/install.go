@@ -105,8 +105,24 @@ func installComponent(ctx context.Context, env *Env, plan installPlan) error {
 	return nil
 }
 
-// componentStatus renders what the OS thinks of one component.
-func componentStatus(env *Env, c service.Component) error {
+// componentStatus renders how one component is set up here.
+//
+// It looks for both shapes, because reporting "not registered" while a
+// container of that name is running would be a confident lie -- and the whole
+// argument for these commands is that a deployment should be legible.
+func componentStatus(ctx context.Context, env *Env, c service.Component) error {
+	tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
+
+	if containerExists(ctx, string(c)) {
+		fmt.Fprintf(tw, "%s\trunning as a container\n", c)
+		fmt.Fprintf(tw, "container\t%s\n", containerName(string(c)))
+		if endpoint, err := ReadEndpoint(env.Layout.Endpoint()); err == nil && endpoint.Address != "" {
+			fmt.Fprintf(tw, "reachable at\t%s\n", endpoint.Address)
+		}
+		fmt.Fprintf(tw, "logs\tdocker logs -f %s\n", containerName(string(c)))
+		return tw.Flush()
+	}
+
 	mgr, err := service.New(c)
 	if err != nil {
 		return err
@@ -116,13 +132,12 @@ func componentStatus(env *Env, c service.Component) error {
 		return err
 	}
 
-	tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
 	if !state.Installed {
-		fmt.Fprintf(tw, "%s\tnot registered\n", c)
+		fmt.Fprintf(tw, "%s\tnot set up here\n", c)
 		if err := tw.Flush(); err != nil {
 			return err
 		}
-		fmt.Fprintf(env.Stdout, "\nRegister it:  je %s %s\n", c, registerVerb(c))
+		fmt.Fprintf(env.Stdout, "\nSet it up:  je %s %s\n", c, registerVerb(c))
 		return nil
 	}
 	fmt.Fprintf(tw, "%s\tregistered with %s\n", c, mgr.Name())
@@ -152,6 +167,15 @@ func removeComponent(ctx context.Context, env *Env, c service.Component) error {
 		return err
 	} else if stopped {
 		removed = append(removed, "container "+containerName(string(c)))
+	}
+
+	// A recorded endpoint outliving the thing it points at would make every
+	// later command fail against an address with nothing behind it, which
+	// reads as "broken" rather than "not set up".
+	if c == service.ControlPlane {
+		if err := RemoveEndpoint(env.Layout.Endpoint()); err != nil {
+			return err
+		}
 	}
 
 	mgr, err := service.New(c)
@@ -300,7 +324,9 @@ func joinWorker(ctx context.Context, env *Env, j workerJoin) error {
 			env:     []string{"TZ=" + localTimezone()},
 			network: network,
 		}
-		return runDockerInstall(ctx, env, spec, j.mode, verify, next)
+		// A worker records nothing: it holds no state (C2), and clients talk to
+		// the control plane, never to it.
+		return runDockerInstall(ctx, env, spec, j.mode, verify, next, "")
 	}
 
 	return installComponent(ctx, env, installPlan{
@@ -397,9 +423,13 @@ func chooseMode(env *Env, mode installMode) (modeKind, error) {
 }
 
 // runDockerInstall starts a component as a container and verifies it.
+//
+// endpoint, when set, is where clients on this host will reach it. It is
+// recorded before verification, because verification itself goes through the
+// same lookup -- a control plane we cannot find is one we cannot check.
 func runDockerInstall(
 	ctx context.Context, env *Env, spec dockerSpec, mode installMode,
-	verify func(context.Context) error, nextStep string,
+	verify func(context.Context) error, nextStep string, endpoint string,
 ) error {
 	// --print exists so this is auditable rather than magic. Everything the
 	// CLI does here you could have typed, and being able to read it is what
@@ -414,10 +444,21 @@ func runDockerInstall(
 		return err
 	}
 
+	if endpoint != "" {
+		if err := WriteEndpoint(env.Layout.Endpoint(), Endpoint{
+			Address: endpoint, Kind: "docker",
+		}); err != nil {
+			return err
+		}
+	}
+
 	tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintf(tw, "started\t%s as a container\n", spec.component)
 	fmt.Fprintf(tw, "container\t%s\n", containerName(spec.component))
 	fmt.Fprintf(tw, "image\t%s\n", spec.image)
+	if endpoint != "" {
+		fmt.Fprintf(tw, "reachable at\t%s\n", endpoint)
+	}
 	fmt.Fprintf(tw, "logs\tdocker logs -f %s\n", containerName(spec.component))
 	if err := tw.Flush(); err != nil {
 		return err

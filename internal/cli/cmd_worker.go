@@ -72,7 +72,7 @@ func runWorker(ctx context.Context, env *Env, args []string) error {
 		if len(positional) != 1 {
 			return usagef("unexpected argument %q", positional[1])
 		}
-		return componentStatus(env, service.Worker)
+		return componentStatus(ctx, env, service.Worker)
 	case "remove":
 		if len(positional) != 1 {
 			return usagef("unexpected argument %q", positional[1])
@@ -184,15 +184,13 @@ func runWorkers(ctx context.Context, env *Env, args []string) error {
 }
 
 // controlPlaneAddr resolves where the control plane is listening.
+//
+// Deliberately the same resolution every other command uses. It had its own
+// copy, which knew about the runtime file and not the endpoint file -- so a
+// worker could not find a containerised control plane that `je status` had no
+// trouble with. Two lookups for one question is how they end up disagreeing.
 func controlPlaneAddr(env *Env) (string, error) {
-	if addr := os.Getenv("JE_ADDR"); addr != "" {
-		return addr, nil
-	}
-	info, err := daemon.ReadRuntime(env.Layout.Runtime())
-	if err != nil {
-		return "", err
-	}
-	return info.Address, nil
+	return resolveAddr(env.Layout)
 }
 
 // defaultWorkerName is the machine's name, which is what a person calls it.
