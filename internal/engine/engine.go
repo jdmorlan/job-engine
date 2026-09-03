@@ -66,6 +66,13 @@ type Engine struct {
 	inflightMu sync.Mutex
 	inflight   map[int64]*inflight
 
+	// routes is the compiled trigger table, keyed by event type (D17). It is
+	// held in memory because every recorded event is offered to it and it
+	// changes only on load, so the common case -- an event nothing listens for
+	// -- costs one map lookup rather than a query.
+	routesMu sync.RWMutex
+	routes   map[string][]compiledRoute
+
 	// scheduleReloads carries a request from Sync to a running scheduler, and
 	// a channel to answer on. Unbuffered on purpose: a send that finds nobody
 	// listening means no scheduler is running, which Sync needs to be able to
@@ -163,7 +170,15 @@ func (e *Engine) Start(ctx context.Context) error {
 		return fmt.Errorf("reading last stop event: %w", err)
 	}
 
-	if _, _, err := e.store.AppendEvent(ctx, model.Event{
+	// The route table before the first event, so a chain that starts from
+	// engine.started is wired by the time the engine says it started. Routes
+	// live in the database, so this is the table the last load left behind --
+	// the engine comes up wired exactly as it went down.
+	if err := e.reloadRoutes(ctx); err != nil {
+		return err
+	}
+
+	if _, _, err := e.publish(ctx, model.Event{
 		Type:      model.EventEngineStarted,
 		Source:    model.SourceEngine,
 		CreatedAt: e.startedAt,
@@ -194,6 +209,9 @@ func (e *Engine) Start(ctx context.Context) error {
 // leave exactly the hole in the timeline this event exists to prevent.
 func (e *Engine) Close(ctx context.Context) error {
 	if e.started {
+		// Appended rather than published. Routing on the way down would queue
+		// work for an engine that is closing its database two lines later, and
+		// a run that exists only to be interrupted is worse than no run.
 		if _, _, err := e.store.AppendEvent(ctx, model.Event{
 			Type:      model.EventEngineStopped,
 			Source:    model.SourceEngine,
@@ -226,7 +244,7 @@ func (e *Engine) Emit(ctx context.Context, ev model.Event) (out model.Event, ded
 	if ev.CreatedAt.IsZero() {
 		ev.CreatedAt = e.now()
 	}
-	return e.store.AppendEvent(ctx, ev)
+	return e.publish(ctx, ev)
 }
 
 // RecentEvents returns the newest events, most recent first.

@@ -167,12 +167,18 @@ engine should do quietly.
 
 ```console
 $ ./je demo
-wrote 7 files to /Users/you/.je/jobs
+wrote 12 files to /Users/you/.je/jobs
 
   demo-hello    prints a line and exits           the smallest job that exists
   demo-counter  keeps a cursor and advances it    what other schedulers leave to you
   demo-flaky    fails about one run in three      watch the cursor NOT move
   demo-tick     runs every minute                 gives the scheduler something to do
+  demo-ingest   emits an event when it finishes   the start of a chain
+  demo-report   runs because that event happened  no clock, no polling
+  demo-archive  runs after the report succeeds    and not at all if it doesn't
+
+and one chain, which runs nothing itself:
+  chains/demo-pipeline.yaml  wires the three above into one named flow
 ```
 
 They are ordinary files. Read them, change them, break them, `je demo --remove`
@@ -209,10 +215,11 @@ That is the entire pitch, and it is four commands.
 
 ## Status
 
-Early, but it runs jobs on a schedule, unattended.
+Early, but it runs jobs on a schedule, unattended, and runs them off each
+other's events.
 
 ```
-je demo           write four example jobs and a tour
+je demo           write a handful of example jobs, a chain, and a tour
 je upgrade        install the latest release, checksum-verified
 je quickstart     a control plane and a worker, in this terminal
 je control-plane run    the control plane: schedules, history, the API
@@ -226,6 +233,8 @@ je runs           recent runs
 je logs <run>     what a run printed
 je state get|history <job>    the cursor, and how it has moved
 je events         the raw timeline with causation
+je chains         the flows, and how each one's last pass went
+je chain <name>   every step of one flow, and its end-to-end duration
 je secret set|list|rm         values jobs declare and the engine injects
 je status         is the control plane up, and how long was it down
 je emit <type>    put an event into the engine (D16's single ingress)
@@ -346,6 +355,70 @@ Also set: `JOB_ID`, `RUN_ID`, `ATTEMPT`, `TRIGGERED_BY`, `EVENT_PAYLOAD`,
 except `PATH`, `HOME`, `TZ` and a few other essentials — a job does not inherit
 credentials by accident (D10).
 
+### Chains
+
+A job never names another job. What happens after what lives in one file per
+flow, and the file's name is the chain's name.
+
+```yaml
+# jobs/chains/daily-weather.yaml
+description: ingest readings, normalise them, roll them up
+
+steps:
+  - on: { event: weather.ingested }
+    run: normalize-readings
+
+  - on: { event: run.succeeded, where: { job: normalize-readings } }
+    run: daily-rollup
+```
+
+Two kinds of pattern, and they are the same mechanism. `weather.ingested` is an
+event a job emitted itself by appending a line to `JOB_EVENTS_FILE`; the engine
+emits `run.succeeded` about every run it finishes. `where` compares top-level
+fields of the payload for equality and does exactly nothing else — the moment
+that grows an expression language, we have written a workflow engine by
+accident.
+
+**A chain is a name, not a runtime entity.** There is no chain lock, no chain
+state machine, no "the chain is running". Each step fires as an ordinary
+trigger the instant its event lands. What the name buys is that a flow becomes
+something you can talk about:
+
+```console
+$ je chains
+CHAIN          STEPS  LAST     STATE
+daily-weather  2      4m ago   complete (2m 14s)
+photo-archive  2      3d ago   stopped at step 2: convert-photos failed
+
+$ je chain daily-weather
+daily-weather
+ingest readings, normalise them, roll them up
+chains/daily-weather.yaml
+
+  trigger  weather-ingest      run 11  succeeded in 12s     
+  step 1   normalize-readings  run 12  succeeded in 48s     on weather.ingested
+  step 2   daily-rollup        run 13  succeeded in 1m14s   on run.succeeded job=normalize-readings
+
+complete, 2m14.2s end to end
+```
+
+**End-to-end duration and end-to-end failure are only expressible because the
+flow has a name.** "The chain takes 40 minutes now, it used to take 5" is not a
+question any job-level view can answer. Nothing here is stored: the view walks
+the causation the engine already records — a run points at the event that caused
+it, and that event points at the run that emitted it — so there is no chain
+state to maintain, and nothing to go stale.
+
+When a step fails, downstream steps do not run, and there is no cancellation
+involved: the event they were waiting for simply never happens. `je chain` says
+where it stopped and exits 3.
+
+Two things are refused when the file is saved, because both are silent at
+runtime. A step naming a job that does not exist is a load error rather than a
+rule that never fires. And a cycle — `a` triggering `b` triggering `a` — is
+rejected with the loop printed, rather than discovered later by the causation
+depth guard after ten runs of the wrong thing.
+
 ### Secrets
 
 Declared per job, injected per job, never printed.
@@ -369,8 +442,15 @@ the log file later cannot leak them. There is no `je secret get`.
 
 ### Not built yet
 
-Retries, chains, job sources (D22), container executor, the TypeScript shim
-(D21), and retention.
+Retries, job sources (D22), container executor, the TypeScript shim (D21),
+and retention.
+
+**Fan-in is not built.** A step waits on one condition. `all_of` with a window
+(D3) — "when both of these landed, within six hours" — parses and is refused
+with a message saying so, rather than being an unknown key. The `trigger_state`
+table it needs is already in the schema, so it is a feature and not a
+migration. The same goes for `trigger.expired`, the "the thing I was waiting
+for never came" event, which is where the alerting story starts.
 
 **Definitions are reloaded on request, not watched.** `je sync` re-reads the
 source and rebuilds the schedule table, so an edit takes effect without dropping
@@ -431,5 +511,6 @@ image, in a cluster, and inside a Mac app (D18).
   lock            the single-writer flock
   secrets.json    the local secret store, mode 0600 (D10)
   daemon.json     the control plane's address, so clients can find it
-  jobs/           job and chain definitions (override with JE_JOBS_DIR)
+  jobs/           job definitions (override with JE_JOBS_DIR)
+    chains/       chain files, one flow per file
 ```

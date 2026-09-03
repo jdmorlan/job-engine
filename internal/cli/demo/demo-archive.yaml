@@ -1,0 +1,7 @@
+name: Archive
+description: >
+  The last step. It is wired to demo-report *succeeding*, so a failure earlier
+  in the chain means this simply never runs -- no cancellation, nothing to
+  clean up, and `je chain demo-pipeline` says where it stopped.
+
+command: ["/bin/sh", "-c", "echo 'archived.'"]

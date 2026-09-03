@@ -263,6 +263,19 @@ func (c *Client) Waiting(ctx context.Context) (engine.Waiting, error) {
 	return do[engine.Waiting](ctx, c, http.MethodGet, "/v1/waiting", nil)
 }
 
+type chainList struct {
+	Chains []engine.ChainView `json:"chains"`
+}
+
+func (c *Client) Chains(ctx context.Context) ([]engine.ChainView, error) {
+	list, err := do[chainList](ctx, c, http.MethodGet, "/v1/chains", nil)
+	return list.Chains, err
+}
+
+func (c *Client) Chain(ctx context.Context, name string) (engine.ChainView, error) {
+	return do[engine.ChainView](ctx, c, http.MethodGet, "/v1/chains/"+url.PathEscape(name), nil)
+}
+
 // The secret side of the client (D10).
 //
 // `je secret` reaches the store only through these. It used to call

@@ -37,6 +37,13 @@ type Source interface {
 type Snapshot struct {
 	Definitions []*Definition
 
+	// Chains are the flows wiring those jobs together (D17). They arrive in
+	// the same snapshot as the jobs deliberately: a chain names jobs, so
+	// resolving those names needs both halves of one consistent read, and
+	// loading them separately would open a window where a chain points at a
+	// job the engine has not seen yet.
+	Chains []*Chain
+
 	// Revision identifies the version of the whole set. Empty for a directory
 	// on disk; a commit SHA for a git source, which is what lets D11 point
 	// `je why` at the exact commit that defined the job that fired.
@@ -60,6 +67,13 @@ func (s FSSource) Describe() string {
 	}
 	return s.Root
 }
+
+// chainsDir is where chain files live, relative to the jobs root.
+//
+// A sibling directory rather than a subdirectory of jobs: a chain is a
+// different noun with a different name space, and a file under jobs/ that is
+// not a job would make the slug rule ("the file name is the job") a lie.
+const chainsDir = "chains"
 
 // Load reads every .yaml file in the root directory, non-recursively.
 //
@@ -124,7 +138,84 @@ func (s FSSource) Load(ctx context.Context) (Snapshot, error) {
 		}
 		snap.Definitions = append(snap.Definitions, def)
 	}
+
+	if err := s.loadChains(ctx, path.Join(root, chainsDir), &snap); err != nil {
+		return Snapshot{}, err
+	}
+	if err := snap.validate(); err != nil {
+		return Snapshot{}, err
+	}
 	return snap, nil
+}
+
+// loadChains reads <root>/chains/*.yaml. A missing directory is an empty set:
+// most repositories have jobs before they have flows.
+func (s FSSource) loadChains(ctx context.Context, dir string, snap *Snapshot) error {
+	entries, err := fs.ReadDir(s.FS, dir)
+	if err != nil {
+		if _, statErr := fs.Stat(s.FS, dir); statErr != nil {
+			return nil
+		}
+		return fmt.Errorf("reading %s: %w", dir, err)
+	}
+
+	var files []string
+	for _, e := range entries {
+		if !e.IsDir() && isYAML(e.Name()) {
+			files = append(files, e.Name())
+		}
+	}
+	sort.Strings(files)
+
+	seen := map[string]string{}
+	for _, name := range files {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		full := path.Join(dir, name)
+		body, err := fs.ReadFile(s.FS, full)
+		if err != nil {
+			return fmt.Errorf("reading %s: %w", full, err)
+		}
+
+		chainName := ChainNameFromPath(name)
+		if prev, dup := seen[chainName]; dup {
+			return fmt.Errorf("%s and %s are both chain %q", prev, full, chainName)
+		}
+		seen[chainName] = full
+
+		chain, err := ParseChain(full, chainName, body)
+		if err != nil {
+			// D19 again: one bad file rejects the whole load. A half-applied
+			// chain is wiring that exists in no commit.
+			return err
+		}
+		snap.Chains = append(snap.Chains, chain)
+	}
+	return nil
+}
+
+// validate checks the things only the whole set can answer.
+//
+// Both checks here are load-time on purpose. A chain step naming a job that
+// does not exist, or wiring a job back to itself, produces no error at all at
+// runtime -- it produces silence, or a loop, which are the two failure modes
+// this project exists to make impossible to reach quietly.
+func (s Snapshot) validate() error {
+	jobs := make(map[string]bool, len(s.Definitions))
+	for _, def := range s.Definitions {
+		jobs[def.Slug] = true
+	}
+	for _, chain := range s.Chains {
+		for i, step := range chain.Steps {
+			if !jobs[step.Run] {
+				return fmt.Errorf("%s: step %d: no job named %q -- "+
+					"a chain names jobs in its own source, and there is no %s.yaml",
+					chain.FilePath(), i+1, step.Run, step.Run)
+			}
+		}
+	}
+	return checkCycles(s.Chains)
 }
 
 func isYAML(name string) bool {

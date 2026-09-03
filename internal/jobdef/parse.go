@@ -145,3 +145,21 @@ func declaredLines(root *yaml.Node) map[string]int {
 	}
 	return lines
 }
+
+// decodeKnownFields decodes one YAML document, refusing unknown keys.
+//
+// Shared by jobs and chains because the reason is the same for both: without
+// KnownFields a misspelled key is silently ignored, and the file looks right
+// while the setting does nothing.
+func decodeKnownFields[T any](path string, body []byte) (T, error) {
+	var out T
+	if len(bytes.TrimSpace(body)) == 0 {
+		return out, fmt.Errorf("%s: file is empty", path)
+	}
+	dec := yaml.NewDecoder(bytes.NewReader(body))
+	dec.KnownFields(true)
+	if err := dec.Decode(&out); err != nil {
+		return out, fmt.Errorf("%s: %w", path, err)
+	}
+	return out, nil
+}

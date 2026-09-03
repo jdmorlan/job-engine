@@ -1,0 +1,6 @@
+name: Report
+description: >
+  Runs because demo-ingest emitted an event, not because a clock said so.
+  The event that triggered it arrives in EVENT_PAYLOAD.
+
+command: ["/bin/sh", "-c", "echo \"reporting on $EVENT_PAYLOAD (triggered by $TRIGGERED_BY)\""]

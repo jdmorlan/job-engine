@@ -17,7 +17,7 @@ var demoFiles embed.FS
 func init() {
 	register(&Command{
 		Name:  "demo",
-		Usage: "write four example jobs to get a feel for the engine",
+		Usage: "write a handful of example jobs and a chain, to get a feel for the engine",
 		Long: "Writes ordinary job files into your jobs directory -- nothing built into\n" +
 			"the binary, nothing special-cased. Read them, change them, break them,\n" +
 			"and delete them with --remove when you are done.\n\n" +
@@ -39,6 +39,18 @@ var demoJobs = []struct {
 	{"demo-counter", "keeps a cursor and advances it", "what other schedulers leave to you"},
 	{"demo-flaky", "fails about one run in three", "watch the cursor NOT move"},
 	{"demo-tick", "runs every minute", "gives the scheduler something to do"},
+	{"demo-ingest", "emits an event when it finishes", "the start of a chain"},
+	{"demo-report", "runs because that event happened", "no clock, no polling"},
+	{"demo-archive", "runs after the report succeeds", "and not at all if it doesn't"},
+}
+
+// demoChains is listed separately because a chain is a different noun: it runs
+// nothing itself, it says what runs after what.
+var demoChains = []struct {
+	name string
+	what string
+}{
+	{"demo-pipeline", "wires the three above into one named flow"},
 }
 
 func runDemo(ctx context.Context, env *Env, args []string) error {
@@ -83,6 +95,16 @@ func writeDemo(env *Env, force bool) error {
 	}
 	tw.Flush()
 
+	// Chains under their own heading rather than in the same table. A chain
+	// runs nothing itself, and a list that mixes the two would suggest it is
+	// just another job.
+	fmt.Fprintln(env.Stdout, "\nand one chain, which runs nothing itself:")
+	tw = tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
+	for _, c := range demoChains {
+		fmt.Fprintf(tw, "  chains/%s.yaml\t%s\n", c.name, c.what)
+	}
+	tw.Flush()
+
 	// The tour matters as much as the files. Somebody who just ran this does
 	// not yet know which command shows the thing the examples were written to
 	// show, and making them go looking is how onboarding fails.
@@ -110,6 +132,13 @@ Then, in another terminal, try this in order:
 Leave it alone for a couple of minutes, then:
 
   je runs demo-tick              the scheduler fired it without you
+
+Then the part other job engines do not have:
+
+  je run demo-ingest             one command, and watch what follows it
+  je chains                      the flows, and how the last pass went
+  je chain demo-pipeline         every step, and how long the whole thing took
+  je events                      the same story as raw events, with causation
 
 Remove all of it with: je demo --remove
 `)
@@ -190,8 +219,9 @@ func removeDemo(env *Env) error {
 		return err
 	}
 
-	// The scripts directory goes only if the demo emptied it.
+	// The scripts and chains directories go only if the demo emptied them.
 	_ = os.Remove(filepath.Join(env.Layout.Jobs, "scripts"))
+	_ = os.Remove(env.Layout.Chains())
 
 	fmt.Fprintf(env.Stdout, "removed %d example files from %s\n", removed, env.Layout.Jobs)
 	fmt.Fprintln(env.Stdout, "their run history and cursors are still there; `je runs` still works")

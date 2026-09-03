@@ -434,7 +434,7 @@ func (e *Engine) ExpireLeases(ctx context.Context) (int, error) {
 		payload, _ := json.Marshal(map[string]any{
 			"job": job.Slug, "run": run.ID, "worker": run.WorkerID,
 		})
-		if _, _, err := e.store.AppendEvent(ctx, model.Event{
+		if _, _, err := e.publish(ctx, model.Event{
 			Type:          EventRunLost,
 			Source:        model.SourceEngine,
 			Payload:       payload,
@@ -536,7 +536,7 @@ func (e *Engine) recordWorkerEvent(ctx context.Context, kind string, w store.Wor
 	payload, _ := json.Marshal(map[string]any{
 		"worker": w.Name, "labels": w.Labels, "reason": reason,
 	})
-	if _, _, err := e.store.AppendEvent(ctx, model.Event{
+	if _, _, err := e.publish(ctx, model.Event{
 		Type:      kind,
 		Source:    model.SourceEngine,
 		Payload:   payload,

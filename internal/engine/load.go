@@ -18,6 +18,13 @@ type LoadResult struct {
 	Source    string   `json:"source"`
 	Misconfig []string `json:"misconfigured,omitempty"` // parsed but cannot run (D10)
 
+	// Chains and Routes are the wiring half of the same load (D17). Reported
+	// separately from jobs because "12 jobs, 0 routes" is the shape of a repo
+	// whose chains directory was never copied, and that reads as fine
+	// everywhere else.
+	Chains int `json:"chains"`
+	Routes int `json:"routes"`
+
 	// SchedulesApplied reports whether a running scheduler rebuilt its table
 	// from these definitions.
 	//
@@ -44,6 +51,7 @@ func (e *Engine) Load(ctx context.Context, src jobdef.Source) (LoadResult, error
 
 	result := LoadResult{Revision: snap.Revision, Source: src.Describe()}
 	slugs := make([]string, 0, len(snap.Definitions))
+	jobIDs := make(map[string]int64, len(snap.Definitions))
 
 	for _, def := range snap.Definitions {
 		hash, err := def.Hash()
@@ -71,17 +79,19 @@ func (e *Engine) Load(ctx context.Context, src jobdef.Source) (LoadResult, error
 					strings.Join(missing, ", "), missing[0])
 			}
 		}
-		if _, err := e.store.UpsertJob(ctx, store.Job{
+		job, err := e.store.UpsertJob(ctx, store.Job{
 			Slug:           def.Slug,
 			DefinitionHash: hash,
 			Definition:     snapshot,
 			FilePath:       def.FilePath(),
 			Enabled:        def.Enabled,
 			ConfigError:    configErr,
-		}); err != nil {
+		})
+		if err != nil {
 			return LoadResult{}, err
 		}
 
+		jobIDs[def.Slug] = job.ID
 		slugs = append(slugs, def.Slug)
 		result.Loaded++
 		if configErr != "" {
@@ -97,10 +107,71 @@ func (e *Engine) Load(ctx context.Context, src jobdef.Source) (LoadResult, error
 	}
 	result.Removed = removed
 
+	// Routes after jobs, because a route points at a job id. The order is not
+	// an implementation detail: it is why a chain naming a job that does not
+	// exist is a load error rather than a foreign key violation at 3am.
+	if result.Chains, result.Routes, err = e.loadRoutes(ctx, snap, jobIDs); err != nil {
+		return LoadResult{}, err
+	}
+
 	e.log.Info("definitions loaded",
-		"source", result.Source, "jobs", result.Loaded,
-		"removed", result.Removed, "misconfigured", len(result.Misconfig))
+		"source", result.Source, "jobs", result.Loaded, "chains", result.Chains,
+		"routes", result.Routes, "removed", result.Removed,
+		"misconfigured", len(result.Misconfig))
 	return result, nil
+}
+
+// loadRoutes projects the snapshot's chains into the routes table and rebuilds
+// the in-memory trigger table.
+//
+// The name resolution here duplicates nothing: Snapshot.validate already
+// refused a step naming a job that does not exist, so a missing id at this
+// point would be a bug in this package rather than a mistake in a file, and it
+// is reported as such.
+func (e *Engine) loadRoutes(ctx context.Context, snap jobdef.Snapshot, jobIDs map[string]int64) (chains, routes int, err error) {
+	storedChains := make([]store.Chain, 0, len(snap.Chains))
+	storedRoutes := make([]store.Route, 0, len(snap.Chains))
+
+	for _, chain := range snap.Chains {
+		storedChains = append(storedChains, store.Chain{
+			Name:        chain.Name,
+			Description: chain.Description,
+			FilePath:    chain.FilePath(),
+		})
+		for i, step := range chain.Steps {
+			targetID, ok := jobIDs[step.Run]
+			if !ok {
+				return 0, 0, fmt.Errorf("chain %s step %d targets unknown job %q",
+					chain.Name, i+1, step.Run)
+			}
+			match, err := step.MatchJSON()
+			if err != nil {
+				return 0, 0, err
+			}
+			hash, err := step.RouteHash()
+			if err != nil {
+				return 0, 0, err
+			}
+			storedRoutes = append(storedRoutes, store.Route{
+				TargetJobID: targetID,
+				Match:       match,
+				RouteHash:   hash,
+				ChainName:   chain.Name,
+				StepIndex:   i + 1,
+				Source:      store.RouteSourceChainFile,
+				FilePath:    chain.FilePath(),
+				Enabled:     true,
+			})
+		}
+	}
+
+	if err := e.store.ReplaceRoutes(ctx, storedChains, storedRoutes); err != nil {
+		return 0, 0, err
+	}
+	if err := e.reloadRoutes(ctx); err != nil {
+		return 0, 0, err
+	}
+	return len(storedChains), len(storedRoutes), nil
 }
 
 // LoadFromDisk is the convenience path for the local source, which is source #1.

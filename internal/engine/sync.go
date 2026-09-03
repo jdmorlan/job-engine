@@ -109,7 +109,7 @@ func (e *Engine) recordSync(ctx context.Context, result LoadResult, syncErr erro
 	}
 	body, _ := json.Marshal(payload)
 
-	if _, _, err := e.store.AppendEvent(ctx, model.Event{
+	if _, _, err := e.publish(ctx, model.Event{
 		Type:      EventDefinitionsSynced,
 		Source:    model.SourceEngine,
 		Payload:   body,

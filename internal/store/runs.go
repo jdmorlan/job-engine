@@ -291,6 +291,36 @@ func (s *Store) InterruptRunning(ctx context.Context, at time.Time) (int64, erro
 	return res.RowsAffected()
 }
 
+// LatestRunByRoute returns the most recent run a rule started.
+//
+// It is how a chain view finds its way in: chains are not runtime entities
+// (D17), so there is no chain instance to look up -- the newest run of the
+// first step is the closest thing to "the last time this flow happened", and
+// everything else is reachable from it by causation.
+func (s *Store) LatestRunByRoute(ctx context.Context, routeID int64) (Run, error) {
+	return scanRun(s.state.QueryRowContext(ctx, selectRun+`
+		WHERE triggering_route_id = ? ORDER BY id DESC LIMIT 1`, routeID))
+}
+
+// RunTriggeredBy returns the run that one run caused through one rule.
+//
+// This is the join that makes end-to-end anything expressible: a run points at
+// the event that caused it, and that event points at the run that emitted it,
+// so the whole flow is one hop at a time through facts that were recorded for
+// their own reasons rather than for this query.
+func (s *Store) RunTriggeredBy(ctx context.Context, causeRunID, routeID int64) (Run, error) {
+	return scanRun(s.state.QueryRowContext(ctx, `
+		SELECT r.id, r.job_id, r.definition_hash, r.triggering_event_id,
+		       r.triggering_route_id, r.route_hash, r.status, r.queued_at,
+		       r.started_at, r.ended_at, r.attempt_count, r.state_version_in,
+		       r.output, r.error, r.overlap, r.runs_on, r.worker_id,
+		       r.lease_expires_at
+		FROM runs r
+		JOIN events e ON e.id = r.triggering_event_id
+		WHERE e.caused_by_run_id = ? AND r.triggering_route_id = ?
+		ORDER BY r.id DESC LIMIT 1`, causeRunID, routeID))
+}
+
 const selectRun = `
 	SELECT id, job_id, definition_hash, triggering_event_id, triggering_route_id,
 	       route_hash, status, queued_at, started_at, ended_at, attempt_count,

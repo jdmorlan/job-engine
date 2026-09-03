@@ -1,0 +1,7 @@
+name: Ingest
+description: >
+  Pretends to fetch some rows, then emits an event saying how many.
+  Nothing knows what happens next -- that is the chain's business, not this
+  job's.
+
+command: ["/bin/sh", "scripts/ingest.sh"]

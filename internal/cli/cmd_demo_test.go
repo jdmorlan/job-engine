@@ -42,6 +42,7 @@ func TestDemoJobsAreValid(t *testing.T) {
 	want := map[string]bool{
 		"demo-hello": false, "demo-counter": false,
 		"demo-flaky": false, "demo-tick": false,
+		"demo-ingest": false, "demo-report": false, "demo-archive": false,
 	}
 	for _, def := range snap.Definitions {
 		if _, ok := want[def.Slug]; !ok {
@@ -64,6 +65,17 @@ func TestDemoJobsAreValid(t *testing.T) {
 			t.Errorf("example %s was not written", slug)
 		}
 	}
+
+	// The chain is loaded by the same source as the jobs, so this also pins
+	// that its steps name jobs that exist and that it does not close a loop --
+	// both of which are load errors, and both of which the examples would
+	// otherwise be the first place anybody hit.
+	if len(snap.Chains) != 1 || snap.Chains[0].Name != "demo-pipeline" {
+		t.Fatalf("chains = %+v, want the demo-pipeline example", snap.Chains)
+	}
+	if len(snap.Chains[0].Steps) != 2 {
+		t.Errorf("demo-pipeline has %d steps, want 2", len(snap.Chains[0].Steps))
+	}
 }
 
 func TestDemoScriptsAreExecutableAndPresent(t *testing.T) {
@@ -72,7 +84,7 @@ func TestDemoScriptsAreExecutableAndPresent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, name := range []string{"counter.sh", "flaky.sh"} {
+	for _, name := range []string{"counter.sh", "flaky.sh", "ingest.sh"} {
 		path := filepath.Join(env.Layout.Jobs, "scripts", name)
 		info, err := os.Stat(path)
 		if err != nil {
@@ -134,5 +146,8 @@ func TestDemoRemoveLeavesOtherFilesAlone(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(env.Layout.Jobs, "demo-hello.yaml")); !os.IsNotExist(err) {
 		t.Error("--remove left an example behind")
+	}
+	if _, err := os.Stat(filepath.Join(env.Layout.Chains(), "demo-pipeline.yaml")); !os.IsNotExist(err) {
+		t.Error("--remove left the example chain behind")
 	}
 }

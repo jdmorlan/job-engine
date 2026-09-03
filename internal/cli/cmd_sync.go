@@ -43,6 +43,12 @@ func runSync(ctx context.Context, env *Env, args []string) error {
 		tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
 		fmt.Fprintf(tw, "source\t%s\n", result.Source)
 		fmt.Fprintf(tw, "loaded\t%d job(s)\n", result.Loaded)
+		if result.Chains > 0 {
+			// Stated only when there are any, but stated: "7 jobs" reads
+			// identically whether the chains directory came across or not, and
+			// a repo whose wiring did not arrive still runs every job it has.
+			fmt.Fprintf(tw, "\t%d chain(s), %d route(s)\n", result.Chains, result.Routes)
+		}
 		if result.Revision != "" {
 			// D11/D19: with a git source this is the commit that defines what
 			// now runs, which is what makes `je why` able to point at one.

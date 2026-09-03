@@ -1,0 +1,17 @@
+# One flow per file, and the file name is the chain's name (D17).
+#
+# The jobs in it know nothing about each other: demo-ingest emits an event,
+# demo-report and demo-archive declare what they react to, and this file is the
+# only place the wiring exists. That is the whole point -- "what happens after
+# demo-ingest?" is a file you can open, not a grep across every job.
+description: ingest, report on what arrived, then archive
+
+steps:
+  # A custom event, emitted by the job itself.
+  - on: { event: demo.ingested }
+    run: demo-report
+
+  # An event the engine emits about every run. `where` compares fields of the
+  # payload for equality, and that is deliberately all it does.
+  - on: { event: run.succeeded, where: { job: demo-report } }
+    run: demo-archive

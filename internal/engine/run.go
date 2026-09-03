@@ -47,6 +47,11 @@ type RunOptions struct {
 	// `je run` leaves it nil and the engine emits run.requested instead, so
 	// every run has exactly one cause.
 	TriggeringEvent *model.Event
+
+	// Route, when set, is the rule that matched that event (D17). It is
+	// snapshotted onto the run with its hash, so "why did this run?" can name
+	// the chain and step that started it even after the file has changed (D11).
+	Route *store.Route
 }
 
 // RunResult is everything that happened, for the CLI to render.
@@ -140,7 +145,8 @@ func (e *Engine) Enqueue(ctx context.Context, slug string, opts RunOptions) (*Pr
 			return nil, err
 		}
 		if active {
-			if err := e.recordSkipped(ctx, job, "the previous run has not finished (overlap: skip)"); err != nil {
+			if err := e.recordSkipped(ctx, job, opts.TriggeringEvent,
+				"the previous run has not finished (overlap: skip)"); err != nil {
 				return nil, err
 			}
 			return nil, nil
@@ -163,7 +169,7 @@ func (e *Engine) Enqueue(ctx context.Context, slug string, opts RunOptions) (*Pr
 		return nil, err
 	}
 
-	run, err := e.store.CreateRun(ctx, store.Run{
+	newRun := store.Run{
 		JobID:             job.ID,
 		DefinitionHash:    job.DefinitionHash,
 		TriggeringEventID: &cause.ID,
@@ -173,7 +179,13 @@ func (e *Engine) Enqueue(ctx context.Context, slug string, opts RunOptions) (*Pr
 		// definition reloaded between enqueue and dispatch must not move a run
 		// that is already waiting.
 		RunsOn: def.RunsOn,
-	})
+	}
+	if opts.Route != nil {
+		newRun.TriggeringRouteID = &opts.Route.ID
+		newRun.RouteHash = opts.Route.RouteHash
+	}
+
+	run, err := e.store.CreateRun(ctx, newRun)
 	if err != nil {
 		return nil, err
 	}
@@ -188,14 +200,22 @@ func (e *Engine) Enqueue(ctx context.Context, slug string, opts RunOptions) (*Pr
 // D9 and P1 both demand this: a job that quietly does not run is the single
 // most confusing thing a scheduler can do, so the decision is an event with a
 // reason rather than an absence.
-func (e *Engine) recordSkipped(ctx context.Context, job store.Job, reason string) error {
+func (e *Engine) recordSkipped(ctx context.Context, job store.Job, cause *model.Event, reason string) error {
 	payload, _ := json.Marshal(map[string]string{"job": job.Slug, "reason": reason})
-	_, _, err := e.store.AppendEvent(ctx, model.Event{
+	skipped := model.Event{
 		Type:      EventRunSkipped,
 		Source:    model.SourceEngine,
 		Payload:   payload,
 		CreatedAt: e.now(),
-	})
+	}
+	// A skip inside a chain inherits the causation of the event that asked for
+	// the run, so the depth guard keeps counting and `je events` still shows
+	// what the decision was about.
+	if cause != nil {
+		skipped.CausedByEventID = &cause.ID
+		skipped.Depth = cause.Depth + 1
+	}
+	_, _, err := e.publish(ctx, skipped)
 	return err
 }
 
@@ -205,7 +225,7 @@ func (e *Engine) runCause(ctx context.Context, job store.Job, opts RunOptions, a
 		return *opts.TriggeringEvent, nil
 	}
 	payload, _ := json.Marshal(map[string]string{"job": job.Slug})
-	event, _, err := e.store.AppendEvent(ctx, model.Event{
+	event, _, err := e.publish(ctx, model.Event{
 		Type:      EventRunRequested,
 		Source:    model.SourceCLI,
 		Payload:   payload,
@@ -300,7 +320,7 @@ func (e *Engine) promote(ctx context.Context, result *RunResult, def *jobdef.Def
 			return fmt.Errorf("refusing to emit %q: causation depth %d exceeds %d, which is a cycle",
 				ev.Type, ev.Depth, maxDepth)
 		}
-		stored, _, err := e.store.AppendEvent(ctx, ev)
+		stored, _, err := e.publish(ctx, ev)
 		if err != nil {
 			return fmt.Errorf("emitting %q: %w", ev.Type, err)
 		}
@@ -333,7 +353,7 @@ func (e *Engine) finish(ctx context.Context, result *RunResult, status model.Sta
 		"run":    result.Run.ID,
 		"status": string(status),
 	})
-	if _, _, err := e.store.AppendEvent(ctx, model.Event{
+	if _, _, err := e.publish(ctx, model.Event{
 		Type:          eventType,
 		Source:        model.SourceEngine,
 		Payload:       payload,

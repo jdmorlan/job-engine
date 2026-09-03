@@ -280,7 +280,7 @@ func (s *Scheduler) enqueueWindow(ctx context.Context, entry *scheduleEntry, win
 		"window":   window.Format(time.RFC3339),
 		"schedule": entry.schedule.String(),
 	})
-	cause, _, err := s.engine.store.AppendEvent(ctx, model.Event{
+	cause, _, err := s.engine.publish(ctx, model.Event{
 		Type:      EventScheduleFired,
 		Source:    model.SourceSchedule,
 		Payload:   payload,
@@ -351,7 +351,7 @@ func (e *Engine) recordScheduleStarted(ctx context.Context, job store.Job, index
 		"anchored": at.Format(time.RFC3339),
 		"next":     sched.Next(at).Format(time.RFC3339),
 	})
-	if _, _, err := e.store.AppendEvent(ctx, model.Event{
+	if _, _, err := e.publish(ctx, model.Event{
 		Type:      EventScheduleStarted,
 		Source:    model.SourceSchedule,
 		Payload:   payload,
@@ -375,7 +375,7 @@ func (e *Engine) recordMissed(ctx context.Context, entry *scheduleEntry, skipped
 		"from":     from.Format(time.RFC3339),
 		"to":       to.Format(time.RFC3339),
 	})
-	_, _, err := e.store.AppendEvent(ctx, model.Event{
+	_, _, err := e.publish(ctx, model.Event{
 		Type:      EventScheduleMissed,
 		Source:    model.SourceSchedule,
 		Payload:   payload,

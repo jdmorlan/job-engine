@@ -24,6 +24,8 @@ func (s *Server) registerReads(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/runs/{id}", s.handleGetRun)
 	mux.HandleFunc("GET /v1/runs/{id}/logs", s.handleRunLogs)
 	mux.HandleFunc("GET /v1/waiting", s.handleWaiting)
+	mux.HandleFunc("GET /v1/chains", s.handleListChains)
+	mux.HandleFunc("GET /v1/chains/{name}", s.handleGetChain)
 }
 
 func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
@@ -127,6 +129,23 @@ func (s *Server) handleRunLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"lines": orEmpty(lines), "attempt": attempt})
+}
+
+func (s *Server) handleListChains(w http.ResponseWriter, r *http.Request) {
+	chains, err := s.engine.Chains(r.Context())
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"chains": orEmpty(chains)})
+}
+
+func (s *Server) handleGetChain(w http.ResponseWriter, r *http.Request) {
+	chain, err := s.engine.Chain(r.Context(), r.PathValue("name"))
+	if s.handleLookupError(w, err, "chain") {
+		return
+	}
+	writeJSON(w, http.StatusOK, chain)
 }
 
 func (s *Server) handleWaiting(w http.ResponseWriter, r *http.Request) {
