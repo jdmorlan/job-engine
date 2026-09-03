@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/jdmorlan/job-engine/internal/api"
+	"github.com/jdmorlan/job-engine/internal/ca"
 	"github.com/jdmorlan/job-engine/internal/engine"
 	"github.com/jdmorlan/job-engine/internal/store"
 )
@@ -243,7 +244,7 @@ func do[T any](ctx context.Context, c *Client, method, path string, body any) (T
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return zero, fmt.Errorf("control plane at %s: %w", c.base.Host, err)
+		return zero, fmt.Errorf("control plane at %s: %w", c.base.Host, ca.ExplainHandshake(err))
 	}
 	defer resp.Body.Close()
 
@@ -300,7 +301,7 @@ func (c *Client) SourceTree(ctx context.Context, name, revision string) (io.Read
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, ca.ExplainHandshake(err)
 	}
 	if resp.StatusCode >= 400 {
 		defer resp.Body.Close()

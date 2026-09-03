@@ -4,7 +4,13 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"log/slog"
@@ -21,9 +27,37 @@ import (
 	"github.com/jdmorlan/job-engine/internal/worker"
 )
 
+// harnessTLS decides whether this pass runs the daemon over TLS.
+//
+// Every test in this file runs twice, once each way -- see TestMain. That is
+// the point rather than thoroughness for its own sake: the plaintext path is
+// meant to go away (D25), and the way to find out what quietly depends on it is
+// to run everything without it before removing it.
+var harnessTLS bool
+
+// client talks to the daemon this pass started. Set by startDaemonIn, because
+// over TLS it has to verify against an authority that did not exist until then.
+// Tests in a package run sequentially, so one is enough.
+var client = http.DefaultClient
+
+func TestMain(m *testing.M) {
+	for _, useTLS := range []bool{false, true} {
+		harnessTLS = useTLS
+		if code := m.Run(); code != 0 {
+			os.Exit(code)
+		}
+	}
+	os.Exit(0)
+}
+
 // startDaemon runs a daemon on an ephemeral port and returns its base URL.
 // It blocks until the daemon is listening, so tests never poll.
 func startDaemon(t *testing.T, jobs ...string) string {
+	base, _ := startDaemonIn(t, jobs...)
+	return base
+}
+
+func startDaemonIn(t *testing.T, jobs ...string) (string, paths.Layout) {
 	t.Helper()
 
 	dir := t.TempDir()
@@ -55,6 +89,7 @@ func startDaemon(t *testing.T, jobs ...string) string {
 			// this discoverable, which is the same mechanism the CLI uses.
 			Addr:    "127.0.0.1:0",
 			Version: "test",
+			TLS:     harnessTLS,
 			Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 			Ready:   ready,
 		})
@@ -84,7 +119,34 @@ func startDaemon(t *testing.T, jobs ...string) string {
 	if err != nil {
 		t.Fatalf("reading runtime file: %v", err)
 	}
-	return "http://" + info.Address
+	if info.TLS != harnessTLS {
+		t.Fatalf("runtime file says TLS=%v, want %v", info.TLS, harnessTLS)
+	}
+	client = httpClient(t, layout)
+	if harnessTLS {
+		return "https://" + info.Address, layout
+	}
+	return "http://" + info.Address, layout
+}
+
+// httpClient talks to whichever transport this pass is using, verifying against
+// the control plane's own authority when there is one.
+func httpClient(t *testing.T, layout paths.Layout) *http.Client {
+	t.Helper()
+	if !harnessTLS {
+		return http.DefaultClient
+	}
+	body, err := os.ReadFile(layout.CACert())
+	if err != nil {
+		t.Fatalf("reading the control plane's authority: %v", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(body) {
+		t.Fatal("the control plane's authority is not a certificate")
+	}
+	return &http.Client{Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
+	}}
 }
 
 // startDaemonWithWorker is startDaemon plus a real worker, over real HTTP.
@@ -97,10 +159,14 @@ func startDaemon(t *testing.T, jobs ...string) string {
 func startDaemonWithWorker(t *testing.T, jobs ...string) string {
 	t.Helper()
 
-	base := startDaemon(t, jobs...)
-	addr := strings.TrimPrefix(base, "http://")
+	base, layout := startDaemonIn(t, jobs...)
+	addr := strings.TrimPrefix(strings.TrimPrefix(base, "https://"), "http://")
 
-	client, err := worker.Dial(addr)
+	// Over TLS the worker enrols itself the way a local one does, from the
+	// token the control plane published (D25). Over plaintext it dials as it
+	// always did. Both paths are real here -- this test is the only one that
+	// exercises the whole shape D20 describes.
+	wc, err := dialWorker(t, addr, layout)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +184,7 @@ func startDaemonWithWorker(t *testing.T, jobs ...string) string {
 		Concurrency: 2,
 		Version:     "test",
 		JobsDir:     health.JobsDir,
-		Client:      client,
+		Client:      wc,
 		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	if err != nil {
@@ -168,7 +234,7 @@ func TestEmitThenListRoundTrip(t *testing.T) {
 	base := startDaemon(t)
 
 	body := `{"type":"homekit.motion","payload":{"room":"office"}}`
-	resp, err := http.Post(base+"/v1/events", "application/json", bytes.NewBufferString(body))
+	resp, err := client.Post(base+"/v1/events", "application/json", bytes.NewBufferString(body))
 	if err != nil {
 		t.Fatalf("POST /v1/events: %v", err)
 	}
@@ -211,7 +277,7 @@ func TestUnknownFieldIsRejected(t *testing.T) {
 	// A typo'd field is a mistake, and the endpoint should say so rather than
 	// silently storing an event missing the thing the caller meant to send.
 	body := `{"type":"a.thing","payloud":{}}`
-	resp, err := http.Post(base+"/v1/events", "application/json", bytes.NewBufferString(body))
+	resp, err := client.Post(base+"/v1/events", "application/json", bytes.NewBufferString(body))
 	if err != nil {
 		t.Fatalf("POST: %v", err)
 	}
@@ -224,7 +290,7 @@ func TestUnknownFieldIsRejected(t *testing.T) {
 func TestWrongMethodIsRejected(t *testing.T) {
 	base := startDaemon(t)
 
-	resp, err := http.Post(base+"/v1/health", "application/json", nil)
+	resp, err := client.Post(base+"/v1/health", "application/json", nil)
 	if err != nil {
 		t.Fatalf("POST: %v", err)
 	}
@@ -237,7 +303,7 @@ func TestWrongMethodIsRejected(t *testing.T) {
 
 func getJSON(t *testing.T, url string, into any) {
 	t.Helper()
-	resp, err := http.Get(url)
+	resp, err := client.Get(url)
 	if err != nil {
 		t.Fatalf("GET %s: %v", url, err)
 	}
@@ -290,7 +356,7 @@ func TestMissingResourcesAre404(t *testing.T) {
 	base := startDaemon(t)
 
 	for _, path := range []string{"/v1/jobs/nope", "/v1/runs/9999", "/v1/runs/9999/logs"} {
-		resp, err := http.Get(base + path)
+		resp, err := client.Get(base + path)
 		if err != nil {
 			t.Fatalf("GET %s: %v", path, err)
 		}
@@ -301,7 +367,7 @@ func TestMissingResourcesAre404(t *testing.T) {
 	}
 
 	// A non-numeric run id is the caller's mistake, not a missing resource.
-	resp, err := http.Get(base + "/v1/runs/abc")
+	resp, err := client.Get(base + "/v1/runs/abc")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -314,7 +380,7 @@ func TestMissingResourcesAre404(t *testing.T) {
 // triggerRun posts a run and returns its id.
 func triggerRun(t *testing.T, base, job string) int64 {
 	t.Helper()
-	resp, err := http.Post(base+"/v1/runs", "application/json",
+	resp, err := client.Post(base+"/v1/runs", "application/json",
 		strings.NewReader(`{"job":"`+job+`"}`))
 	if err != nil {
 		t.Fatalf("POST /v1/runs: %v", err)
@@ -352,7 +418,7 @@ func collectStream(t *testing.T, base string, runID int64) ([]string, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("GET stream: %v", err)
 	}
@@ -462,7 +528,7 @@ func TestOverlapSkipIsAConflict(t *testing.T) {
 	triggerRun(t, base, "hog")
 	time.Sleep(500 * time.Millisecond)
 
-	resp, err := http.Post(base+"/v1/runs", "application/json",
+	resp, err := client.Post(base+"/v1/runs", "application/json",
 		strings.NewReader(`{"job":"hog"}`))
 	if err != nil {
 		t.Fatal(err)
@@ -478,7 +544,7 @@ func TestOverlapSkipIsAConflict(t *testing.T) {
 func TestTriggerUnknownJobIs404(t *testing.T) {
 	base := startDaemon(t)
 
-	resp, err := http.Post(base+"/v1/runs", "application/json",
+	resp, err := client.Post(base+"/v1/runs", "application/json",
 		strings.NewReader(`{"job":"nope"}`))
 	if err != nil {
 		t.Fatal(err)
@@ -486,5 +552,79 @@ func TestTriggerUnknownJobIs404(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("status = %s, want 404", resp.Status)
+	}
+}
+
+// dialWorker gives a worker a connection appropriate to this pass, enrolling it
+// first when there are certificates to be had.
+func dialWorker(t *testing.T, addr string, layout paths.Layout) (*worker.Client, error) {
+	t.Helper()
+	if !harnessTLS {
+		return worker.Dial(addr)
+	}
+
+	token, err := os.ReadFile(layout.BootstrapToken())
+	if err != nil {
+		t.Fatalf("the control plane published no local enrolment token: %v", err)
+	}
+	caPEM, err := os.ReadFile(layout.BootstrapCA())
+	if err != nil {
+		t.Fatalf("the control plane published no authority: %v", err)
+	}
+
+	key, pubPEM := workerKeypair(t)
+	body, _ := json.Marshal(map[string]any{
+		"token": strings.TrimSpace(string(token)), "public_key": pubPEM,
+		"name": "test-worker", "labels": []string{store.DefaultLabel},
+	})
+	resp, err := client.Post("https://"+addr+"/v1/enrol", "application/json",
+		bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("enrolling: %v", err)
+	}
+	defer resp.Body.Close()
+	var out struct {
+		Certificate string `json:"certificate"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Certificate == "" {
+		t.Fatalf("enrolment returned no certificate (status %s)", resp.Status)
+	}
+
+	writeFile(t, layout.IdentityKey(), key)
+	writeFile(t, layout.IdentityCert(), out.Certificate)
+	writeFile(t, filepath.Join(layout.Data, "ca.crt"), string(caPEM))
+
+	return worker.DialTLS(addr, layout.IdentityCert(), layout.IdentityKey(),
+		filepath.Join(layout.Data, "ca.crt"))
+}
+
+func workerKeypair(t *testing.T) (keyPEM, pubPEM string) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pubDER, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})),
+		string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubDER}))
+}
+
+func writeFile(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }

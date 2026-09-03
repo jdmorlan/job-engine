@@ -3504,9 +3504,24 @@ order:
    re-enrols on every start, which C2 already permits — it holds nothing worth
    keeping.
 
-4. **Clock skew** currently fails as an opaque handshake error and needs a real
-   sentence.
-5. The daemon test harness assumes plaintext.
+4. ~~**Clock skew.**~~ **Shipped.** Compared at enrolment against the server's
+   `Date` header — the one exchange that happens before anything is trusted — and
+   refused past two minutes with both times printed. A certificate validity
+   failure elsewhere now says that certificates here live a day and are issued by
+   this control plane, so an expiry error is usually two clocks disagreeing.
+   Go's own message is true and sends people to look at the certificate, which is
+   the one thing that is fine.
+
+5. ~~**The daemon test harness assumes plaintext.**~~ **Shipped.** It runs every
+   test twice, once each way. That is the point rather than thoroughness: the way
+   to find what quietly depends on plaintext is to run everything without it
+   before removing it. Eighteen tests, both transports, and the worker in the
+   end-to-end harness enrols itself over TLS exactly as a local one does.
+
+**What is left is the flip itself**: default `--tls` on, and remove the plaintext
+listener. A breaking change worth a version bump, and the point at which D19's
+*"the trust boundary is the network"* becomes *"the trust boundary is the
+certificate."*
 
 Then the plaintext path can go — a breaking change worth a version bump, and one
 that rewrites D19's *"the trust boundary is the network"* into **"the trust

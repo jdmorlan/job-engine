@@ -130,6 +130,14 @@ func fetchAuthority(ctx context.Context, addr, pin string) ([]byte, error) {
 		return nil, fmt.Errorf("fetching the control plane's authority: %w", err)
 	}
 	defer resp.Body.Close()
+
+	// Checked here because this is the one exchange that happens before
+	// anything is trusted, and because a clock that is wrong will otherwise
+	// surface much later as a certificate that looks expired (D25).
+	if err := ca.CheckClockSkew(resp.Header.Get("Date")); err != nil {
+		return nil, err
+	}
+
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, err

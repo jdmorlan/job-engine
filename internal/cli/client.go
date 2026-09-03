@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/jdmorlan/job-engine/internal/api"
+	"github.com/jdmorlan/job-engine/internal/ca"
 	"github.com/jdmorlan/job-engine/internal/daemon"
 	"github.com/jdmorlan/job-engine/internal/engine"
 	"github.com/jdmorlan/job-engine/internal/jobdef"
@@ -252,8 +253,11 @@ func do[T any](ctx context.Context, c *Client, method, path string, body any) (T
 	resp, err := c.http.Do(req)
 	if err != nil {
 		// A refused connection here almost always means the daemon died
-		// without cleaning up its runtime file. Say the useful thing.
-		return zero, fmt.Errorf("%w at %s: %w", ErrNoControlPlane, c.base.Host, err)
+		// without cleaning up its runtime file. Say the useful thing -- and if
+		// it was a certificate validity failure, say the other useful thing,
+		// which is that the clocks probably disagree (D25).
+		return zero, fmt.Errorf("%w at %s: %w",
+			ErrNoControlPlane, c.base.Host, ca.ExplainHandshake(err))
 	}
 	defer resp.Body.Close()
 

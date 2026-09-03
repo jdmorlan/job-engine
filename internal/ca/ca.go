@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"math/big"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"time"
@@ -40,6 +41,18 @@ const (
 	// every worker, and that should be a deliberate migration rather than a
 	// surprise on a Tuesday.
 	caLifetime = 10 * 365 * 24 * time.Hour
+
+	// serverLifetime is capped well under the 398 days browsers and Apple's
+	// verifier accept for a TLS server certificate.
+	//
+	// Found by a test failing only on macOS with "certificate is not standards
+	// compliant": the server certificate had been given the CA's ten years, and
+	// any client using platform verification rejects that outright. Ours pin an
+	// explicit root and never noticed, which is exactly why it was worth
+	// finding before somebody else's client did.
+	//
+	// Reissued on every start, so this is a ceiling rather than a schedule.
+	serverLifetime = 397 * 24 * time.Hour
 
 	// LeafLifetime is short because it is what replaces revocation. A worker
 	// renews while it is healthy; one that stops being trusted stops working
@@ -239,7 +252,7 @@ func (a *Authority) ServerCertificate(hosts []string) (tls.Certificate, error) {
 		SerialNumber: serial,
 		Subject:      pkix.Name{CommonName: "je control plane"},
 		NotBefore:    now.Add(-time.Minute),
-		NotAfter:     now.Add(caLifetime),
+		NotAfter:     now.Add(serverLifetime),
 		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}
@@ -302,4 +315,65 @@ func FingerprintPEM(certPEM []byte) string {
 	}
 	sum := sha256.Sum256(block.Bytes)
 	return hex.EncodeToString(sum[:])
+}
+
+// MaxClockSkew is how far apart two machines' clocks may be before certificates
+// stop working between them.
+//
+// Generous next to the one minute of backdating a new certificate gets, because
+// this is the threshold for *refusing* rather than for tolerating: a machine
+// two minutes out still works, and one an hour out has a problem worth being
+// told about rather than discovering as a handshake failure.
+const MaxClockSkew = 2 * time.Minute
+
+// ExplainHandshake turns a certificate validity failure into the sentence that
+// names the actual cause.
+//
+// Go says "certificate has expired or is not yet valid", which is true and
+// sends people to look at the certificate. When both ends were issued minutes
+// ago by the same authority, the certificate is fine and the clocks are not --
+// and nothing in the message suggests looking there.
+func ExplainHandshake(err error) error {
+	if err == nil {
+		return nil
+	}
+	var invalid x509.CertificateInvalidError
+	if !errors.As(err, &invalid) || invalid.Reason != x509.Expired {
+		return err
+	}
+	return fmt.Errorf("%w\n\n"+
+		"Certificates here live %s and are issued by this control plane, so an "+
+		"expiry failure\nis usually two clocks disagreeing rather than a "+
+		"certificate that is genuinely old.\nCompare the time on both machines.",
+		err, LeafLifetime)
+}
+
+// CheckClockSkew compares this machine's clock against a server's Date header.
+//
+// Done at enrolment, which is the one moment there is an unverified exchange
+// anyway: refusing here costs a sentence, and letting it through costs somebody
+// an afternoon on a handshake error that names the wrong thing.
+func CheckClockSkew(serverDate string) error {
+	if serverDate == "" {
+		return nil // nothing to compare against; not worth failing over
+	}
+	theirs, err := http.ParseTime(serverDate)
+	if err != nil {
+		return nil
+	}
+	skew := time.Since(theirs)
+	if skew < 0 {
+		skew = -skew
+	}
+	if skew <= MaxClockSkew {
+		return nil
+	}
+	return fmt.Errorf(
+		"this machine's clock is %s away from the control plane's.\n"+
+			"  here   %s\n"+
+			"  there  %s\n"+
+			"Certificates last %s, so a gap this size makes them fail as expired or "+
+			"not yet valid.\nFix the clock on one of them and try again.",
+		skew.Round(time.Second), time.Now().UTC().Format(time.RFC3339),
+		theirs.UTC().Format(time.RFC3339), LeafLifetime)
 }
