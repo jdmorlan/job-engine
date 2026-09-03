@@ -47,8 +47,12 @@ func reachable(ctx context.Context, c *Client) bool {
 // P1: this sentence is worth more than the run list it replaces, because it is
 // true. The old fallback's answer looked more helpful and was misleading.
 func adviseNoControlPlane(err error) error {
+	// `je serve` is deliberately not the headline. It starts a control plane
+	// with no worker, which runs nothing (C11) -- suggesting it first sends
+	// somebody to a second, quieter failure, which is the opposite of what an
+	// error message is for.
 	return fmt.Errorf("%w\n\n"+
-		"Start one:  docker compose up -d   (control plane and its system worker)\n"+
-		"            je serve               (foreground, this terminal)\n\n"+
+		"Start one:  je quickstart          (control plane and a worker, this terminal)\n"+
+		"            docker compose up -d   (unattended)\n\n"+
 		"Nothing is scheduled while it is down.", err)
 }
