@@ -720,9 +720,21 @@ Removing a source stops its jobs running and keeps every run they did (D19).
 
 ### Writing a job
 
-`je new weather-ingest` writes the file; `je new --script` also writes
-`scripts/weather-ingest.sh` with the whole protocol in it, since there is no SDK
-to read.
+`je new weather-ingest` writes the file; `je new --language <lang>` also writes
+`scripts/weather-ingest.<ext>` with the whole protocol in it, and declares the
+language so the worker prepares the tree for it:
+
+```console
+$ je new nightly --language sh          scripts/nightly.sh
+$ je new ingest --language python       scripts/ingest.py
+$ je new ingest --language javascript   scripts/ingest.mjs, using the helpers
+$ je new ingest --language typescript   scripts/ingest.ts, and a package.json
+```
+
+The JavaScript one runs with nothing installed. The TypeScript one needs its
+own toolchain, so the scaffold writes the `package.json` declaring `tsx` and
+tells you to `pnpm install` — which writes the lockfile the worker installs
+from.
 
 A job is a YAML file naming a command. The file's name is the job's name.
 

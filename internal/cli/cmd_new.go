@@ -29,8 +29,10 @@ func init() {
 			"protocol in it: the cursor, the output channel, and events. There is\n" +
 			"no SDK to import -- the filesystem is the contract (D6) -- so the\n" +
 			"template is the documentation.\n\n" +
-			"  je new nightly --language sh       scripts/nightly.sh\n" +
-			"  je new ingest --language python    scripts/ingest.py\n\n" +
+			"  je new nightly --language sh          scripts/nightly.sh\n" +
+			"  je new ingest --language python       scripts/ingest.py\n" +
+			"  je new ingest --language typescript   scripts/ingest.ts, and the\n" +
+			"                                       helpers to import (D21)\n\n" +
 			"For a language the engine can prepare, it also writes `language:` into\n" +
 			"the job file -- which is what makes a worker install your dependencies\n" +
 			"from your lockfile and give you the helpers to import (D28, D21).",
@@ -203,6 +205,21 @@ func writeJobFile(env *Env, root, name string, t jobTemplate) error {
 			return err
 		}
 		fmt.Fprintf(env.Stdout, "wrote %s\n", scriptPath)
+
+		// Whatever the language needs before a job in it can run at all --
+		// which is only TypeScript, and only a package.json declaring tsx.
+		// Never overwritten: an existing one is the author's, and this
+		// scaffold has no business having an opinion about it.
+		for rel, body := range t.language.project {
+			path := filepath.Join(root, rel)
+			if _, err := os.Stat(path); err == nil {
+				continue
+			}
+			if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+				return err
+			}
+			fmt.Fprintf(env.Stdout, "wrote %s\n", path)
+		}
 	}
 
 	// Commit and push first, deliberately. The engine reads a repository, so a
@@ -210,6 +227,13 @@ func writeJobFile(env *Env, root, name string, t jobTemplate) error {
 	// `je sync` on its own would be a command that appears to do nothing.
 	fmt.Fprintln(env.Stdout)
 	tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
+	// Anything the author has to do by hand first. It goes above `je try`
+	// rather than in the prose, because a step you have to notice is a step
+	// somebody will not.
+	for _, step := range t.language.next {
+		fmt.Fprintf(tw, "  %s\n", step)
+	}
+	fmt.Fprintf(tw, "  je try %s\trun it here, before anything is committed\n", name)
 	fmt.Fprintf(tw, "  git add -A && git commit -m %q && git push\tthe engine reads the repository\n", "add "+name)
 	fmt.Fprintf(tw, "  je source sync <source>\tfetch what you just pushed\n")
 	fmt.Fprintf(tw, "  je explain <source>/%s\tevery value, including the ones this file does not set\n", name)

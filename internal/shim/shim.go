@@ -55,6 +55,10 @@ type Shim struct {
 	// capabilities -- never two fields to keep in step.
 	Language string
 
+	// Files is the embedded directory holding them, which is not always the
+	// language's own name: TypeScript and JavaScript share one set.
+	Files string
+
 	// Dir is where the files are written, relative to the source tree.
 	//
 	// In the tree rather than beside it, which is only reasonable because of
@@ -76,7 +80,23 @@ type Shim struct {
 // language is how the tail starts wagging the dog -- and a shim nobody uses
 // rots quietly, which is worse than not having it.
 var table = []Shim{{
-	Language: "typescript",
+	Language: "typescript", Files: "typescript",
+
+	// node_modules, so that `import je from "je"` resolves from any depth in
+	// the repository rather than from a relative path that depends on how deep
+	// the importing file happens to be.
+	//
+	// This is the one directory a package manager also owns, so the shim is
+	// re-checked on every run rather than once: an install that pruned it must
+	// not be able to break the next job. Writing it after any install is what
+	// makes that ordering safe.
+	Dir: filepath.Join("node_modules", "je"),
+}, {
+	// Same files, same runtime. TypeScript and JavaScript are one ecosystem
+	// with one module resolver, and a job that writes .mjs deserves the helper
+	// as much as one that writes .ts -- splitting them would be a distinction
+	// the thing being shipped does not have.
+	Language: "javascript", Files: "typescript",
 
 	// node_modules, so that `import je from "je"` resolves from any depth in
 	// the repository rather than from a relative path that depends on how deep
@@ -125,7 +145,7 @@ func Install(language, tree string) ([]string, error) {
 		return nil, fmt.Errorf("making room for the %s helpers: %w", language, err)
 	}
 
-	entries, err := fs.ReadDir(files, "files/"+language)
+	entries, err := fs.ReadDir(files, "files/"+s.Files)
 	if err != nil {
 		return nil, fmt.Errorf("reading the embedded %s shim: %w", language, err)
 	}
@@ -133,7 +153,7 @@ func Install(language, tree string) ([]string, error) {
 		if e.IsDir() {
 			continue
 		}
-		body, err := files.ReadFile("files/" + language + "/" + e.Name())
+		body, err := files.ReadFile("files/" + s.Files + "/" + e.Name())
 		if err != nil {
 			return nil, err
 		}

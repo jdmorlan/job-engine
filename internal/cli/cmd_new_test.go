@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/jdmorlan/job-engine/internal/jobdef"
+	"github.com/jdmorlan/job-engine/internal/shim"
+	"github.com/jdmorlan/job-engine/internal/toolchain"
 )
 
 // loadJobsDir is the check that matters for everything this command writes: the
@@ -174,4 +176,81 @@ func cwd(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return dir
+}
+
+// The scaffold and the shim have to know about the same languages. They did
+// not: `language: typescript` shipped with helpers to import, and `je new`
+// could offer only sh and python -- so the language with the best experience
+// was the one you could not scaffold.
+func TestEveryLanguageWithAShimCanBeScaffolded(t *testing.T) {
+	for name := range languages {
+		if _, ok := toolchain.Lookup(name); !ok {
+			continue // sh, which the engine does not prepare
+		}
+		if _, ok := shim.For(name); !ok {
+			continue // python, which has no shim yet
+		}
+		if _, ok := languages[name]; !ok {
+			t.Errorf("%s has a shim but no scaffold", name)
+		}
+	}
+	// The other direction is the one that actually broke.
+	for _, name := range []string{"typescript", "javascript"} {
+		if _, ok := shim.For(name); !ok {
+			t.Fatalf("%s has no shim, so this test is checking nothing", name)
+		}
+		if _, ok := languages[name]; !ok {
+			t.Errorf("je new cannot scaffold %s, which ships a shim", name)
+		}
+	}
+}
+
+// A scaffolded job has to load, and to declare the language that makes the
+// worker prepare it -- a template that produced a job needing a hand edit
+// before it could run would be worse than no template.
+func TestScaffoldedJobsDeclareTheirLanguageAndLoad(t *testing.T) {
+	for _, lang := range []string{"javascript", "typescript", "python"} {
+		t.Run(lang, func(t *testing.T) {
+			env, _ := demoEnv(t)
+			if err := runNew(context.Background(), env,
+				[]string{"--language", lang, "ingest"}); err != nil {
+				t.Fatalf("je new --language %s: %v", lang, err)
+			}
+			snap := loadJobsDir(t, env)
+			if len(snap.Definitions) != 1 {
+				t.Fatalf("definitions = %d", len(snap.Definitions))
+			}
+			def := snap.Definitions[0]
+			if def.Language != lang {
+				t.Errorf("language = %q, want %q", def.Language, lang)
+			}
+			if problem := def.ConfigError(); problem != "" {
+				t.Errorf("the scaffolded job is misconfigured: %s", problem)
+			}
+		})
+	}
+}
+
+// TypeScript is the one that cannot run on what is already installed, so the
+// scaffold writes the manifest declaring tsx -- and never overwrites one.
+func TestTypeScriptScaffoldWritesAManifestButNeverClobbersOne(t *testing.T) {
+	env, _ := demoEnv(t)
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mine := `{"name":"mine","private":true}`
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(mine), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := runNew(context.Background(), env, []string{"--language", "typescript", "ingest"}); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(filepath.Join(dir, "package.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != mine {
+		t.Error("je new overwrote a package.json that was already there")
+	}
 }
