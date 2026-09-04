@@ -84,7 +84,7 @@ func runQuickstart(ctx context.Context, env *Env, args []string) error {
 		return err
 	}
 
-	// The local case, so the worker enrols itself from the token the control
+	// The local case, so the worker enrolls itself from the token the control
 	// plane just wrote into the data directory they share -- no token to paste
 	// and no step to explain (D25).
 	//
@@ -92,7 +92,7 @@ func runQuickstart(ctx context.Context, env *Env, args []string) error {
 	// worker without an identity still had a plaintext socket to fall back to;
 	// with the flip there is nothing behind it, so carrying on would print
 	// "one worker attached" and then fail every claim.
-	if err := autoEnrol(ctx, env, dialable(info.Address), defaultWorkerName(), splitLabels(*labels), nil); err != nil {
+	if err := autoEnroll(ctx, env, dialable(info.Address), defaultWorkerName(), splitLabels(*labels), nil); err != nil {
 		cancel()
 		<-planeDone
 		return fmt.Errorf("enrolling the worker this command starts: %w", err)

@@ -136,12 +136,12 @@ WAITING FOR A WORKER  (queued for a label nothing is serving)
     start one:  je worker run --labels macos
 ```
 
-To run a worker on your Mac, enrol it first. `je enrol` on the control plane
+To run a worker on your Mac, enroll it first. `je enroll` on the control plane
 decides the name and the labels and prints a token and the authority's
 fingerprint; the machine becoming a worker redeems them:
 
 ```console
-$ je enrol macbook --labels macos          # on the control plane
+$ je enroll macbook --labels macos          # on the control plane
 token    Cg2Mq-cHkyFaXKHeUkRbtHUdJCLd5-B3jbR6qa65XkI
 worker   macbook
 labels   macos
@@ -162,7 +162,7 @@ token is sent, because a token is a bearer credential: whoever receives it
 becomes this worker.
 
 A worker sharing a machine with the control plane skips all of it. `je worker
-run` there enrols itself from a token the control plane leaves in its own data
+run` there enrolls itself from a token the control plane leaves in its own data
 directory, which is why `je quickstart` and `docker compose up -d` need nothing
 pasted.
 
@@ -173,7 +173,7 @@ no state, so killing it costs its in-flight runs and nothing else.
 
 **HTTPS, always, verified both ways where there is something to verify.** The
 control plane is its own certificate authority: it issues itself a server
-certificate and issues every worker one at enrolment, so there is no public CA,
+certificate and issues every worker one at enrollment, so there is no public CA,
 no domain to own, and nothing to renew by hand — a worker replaces its own
 certificate on the heartbeat, authenticated by the certificate it is replacing.
 
@@ -194,7 +194,7 @@ A person gets a certificate too, and then `je run` is attributed to somebody
 rather than to whatever the request body claimed:
 
 ```console
-$ je enrol jays-laptop --client       # on the control plane
+$ je enroll jays-laptop --client       # on the control plane
 $ je identity join --token ... --ca-pin ... --addr ...    # on the laptop
 enrolled as jays-laptop
 
@@ -207,7 +207,7 @@ Beside the control plane itself, `je identity join` needs no token — it reads
 the one in the data directory, which it can only do if it already has the access
 that would let it read the CA key.
 
-**Issuing the first client identity changes the deployment**, and `je enrol
+**Issuing the first client identity changes the deployment**, and `je enroll
 --client` says so before you redeem it: from then on, a request that *changes*
 something must present a certificate. `je run`, `je secret set`, `je source add`
 and minting further identities all refuse an unidentified caller. Reading is

@@ -48,7 +48,7 @@ func (s *Server) Handler() http.Handler {
 	s.registerWorkers(mux)
 	s.registerRuns(mux)
 	s.registerSources(mux)
-	s.registerEnrolment(mux)
+	s.registerEnrollment(mux)
 
 	// Identity is attached once, here, so no handler has to remember to look
 	// at r.TLS -- and so the rule that it comes only from a verified chain
@@ -57,11 +57,11 @@ func (s *Server) Handler() http.Handler {
 	return withClientIdentity(s.requireIdentityToWrite(mux))
 }
 
-// enrolmentExempt are the two write endpoints that cannot require an identity,
+// enrollmentExempt are the two write endpoints that cannot require an identity,
 // because they are how one is obtained.
 //
-// POST /v1/enrol is authenticated by the token in its body -- a credential that
-// exists precisely for a caller with nothing else. POST /v1/enrol/renew does
+// POST /v1/enroll is authenticated by the token in its body -- a credential that
+// exists precisely for a caller with nothing else. POST /v1/enroll/renew does
 // its own check and is stricter than this one: it requires a certificate
 // whether or not the gate is armed.
 //
@@ -70,9 +70,9 @@ func (s *Server) Handler() http.Handler {
 // deployment that has armed the gate should not let an unidentified caller
 // create identities. On the control plane's own machine `je identity join`
 // needs no token, so this cannot lock anybody out of their own deployment.
-var enrolmentExempt = map[string]bool{
-	"POST /v1/enrol":       true,
-	"POST /v1/enrol/renew": true,
+var enrollmentExempt = map[string]bool{
+	"POST /v1/enroll":       true,
+	"POST /v1/enroll/renew": true,
 }
 
 // requireIdentityToWrite refuses a mutating request that proved nothing, once
@@ -97,7 +97,7 @@ func (s *Server) requireIdentityToWrite(next http.Handler) http.Handler {
 		}
 		// Matched on the path rather than the routed pattern: this runs before
 		// the mux, so there is no pattern yet. Both exempt paths are literal.
-		if enrolmentExempt[r.Method+" "+r.URL.Path] {
+		if enrollmentExempt[r.Method+" "+r.URL.Path] {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -110,7 +110,7 @@ func (s *Server) requireIdentityToWrite(next http.Handler) http.Handler {
 					"changes something has to present one.\n"+
 					"This connection presented no certificate.\n\n"+
 					"Get one for this machine:\n"+
-					"  je enrol <name> --client        (on the control plane)\n"+
+					"  je enroll <name> --client        (on the control plane)\n"+
 					"  je identity join --token <t> --ca-pin <fp> --addr <host:port>\n\n"+
 					"Beside the control plane itself, `je identity join` needs no token.")
 			return

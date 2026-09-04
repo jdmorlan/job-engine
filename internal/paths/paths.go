@@ -109,7 +109,7 @@ func (l Layout) CADir() string { return filepath.Join(l.Data, "ca") }
 func (l Layout) CAKey() string  { return filepath.Join(l.CADir(), "ca.key") }
 func (l Layout) CACert() string { return filepath.Join(l.CADir(), "ca.crt") }
 
-// BootstrapDir holds what a worker needs to enrol itself: the token, and the
+// BootstrapDir holds what a worker needs to enroll itself: the token, and the
 // authority to verify the control plane with (D25).
 //
 // Its own directory rather than loose in the data directory, because it is the
@@ -120,13 +120,13 @@ func (l Layout) CACert() string { return filepath.Join(l.CADir(), "ca.crt") }
 // a subdirectory the worker can already see.
 func (l Layout) BootstrapDir() string { return filepath.Join(l.Data, "bootstrap") }
 
-// BootstrapToken is the enrolment token a running control plane leaves for
+// BootstrapToken is the enrollment token a running control plane leaves for
 // workers that can read BootstrapDir. Written on start, removed on clean
 // shutdown, like the runtime file.
 func (l Layout) BootstrapToken() string { return filepath.Join(l.BootstrapDir(), "token") }
 
 // BootstrapCA is the authority's certificate, published beside the token so a
-// worker can verify the control plane before it enrols. Public by nature: it is
+// worker can verify the control plane before it enrolls. Public by nature: it is
 // what a client checks against, not a secret.
 func (l Layout) BootstrapCA() string { return filepath.Join(l.BootstrapDir(), "ca.crt") }
 
@@ -148,7 +148,7 @@ func (l Layout) AgeIdentity() string { return filepath.Join(l.Data, "identity") 
 // verifying the control plane across restarts without the bootstrap directory
 // being mounted (D25).
 //
-// Written by enrolment beside the identity rather than into BootstrapDir,
+// Written by enrollment beside the identity rather than into BootstrapDir,
 // because that directory belongs to the control plane and a worker on another
 // machine has never seen it.
 func (l Layout) IdentityCA() string { return filepath.Join(l.Data, "ca.crt") }

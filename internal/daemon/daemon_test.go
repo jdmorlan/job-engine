@@ -141,7 +141,7 @@ func startDaemonWithWorker(t *testing.T, jobs ...string) string {
 	base, layout := startDaemonIn(t, jobs...)
 	addr := strings.TrimPrefix(base, "https://")
 
-	// The worker enrols itself the way a local one does, from the token the
+	// The worker enrolls itself the way a local one does, from the token the
 	// control plane published (D25), and then presents the certificate it was
 	// issued -- this test is the only one that exercises the whole shape D20
 	// describes, transport included.
@@ -534,14 +534,14 @@ func TestTriggerUnknownJobIs404(t *testing.T) {
 	}
 }
 
-// dialWorker enrols a worker against the running control plane and returns a
+// dialWorker enrolls a worker against the running control plane and returns a
 // client presenting the certificate it was issued.
 func dialWorker(t *testing.T, addr string, layout paths.Layout) (*worker.Client, error) {
 	t.Helper()
 
 	token, err := os.ReadFile(layout.BootstrapToken())
 	if err != nil {
-		t.Fatalf("the control plane published no local enrolment token: %v", err)
+		t.Fatalf("the control plane published no local enrollment token: %v", err)
 	}
 	caPEM, err := os.ReadFile(layout.BootstrapCA())
 	if err != nil {
@@ -553,7 +553,7 @@ func dialWorker(t *testing.T, addr string, layout paths.Layout) (*worker.Client,
 		"token": strings.TrimSpace(string(token)), "public_key": pubPEM,
 		"name": "test-worker", "labels": []string{store.DefaultLabel},
 	})
-	resp, err := client.Post("https://"+addr+"/v1/enrol", "application/json",
+	resp, err := client.Post("https://"+addr+"/v1/enroll", "application/json",
 		bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("enrolling: %v", err)
@@ -566,7 +566,7 @@ func dialWorker(t *testing.T, addr string, layout paths.Layout) (*worker.Client,
 		t.Fatal(err)
 	}
 	if out.Certificate == "" {
-		t.Fatalf("enrolment returned no certificate (status %s)", resp.Status)
+		t.Fatalf("enrollment returned no certificate (status %s)", resp.Status)
 	}
 
 	writeFile(t, layout.IdentityKey(), key)

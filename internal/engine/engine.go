@@ -63,7 +63,7 @@ type Engine struct {
 
 	// authority issues worker identities, and tokens are the one-time
 	// credentials that let a machine ask for one (D25 step 5). Both are
-	// created lazily: a deployment that never enrols a worker never writes a
+	// created lazily: a deployment that never enrolls a worker never writes a
 	// CA key, and nothing about the plaintext path needs either.
 	authorityOnce sync.Once
 	authority     *ca.Authority

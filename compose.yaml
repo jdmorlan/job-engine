@@ -34,7 +34,7 @@ services:
       # Definitions are read-only and safe to bind: no SQLite involved, and
       # editing job YAML on the host is the point (P3).
       - ./jobs:/var/lib/je/jobs:ro
-      # What a worker needs to enrol itself: the token, and the authority to
+      # What a worker needs to enroll itself: the token, and the authority to
       # verify this control plane with (D25). Its own volume rather than sharing
       # the data one, because the databases and the secret store live there and
       # a worker has no business reading either.
@@ -56,7 +56,7 @@ services:
     environment:
       TZ: ${TZ:-UTC}
     volumes:
-      # It enrols itself from here on every start, and writes its identity to
+      # It enrolls itself from here on every start, and writes its identity to
       # the container's own layer -- which it may lose freely, because
       # re-enrolling is free and C2 says a worker holds nothing worth keeping.
       - je-bootstrap:/var/lib/je/bootstrap:ro

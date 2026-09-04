@@ -23,7 +23,7 @@ var ErrNotEnrolled = errors.New("this connection presented no enrolled identity"
 // Authority returns the control plane's certificate authority, creating it on
 // first use.
 //
-// Lazy because a deployment that never enrols a worker should never write a CA
+// Lazy because a deployment that never enrolls a worker should never write a CA
 // key. Once created it is loaded from disk every time, so restarting does not
 // silently become a different authority and invalidate every certificate ever
 // issued.
@@ -34,7 +34,7 @@ func (e *Engine) Authority() (*ca.Authority, error) {
 	return e.authority, e.authorityErr
 }
 
-// MintEnrolment issues a one-time token for a named identity with fixed labels
+// MintEnrollment issues a one-time token for a named identity with fixed labels
 // and roles.
 //
 // All three are decided here rather than by the machine that redeems it. That
@@ -42,9 +42,9 @@ func (e *Engine) Authority() (*ca.Authority, error) {
 // advertises its own `macos` can grant itself whatever a label gates. Whoever
 // runs this decides what the machine is allowed to claim to be -- including
 // whether it is a client, which is the role that can mint further identities.
-func (e *Engine) MintEnrolment(ctx context.Context, name string, labels, roles []string) (string, error) {
+func (e *Engine) MintEnrollment(ctx context.Context, name string, labels, roles []string) (string, error) {
 	if name == "" {
-		return "", errors.New("an enrolment needs a worker name")
+		return "", errors.New("an enrollment needs a worker name")
 	}
 	if len(roles) == 0 {
 		roles = []string{store.RoleExecute}
@@ -57,20 +57,20 @@ func (e *Engine) MintEnrolment(ctx context.Context, name string, labels, roles [
 		labels = []string{store.DefaultLabel}
 	}
 	// Created here so that a failure to write the CA key is reported by the
-	// command that asked for a token, not later by a worker that cannot enrol.
+	// command that asked for a token, not later by a worker that cannot enroll.
 	if _, err := e.Authority(); err != nil {
 		return "", fmt.Errorf("preparing the certificate authority: %w", err)
 	}
 	return e.tokens.Issue(name, labels, roles)
 }
 
-// Enrol redeems a token and issues a certificate for the public key presented.
+// Enroll redeems a token and issues a certificate for the public key presented.
 //
 // The row is written before the worker has ever connected, which is the
 // ordering that matters: registration afterwards can only report liveness,
 // because name and labels are already decided and the store refuses to let a
 // registration change them.
-func (e *Engine) Enrol(ctx context.Context, token string, publicKeyPEM []byte, asName string, asLabels, asRoles []string, ageRecipient string) (certPEM, caPEM []byte, err error) {
+func (e *Engine) Enroll(ctx context.Context, token string, publicKeyPEM []byte, asName string, asLabels, asRoles []string, ageRecipient string) (certPEM, caPEM []byte, err error) {
 	grant, err := e.tokens.Redeem(token)
 	if err != nil {
 		return nil, nil, err
@@ -121,7 +121,7 @@ func (e *Engine) Enrol(ctx context.Context, token string, publicKeyPEM []byte, a
 	fingerprint := Fingerprint(leaf.Bytes)
 
 	now := e.now()
-	if err := e.store.EnrolWorker(ctx, store.Worker{
+	if err := e.store.EnrollWorker(ctx, store.Worker{
 		ID:           WorkerID(name),
 		Name:         name,
 		Labels:       labels,
@@ -142,7 +142,7 @@ func (e *Engine) Enrol(ctx context.Context, token string, publicKeyPEM []byte, a
 
 // WorkerID is the row id for a worker name.
 //
-// Here as well as in the worker package because enrolment writes the row before
+// Here as well as in the worker package because enrollment writes the row before
 // any worker exists to compute it, and the two must agree or an enrolled
 // identity would never match the registration that follows.
 func WorkerID(name string) string { return "worker-" + name }
@@ -239,7 +239,7 @@ var ErrUnidentified = errors.New("this request changes something and presented n
 // certificate this authority signed is not an anonymous caller. The role only
 // decides when the gate arms.
 //
-// Armed by the deployment's own state rather than by configuration. `je enrol
+// Armed by the deployment's own state rather than by configuration. `je enroll
 // --client` is the deliberate act, and until somebody performs it there is no
 // identity to require and refusing writes would mean nothing worked at all.
 func (e *Engine) RequireIdentity(ctx context.Context, identity string) error {

@@ -9,7 +9,7 @@
 //   - Short-lived leaves. Which is why there is no revocation list: a
 //     certificate nobody renews stops working on its own, and revocation is the
 //     part of PKI that is genuinely hard to get right.
-//   - One enrolment moment, which already exists as `je worker join`.
+//   - One enrollment moment, which already exists as `je worker join`.
 //
 // That is a few hundred lines of crypto/x509 rather than a second service. If
 // workers ever need certificates for their *own* services, this is the wrong
@@ -159,7 +159,7 @@ func (a *Authority) CertPEM() []byte {
 // worker is this?" is answered by the certificate rather than by a string the
 // worker sent (D25). Labels are *not* in here on purpose: a capability is not an
 // identity, and putting them in a signed document would make changing a label an
-// act of re-enrolment.
+// act of re-enrollment.
 func (a *Authority) Issue(name string, publicKey any) ([]byte, error) {
 	if name == "" {
 		return nil, errors.New("a certificate needs a worker name")
@@ -350,7 +350,7 @@ func ExplainHandshake(err error) error {
 
 // CheckClockSkew compares this machine's clock against a server's Date header.
 //
-// Done at enrolment, which is the one moment there is an unverified exchange
+// Done at enrollment, which is the one moment there is an unverified exchange
 // anyway: refusing here costs a sentence, and letting it through costs somebody
 // an afternoon on a handshake error that names the wrong thing.
 func CheckClockSkew(serverDate string) error {

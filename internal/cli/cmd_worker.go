@@ -29,7 +29,7 @@ func init() {
 			"It holds no state and opens no ports: it dials the control plane and\n" +
 			"keeps asking for work, which is why it works from a laptop behind NAT.\n\n" +
 			"A worker on another machine needs an identity before it can talk to\n" +
-			"anything: `je enrol <name>` on the control plane prints a token and a\n" +
+			"anything: `je enroll <name>` on the control plane prints a token and a\n" +
 			"fingerprint, and `je worker run --token <t> --ca-pin <fp> --addr <a>`\n" +
 			"here redeems them. A worker sharing a machine with the control plane\n" +
 			"does that by itself, with nothing to paste.\n\n" +
@@ -63,7 +63,7 @@ func runWorker(ctx context.Context, env *Env, args []string) error {
 	useDocker := fs.Bool("docker", false, "join as a container instead of a native service")
 	native := fs.Bool("native", false, "join as a native service (launchd or systemd)")
 	printOnly := fs.Bool("print", false, "print what would be done, and do nothing")
-	token := fs.String("token", "", "an enrolment token from `je enrol` on the control plane")
+	token := fs.String("token", "", "an enrollment token from `je enroll` on the control plane")
 	caPin := fs.String("ca-pin", "", "the control plane's CA fingerprint, printed beside the token")
 	positional, err := parseArgs(fs, args)
 	if err != nil {
@@ -125,16 +125,16 @@ func runWorker(ctx context.Context, env *Env, args []string) error {
 	//
 	// It uses `target` rather than the CLI's own resolution, because a machine
 	// that is becoming a worker has no control plane of its own to look up --
-	// that is the entire situation enrolment exists for.
+	// that is the entire situation enrollment exists for.
 	if *token != "" {
-		if err := enrolAt(ctx, env, target, *token, *caPin); err != nil {
+		if err := enrollAt(ctx, env, target, *token, *caPin); err != nil {
 			return err
 		}
 	} else if positional[0] == "run" {
 		// No token asked for. If this worker shares a machine with the control
-		// plane it can enrol itself, which is what keeps `je quickstart` and
+		// plane it can enroll itself, which is what keeps `je quickstart` and
 		// `docker compose up` at zero extra steps (D25).
-		if err := autoEnrol(ctx, env, target, *name, splitLabels(*labels), nil); err != nil {
+		if err := autoEnroll(ctx, env, target, *name, splitLabels(*labels), nil); err != nil {
 			return err
 		}
 	}
@@ -338,7 +338,7 @@ func runWorkerKeygen(ctx context.Context, env *Env) error {
 // a recipient list can name the machine instead of the key (D25).
 //
 // Best-effort by design. A machine that cannot reach a control plane, or that
-// has no identity yet, still has a usable key on disk -- and the enrolment it
+// has no identity yet, still has a usable key on disk -- and the enrollment it
 // performs later carries the key with it, so the binding happens anyway. Making
 // this fatal would mean `je worker keygen` could not be run before enrolling,
 // which is the order somebody will naturally use.
@@ -368,7 +368,7 @@ func explainUnregisteredKey(env *Env, recipient, why string) error {
 		"\nThe key is on disk, but the control plane does not know about it: %s.\n"+
 			"This machine can still run jobs that need no secrets.\n\n"+
 			"When it can reach one, run `je worker keygen` again to register it --\n"+
-			"or enrol, which carries the key with it:\n"+
+			"or enroll, which carries the key with it:\n"+
 			"  je worker run --token <t> --ca-pin <fp> --addr <host:port>\n\n"+
 			"To add it by hand meanwhile:\n"+
 			"  je secret recipients add --source <src> %s\n", why, recipient)
@@ -388,7 +388,7 @@ func readAgeIdentity(env *Env) (*age.X25519Identity, error) {
 }
 
 // ageRecipientOf is the public half of this machine's key, or "" when it has
-// none. Used at enrolment, where a key that exists should be bound at the
+// none. Used at enrollment, where a key that exists should be bound at the
 // moment the identity is decided rather than in a second step (D25).
 func ageRecipientOf(env *Env) string {
 	id, err := readAgeIdentity(env)
@@ -407,7 +407,7 @@ func ageRecipientOf(env *Env) string {
 // the control plane still accepts and which is exactly the pre-D25 guarantee.
 //
 // Missing the authority is a hard error rather than a fallback. There is
-// nothing to fall back to, and saying so names the fix (enrol) instead of
+// nothing to fall back to, and saying so names the fix (enroll) instead of
 // producing a connection failure somebody has to interpret.
 func dialControlPlane(env *Env, target string) (*worker.Client, error) {
 	caPath, err := authorityPath(env.Layout)

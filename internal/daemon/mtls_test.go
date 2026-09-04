@@ -38,7 +38,7 @@ func TestAWorkerRenewsItsOwnCertificate(t *testing.T) {
 	defer restore()
 
 	base, layout := startTLSDaemon(t)
-	client := enrolAWorker(t, base, layout, "renewer", []string{store.DefaultLabel})
+	client := enrollAWorker(t, base, layout, "renewer", []string{store.DefaultLabel})
 
 	if _, ok := client.NotAfter(); !ok {
 		t.Fatal("the enrolled client has no certificate")
@@ -87,7 +87,7 @@ func TestRenewalWithoutACertificateIsRefused(t *testing.T) {
 	base, _ := startTLSDaemon(t)
 
 	// Verified transport, no client certificate: what the CLI looks like.
-	resp, err := insecureClient().Post(base+"/v1/enrol/renew", "application/json",
+	resp, err := insecureClient().Post(base+"/v1/enroll/renew", "application/json",
 		strings.NewReader(`{"public_key":""}`))
 	if err != nil {
 		t.Fatal(err)
@@ -157,37 +157,37 @@ func startTLSDaemon(t *testing.T) (base string, layout paths.Layout) {
 	return "https://" + info.Address, layout
 }
 
-// enrolAWorker performs the real flow: mint, redeem, write the identity, and
+// enrollAWorker performs the real flow: mint, redeem, write the identity, and
 // return a client that presents it.
-func enrolAWorker(t *testing.T, base string, layout paths.Layout, name string, labels []string) *worker.Client {
+func enrollAWorker(t *testing.T, base string, layout paths.Layout, name string, labels []string) *worker.Client {
 	t.Helper()
 
-	body, _ := json.Marshal(api.MintEnrolmentRequest{Name: name, Labels: labels})
-	resp, err := insecureClient().Post(base+"/v1/enrol/tokens", "application/json",
+	body, _ := json.Marshal(api.MintEnrollmentRequest{Name: name, Labels: labels})
+	resp, err := insecureClient().Post(base+"/v1/enroll/tokens", "application/json",
 		strings.NewReader(string(body)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var mint api.MintEnrolmentResponse
+	var mint api.MintEnrollmentResponse
 	if err := json.NewDecoder(resp.Body).Decode(&mint); err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
 
 	key, pubPEM := keypairPEM(t)
-	body, _ = json.Marshal(api.EnrolRequest{Token: mint.Token, PublicKey: pubPEM})
-	resp, err = insecureClient().Post(base+"/v1/enrol", "application/json",
+	body, _ = json.Marshal(api.EnrollRequest{Token: mint.Token, PublicKey: pubPEM})
+	resp, err = insecureClient().Post(base+"/v1/enroll", "application/json",
 		strings.NewReader(string(body)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var enrolled api.EnrolResponse
+	var enrolled api.EnrollResponse
 	if err := json.NewDecoder(resp.Body).Decode(&enrolled); err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
 	if enrolled.Certificate == "" {
-		t.Fatal("enrolment returned no certificate")
+		t.Fatal("enrollment returned no certificate")
 	}
 
 	write(t, layout.IdentityKey(), key, 0o600)
@@ -281,7 +281,7 @@ func TestARunningWorkerRenewsItselfUnattended(t *testing.T) {
 	defer func() { engine.HeartbeatInterval = oldBeat }()
 
 	base, layout := startTLSDaemon(t)
-	client := enrolAWorker(t, base, layout, "unattended", []string{store.DefaultLabel})
+	client := enrollAWorker(t, base, layout, "unattended", []string{store.DefaultLabel})
 	before := read(t, layout.IdentityCert())
 
 	w, err := worker.New(worker.Options{
@@ -322,7 +322,7 @@ func TestARunningWorkerRenewsItselfUnattended(t *testing.T) {
 // asked for anything -- which is what has to be true before certificates can be
 // required at all, since `je quickstart` and `docker compose up` must stay at
 // zero extra steps (D25).
-func TestALocalWorkerEnrolsItselfFromTheDataDirectory(t *testing.T) {
+func TestALocalWorkerEnrollsItselfFromTheDataDirectory(t *testing.T) {
 	_, layout := startTLSDaemon(t)
 
 	token, err := os.ReadFile(layout.BootstrapToken())
@@ -449,7 +449,7 @@ func TestWritingRequiresAnIdentityOnceAClientExists(t *testing.T) {
 		t.Fatal("an unidentified write was refused before any client identity existed")
 	}
 
-	enrolClient(t, base, layout, "jays-laptop")
+	enrollClient(t, base, layout, "jays-laptop")
 
 	if code := postSync(t, anonymous, base); code != http.StatusUnauthorized {
 		t.Errorf("unidentified write = %d, want 401 once a client identity exists", code)
@@ -469,7 +469,7 @@ func TestWritingRequiresAnIdentityOnceAClientExists(t *testing.T) {
 // anybody remembering to add it to a list.
 func TestEveryWriteMethodIsGated(t *testing.T) {
 	base, layout := startTLSDaemon(t)
-	enrolClient(t, base, layout, "jays-laptop")
+	enrollClient(t, base, layout, "jays-laptop")
 
 	for _, tc := range []struct{ method, path string }{
 		{http.MethodPost, "/v1/runs"},
@@ -480,7 +480,7 @@ func TestEveryWriteMethodIsGated(t *testing.T) {
 		{http.MethodDelete, "/v1/secrets/TOKEN"},
 		// Minting is deliberately gated: it decides what a machine may call
 		// itself, and is the one write nobody unidentified should perform.
-		{http.MethodPost, "/v1/enrol/tokens"},
+		{http.MethodPost, "/v1/enroll/tokens"},
 	} {
 		req, err := http.NewRequest(tc.method, base+tc.path, strings.NewReader("{}"))
 		if err != nil {
@@ -499,7 +499,7 @@ func TestEveryWriteMethodIsGated(t *testing.T) {
 
 	// And the exemption still holds: redeeming a token is how a caller with no
 	// identity obtains one, so it cannot require having one.
-	resp, err := insecureClient().Post(base+"/v1/enrol", "application/json",
+	resp, err := insecureClient().Post(base+"/v1/enroll", "application/json",
 		strings.NewReader(`{"token":"not-a-real-token","public_key":""}`))
 	if err != nil {
 		t.Fatal(err)
@@ -516,7 +516,7 @@ func TestEveryWriteMethodIsGated(t *testing.T) {
 // recording if it cannot be chosen by whoever is being recorded.
 func TestTheActorComesFromTheCertificate(t *testing.T) {
 	base, layout := startTLSDaemon(t)
-	client := enrolClient(t, base, layout, "jays-laptop")
+	client := enrollClient(t, base, layout, "jays-laptop")
 
 	write(t, filepath.Join(layout.Jobs, "hello.yaml"),
 		"command: [\"/bin/sh\", \"-c\", \"true\"]\n", 0o644)
@@ -559,19 +559,19 @@ func TestTheActorComesFromTheCertificate(t *testing.T) {
 	}
 }
 
-// enrolClient enrols an identity carrying the client role and returns an HTTP
+// enrollClient enrolls an identity carrying the client role and returns an HTTP
 // client presenting it. It writes into its own directory, so the control
 // plane's data directory is left as a control plane's.
-func enrolClient(t *testing.T, base string, layout paths.Layout, name string) *http.Client {
+func enrollClient(t *testing.T, base string, layout paths.Layout, name string) *http.Client {
 	t.Helper()
 
-	body, _ := json.Marshal(api.MintEnrolmentRequest{Name: name, Roles: []string{store.RoleClient}})
-	resp, err := insecureClient().Post(base+"/v1/enrol/tokens", "application/json",
+	body, _ := json.Marshal(api.MintEnrollmentRequest{Name: name, Roles: []string{store.RoleClient}})
+	resp, err := insecureClient().Post(base+"/v1/enroll/tokens", "application/json",
 		strings.NewReader(string(body)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var mint api.MintEnrolmentResponse
+	var mint api.MintEnrollmentResponse
 	if err := json.NewDecoder(resp.Body).Decode(&mint); err != nil {
 		t.Fatal(err)
 	}
@@ -581,19 +581,19 @@ func enrolClient(t *testing.T, base string, layout paths.Layout, name string) *h
 	}
 
 	key, pubPEM := keypairPEM(t)
-	body, _ = json.Marshal(api.EnrolRequest{Token: mint.Token, PublicKey: pubPEM})
-	resp, err = insecureClient().Post(base+"/v1/enrol", "application/json",
+	body, _ = json.Marshal(api.EnrollRequest{Token: mint.Token, PublicKey: pubPEM})
+	resp, err = insecureClient().Post(base+"/v1/enroll", "application/json",
 		strings.NewReader(string(body)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var enrolled api.EnrolResponse
+	var enrolled api.EnrollResponse
 	if err := json.NewDecoder(resp.Body).Decode(&enrolled); err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
 	if enrolled.Certificate == "" {
-		t.Fatal("client enrolment returned no certificate")
+		t.Fatal("client enrollment returned no certificate")
 	}
 
 	cert, err := tls.X509KeyPair([]byte(enrolled.Certificate), []byte(key))
@@ -642,7 +642,7 @@ func TestAnAgeKeyIsBoundToAnIdentity(t *testing.T) {
 	base, layout := startTLSDaemon(t)
 
 	recipient := "age1zvkyg2lqzraa2lnjvqej32nkuu0ues2s82hzrye869xeexvn73equnujwj"
-	client := enrolClientWithKey(t, base, layout, "jays-laptop", recipient)
+	client := enrollClientWithKey(t, base, layout, "jays-laptop", recipient)
 
 	var out api.AgeKeyResponse
 	getInto(t, client, base+"/v1/identities/jays-laptop/age-key", &out)
@@ -667,7 +667,7 @@ func TestAnAgeKeyIsBoundToAnIdentity(t *testing.T) {
 // whoever a request body names.
 func TestAnAgeKeyIsRegisteredForTheCallerOnly(t *testing.T) {
 	base, layout := startTLSDaemon(t)
-	client := enrolClientWithKey(t, base, layout, "jays-laptop", "")
+	client := enrollClientWithKey(t, base, layout, "jays-laptop", "")
 
 	recipient := "age1zvkyg2lqzraa2lnjvqej32nkuu0ues2s82hzrye869xeexvn73equnujwj"
 	body, _ := json.Marshal(api.AgeKeyRequest{Recipient: recipient})
@@ -698,37 +698,37 @@ func TestAnAgeKeyIsRegisteredForTheCallerOnly(t *testing.T) {
 	}
 }
 
-func enrolClientWithKey(t *testing.T, base string, layout paths.Layout, name, recipient string) *http.Client {
+func enrollClientWithKey(t *testing.T, base string, layout paths.Layout, name, recipient string) *http.Client {
 	t.Helper()
 
-	body, _ := json.Marshal(api.MintEnrolmentRequest{Name: name, Roles: []string{store.RoleClient}})
-	resp, err := insecureClient().Post(base+"/v1/enrol/tokens", "application/json",
+	body, _ := json.Marshal(api.MintEnrollmentRequest{Name: name, Roles: []string{store.RoleClient}})
+	resp, err := insecureClient().Post(base+"/v1/enroll/tokens", "application/json",
 		strings.NewReader(string(body)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var mint api.MintEnrolmentResponse
+	var mint api.MintEnrollmentResponse
 	if err := json.NewDecoder(resp.Body).Decode(&mint); err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
 
 	key, pubPEM := keypairPEM(t)
-	body, _ = json.Marshal(api.EnrolRequest{
+	body, _ = json.Marshal(api.EnrollRequest{
 		Token: mint.Token, PublicKey: pubPEM, AgeRecipient: recipient,
 	})
-	resp, err = insecureClient().Post(base+"/v1/enrol", "application/json",
+	resp, err = insecureClient().Post(base+"/v1/enroll", "application/json",
 		strings.NewReader(string(body)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var enrolled api.EnrolResponse
+	var enrolled api.EnrollResponse
 	if err := json.NewDecoder(resp.Body).Decode(&enrolled); err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
 	if enrolled.Certificate == "" {
-		t.Fatal("enrolment returned no certificate")
+		t.Fatal("enrollment returned no certificate")
 	}
 
 	cert, err := tls.X509KeyPair([]byte(enrolled.Certificate), []byte(key))

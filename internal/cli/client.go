@@ -162,7 +162,7 @@ func authorityPath(l paths.Layout) (string, error) {
 			"issues from (D25), so a machine that has never met one has nothing to\n"+
 			"check against.\n\n"+
 			"A worker gets one by enrolling:\n"+
-			"  je enrol <name>                                            (there)\n"+
+			"  je enroll <name>                                            (there)\n"+
 			"  je worker run --token <t> --ca-pin <fp> --addr <host:port>  (here)\n\n"+
 			"Anything else needs a copy of the control plane's ca.crt at the second\n"+
 			"path above.",
@@ -211,7 +211,7 @@ func identityKeyPair(l paths.Layout) (tls.Certificate, error) {
 }
 
 // DialVerified connects to a control plane verified against a CA the caller
-// already has and trusts. Used during enrolment, once the authority has been
+// already has and trusts. Used during enrollment, once the authority has been
 // pinned by fingerprint.
 func DialVerified(addr string, caPEM []byte) (*Client, error) {
 	pool := x509.NewCertPool()
@@ -512,15 +512,15 @@ func (c *Client) Sync(ctx context.Context) (engine.LoadResult, error) {
 	return do[engine.LoadResult](ctx, c, http.MethodPost, "/v1/sync", nil)
 }
 
-// MintEnrolment asks the control plane for a one-time worker token.
-func (c *Client) MintEnrolment(ctx context.Context, req api.MintEnrolmentRequest) (api.MintEnrolmentResponse, error) {
-	return do[api.MintEnrolmentResponse](ctx, c, http.MethodPost, "/v1/enrol/tokens", req)
+// MintEnrollment asks the control plane for a one-time worker token.
+func (c *Client) MintEnrollment(ctx context.Context, req api.MintEnrollmentRequest) (api.MintEnrollmentResponse, error) {
+	return do[api.MintEnrollmentResponse](ctx, c, http.MethodPost, "/v1/enroll/tokens", req)
 }
 
-// Enrol redeems one. The request carries a public key and a token; nothing
+// Enroll redeems one. The request carries a public key and a token; nothing
 // secret travels in either direction.
-func (c *Client) Enrol(ctx context.Context, req api.EnrolRequest) (api.EnrolResponse, error) {
-	return do[api.EnrolResponse](ctx, c, http.MethodPost, "/v1/enrol", req)
+func (c *Client) Enroll(ctx context.Context, req api.EnrollRequest) (api.EnrollResponse, error) {
+	return do[api.EnrollResponse](ctx, c, http.MethodPost, "/v1/enroll", req)
 }
 
 // RegisterAgeKey binds this machine's secret-reading key to its identity.

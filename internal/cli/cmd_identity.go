@@ -26,7 +26,7 @@ func init() {
 			"signs the public half, and the certificate is renewed automatically\n" +
 			"while it is still valid.\n\n" +
 			"subcommands:\n" +
-			"  join    redeem a token from `je enrol --client`, and store the identity\n" +
+			"  join    redeem a token from `je enroll --client`, and store the identity\n" +
 			"  show    what this machine presents, and what the control plane makes of it\n\n" +
 			"Beside the control plane itself, `je identity join` needs no token: it\n" +
 			"reads the one left in the data directory, which it can only do if it\n" +
@@ -41,7 +41,7 @@ func runIdentity(ctx context.Context, env *Env, args []string) error {
 	cmd := commands["identity"]
 	fs := newFlagSet(cmd, env)
 	addr := fs.String("addr", "", "control plane address (default: the one this data dir records)")
-	token := fs.String("token", "", "a token from `je enrol <name> --client`")
+	token := fs.String("token", "", "a token from `je enroll <name> --client`")
 	caPin := fs.String("ca-pin", "", "the control plane's CA fingerprint, printed beside the token")
 	name := fs.String("name", defaultWorkerName(), "what to call this machine, when it names itself")
 	positional, err := parseArgs(fs, args)
@@ -88,22 +88,22 @@ func identityJoin(ctx context.Context, env *Env, addr, token, pin, name string) 
 	target = dialable(target)
 
 	if token != "" {
-		return enrolAt(ctx, env, target, token, pin)
+		return enrollAt(ctx, env, target, token, pin)
 	}
 
-	// No token: the local case. autoEnrol is silent when there is nothing to
+	// No token: the local case. autoEnroll is silent when there is nothing to
 	// read, which is right for a worker starting up and wrong here -- somebody
 	// typed this and is owed an answer either way.
 	if _, err := os.Stat(env.Layout.BootstrapToken()); err != nil {
 		return fmt.Errorf(
-			"no --token given, and no local enrolment token at %s.\n\n"+
+			"no --token given, and no local enrollment token at %s.\n\n"+
 				"That token exists only beside a running control plane. If this machine\n"+
 				"is not one, get a token from the machine that is:\n"+
-				"  je enrol %s --client        (there)\n"+
+				"  je enroll %s --client        (there)\n"+
 				"  je identity join --token <t> --ca-pin <fp> --addr <host:port>   (here)",
 			env.Layout.BootstrapToken(), name)
 	}
-	if err := autoEnrol(ctx, env, target, name, nil, []string{store.RoleClient}); err != nil {
+	if err := autoEnroll(ctx, env, target, name, nil, []string{store.RoleClient}); err != nil {
 		return err
 	}
 	return identityShow(ctx, env)
@@ -121,7 +121,7 @@ func identityShow(ctx context.Context, env *Env) error {
 	if err != nil {
 		return fmt.Errorf("this machine has no identity: %w.\n\n"+
 			"Get one:  je identity join        (beside the control plane)\n"+
-			"          je enrol <name> --client, then redeem the token here", err)
+			"          je enroll <name> --client, then redeem the token here", err)
 	}
 
 	fmt.Fprintf(env.Stdout, "name         %s\n", cert.Subject.CommonName)
@@ -153,7 +153,7 @@ func identityShow(ctx context.Context, env *Env) error {
 		if !slices.Contains(w.Roles, store.RoleClient) {
 			fmt.Fprintf(env.Stdout,
 				"\nThis identity is a worker, not a client. It can still write, because\n"+
-					"any certificate this authority signed is somebody -- but `je enrol\n"+
+					"any certificate this authority signed is somebody -- but `je enroll\n"+
 					"--client` is what marks a machine as a person at a terminal.\n")
 		}
 		return nil

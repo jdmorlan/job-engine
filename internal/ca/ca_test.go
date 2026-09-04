@@ -94,7 +94,7 @@ func TestAForeignCertificateDoesNotVerify(t *testing.T) {
 	}
 }
 
-func TestATokenEnrolsExactlyOnce(t *testing.T) {
+func TestATokenEnrollsExactlyOnce(t *testing.T) {
 	tokens := ca.NewTokens()
 
 	token, err := tokens.Issue("macbook", []string{"macos"}, nil)

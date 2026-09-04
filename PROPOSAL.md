@@ -3402,7 +3402,7 @@ real `sops` binary rather than on having read the spec carefully.
    identity work below: `je secret set --source` writes the file, `je secret
    recipients add --source X <name>` grants access to an identity rather than to
    a pasted key, and `je worker keygen` registers the key it creates.
-5. **Enrolled identity and mTLS. Shipped.** `je enrol <name> --labels <caps>` on
+5. **Enrolled identity and mTLS. Shipped.** `je enroll <name> --labels <caps>` on
    the control plane mints a one-time token; `je worker run --token <t> --ca-pin
    <fp>` on the other machine generates a keypair, verifies the control plane
    against the pin *before* sending the token, redeems it, and stores the issued
@@ -3418,7 +3418,7 @@ real `sops` binary rather than on having read the spec carefully.
    the web client are clients too: requiring one would make identity a thing that
    breaks every read command.
 
-   Enrolment was additive throughout: a worker that never enrolled registered by
+   Enrollment was additive throughout: a worker that never enrolled registered by
    claiming its own name, on a plaintext listener, exactly as before -- which is
    what every deployment did at the time this was written. Step 6 below ends
    that. A worker that has not enrolled can still connect and claim work, but
@@ -3480,12 +3480,12 @@ order:
    from nothing, and renewal is not that. The name comes from the verified
    certificate and is never read from the body, so there is nothing to ask for on
    somebody else's behalf, and renewal cannot change name, labels or roles: those
-   were decided at enrolment and reissuing is not an opportunity to revisit them.
+   were decided at enrollment and reissuing is not an opportunity to revisit them.
    A new keypair each time, so a leaked key stops being useful when its
    certificate expires rather than living as long as the worker.
 2. ~~**Local bootstrap must cost nothing.**~~ **Shipped.** A control plane
    serving TLS writes a bootstrap token into its own data directory at 0600, and
-   a worker on that machine enrols itself with it. The trust anchor is exactly
+   a worker on that machine enrolls itself with it. The trust anchor is exactly
    what it looks like: **the token sits beside the CA private key**, so anybody
    who can read it could sign their own certificates regardless — which is why
    the holder is allowed to name itself, and why requiring them to be told a name
@@ -3506,10 +3506,10 @@ order:
    own directory so it can be its own volume: the databases and the secret store
    live in the data volume and a worker has no business reading either, so it
    mounts only what it is meant to. The worker keeps no volume of its own and
-   re-enrols on every start, which C2 already permits — it holds nothing worth
+   re-enrolls on every start, which C2 already permits — it holds nothing worth
    keeping.
 
-4. ~~**Clock skew.**~~ **Shipped.** Compared at enrolment against the server's
+4. ~~**Clock skew.**~~ **Shipped.** Compared at enrollment against the server's
    `Date` header — the one exchange that happens before anything is trusted — and
    refused past two minutes with both times printed. A certificate validity
    failure elsewhere now says that certificates here live a day and are issued by
@@ -3534,9 +3534,9 @@ order:
    **What it cost, honestly.** Three things that used to work silently now
    require something:
 
-   - **A worker on another machine must enrol.** It could previously register by
+   - **A worker on another machine must enroll.** It could previously register by
      claiming a name over plaintext. There is no unverified transport left to do
-     that on, so `je enrol` is the first step rather than an optional one — and
+     that on, so `je enroll` is the first step rather than an optional one — and
      `--token` without `--ca-pin` is refused, because the unpinned path only ever
      made sense when the alternative was plaintext anyway.
    - **Every client needs the authority.** The CLI, the web client and an
@@ -3565,7 +3565,7 @@ moment a worker could live on somebody else's machine.
 7. ~~**Client identity, and the age key binding.**~~ **Shipped.** The two
    halves the flip did not need, done after it rather than before.
 
-   **An actor is proved.** `je enrol <name> --client` mints an identity for a
+   **An actor is proved.** `je enroll <name> --client` mints an identity for a
    person; `je identity join` redeems it, and beside the control plane needs no
    token for the same reason a local worker does not. When a connection carries
    a verified certificate its common name *is* the actor and the body is not
@@ -3586,14 +3586,14 @@ moment a worker could live on somebody else's machine.
      first client identity there is nobody to be, and refusing writes would mean
      a fresh deployment could do nothing at all. A config flag would be a value
      that can be true while no certificate exists, which is precisely the state
-     where nothing works. `je enrol --client` says what it is about to change
+     where nothing works. `je enroll --client` says what it is about to change
      while it can still be reconsidered.
 
    Reads stay open throughout. A certificate answers "who is this"; "who may
    look" is the question N1 keeps out, and answering it would break every read
    command for the CLI and the web client.
 
-   **An age key is bound to the identity**, at enrolment when the machine
+   **An age key is bound to the identity**, at enrollment when the machine
    already has one and over its own mTLS connection when it does not. `je secret
    recipients add --source X buildbox` resolves a name to the key that identity
    registered, so "this machine may read production credentials" is a statement
@@ -3613,7 +3613,7 @@ moment a worker could live on somebody else's machine.
    been told to create was never found. One path computed in two places. It is
    `paths.Layout.AgeIdentity()` now.
 
-**Order was: renewal, local auto-enrolment, compose, clock skew, the test
+**Order was: renewal, local auto-enrollment, compose, clock skew, the test
 harness, the flip, then client identity and the key binding.** Renewal first
 because everything after it depends on certificates being something you never
 think about. Client identity turned out not to be a prerequisite for the flip,

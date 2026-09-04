@@ -46,7 +46,7 @@ type Worker struct {
 	// certificate it presents (D25 step 5).
 	//
 	// Both nil for a worker that registered by claiming a name, which is what
-	// every worker did before enrolment existed and what any worker on a
+	// every worker did before enrollment existed and what any worker on a
 	// plaintext listener still does. Absent rather than faked: "this identity
 	// was issued" is a different fact from "this worker said it was called
 	// that", and the view should not blur them.
@@ -86,7 +86,7 @@ func (s *Store) RegisterWorker(ctx context.Context, w Worker) (Worker, error) {
 		VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
 		ON CONFLICT(id) DO UPDATE SET
 			-- An enrolled worker cannot rename itself or change what it can do.
-			-- Its name and labels were decided by whoever minted its enrolment
+			-- Its name and labels were decided by whoever minted its enrollment
 			-- token, and registration is only "I am here" (D25).
 			--
 			-- Enforced here rather than in the engine because this is the write:
@@ -386,17 +386,17 @@ const (
 	RoleClient  = "client"
 )
 
-// EnrolWorker writes an identity before the worker has ever connected.
+// EnrollWorker writes an identity before the worker has ever connected.
 //
 // The row exists first, and that ordering is the point: what this machine may
 // call itself and what capabilities it may advertise are decided here, by
-// whoever minted its enrolment token, and registration can then only report
+// whoever minted its enrollment token, and registration can then only report
 // that it is alive (D25).
 //
-// Re-enrolment overwrites the fingerprint and keeps the row, so a rebuilt
+// Re-enrollment overwrites the fingerprint and keeps the row, so a rebuilt
 // machine rejoining is visible as a changed certificate rather than as a second
 // worker with the same name.
-func (s *Store) EnrolWorker(ctx context.Context, w Worker) error {
+func (s *Store) EnrollWorker(ctx context.Context, w Worker) error {
 	labels, err := json.Marshal(w.Labels)
 	if err != nil {
 		return err
@@ -415,7 +415,7 @@ func (s *Store) EnrolWorker(ctx context.Context, w Worker) error {
 			name = excluded.name, labels = excluded.labels, roles = excluded.roles,
 			enrolled_at = excluded.enrolled_at,
 			cert_fingerprint = excluded.cert_fingerprint,
-			-- A re-enrolment that brought no key keeps the one on record. A
+			-- A re-enrollment that brought no key keeps the one on record. A
 			-- worker re-enrolling is the same machine with the same age key,
 			-- and clearing it would silently make every secret encrypted to it
 			-- unreadable.
@@ -433,7 +433,7 @@ func (s *Store) EnrolWorker(ctx context.Context, w Worker) error {
 // (D25).
 //
 // A property of the deployment rather than a setting, deliberately. There is no
-// flag to turn this on and no file to forget: running `je enrol --client` is
+// flag to turn this on and no file to forget: running `je enroll --client` is
 // the act, and it is one somebody does on purpose. The alternative -- a config
 // value -- is a thing that can be true while no certificate exists, which is
 // the state where nobody can do anything.
@@ -488,8 +488,8 @@ func (s *Store) RecordAgeRecipient(ctx context.Context, id, recipient string) er
 
 // RecordFingerprint updates which certificate an identity presents.
 //
-// Separate from EnrolWorker because renewal must not touch name, labels or
-// roles: those were decided at enrolment and a renewal is not an opportunity to
+// Separate from EnrollWorker because renewal must not touch name, labels or
+// roles: those were decided at enrollment and a renewal is not an opportunity to
 // revisit them.
 func (s *Store) RecordFingerprint(ctx context.Context, id, fingerprint string) error {
 	_, err := s.state.ExecContext(ctx,

@@ -23,39 +23,45 @@ import (
 
 func init() {
 	register(&Command{
-		Name:  "enrol",
-		Args:  "<worker-name>",
-		Usage: "issue a one-time token that lets one machine become a worker",
+		Name:  "enroll",
+		Args:  "<name> [--labels a,b] [--client]",
+		Usage: "issue a one-time token that lets one machine hold an identity",
 		Long: "Run this where the control plane is, then redeem the token on the\n" +
 			"machine that is becoming a worker:\n\n" +
-			"  je enrol macbook --labels macos     (here)\n" +
-			"  je worker join --token <token>      (there)\n\n" +
+			"  je enroll macbook --labels macos    (here)\n" +
+			"  je worker run --token <token>       (there)\n\n" +
+			"With --client it enrolls a person at a terminal instead, redeemed with\n" +
+			"`je identity join`. A machine that is both keeps one certificate\n" +
+			"carrying both roles.\n\n" +
+			"The FIRST client identity changes the deployment: from then on every\n" +
+			"request that changes something must present a certificate. This command\n" +
+			"says so before the token is redeemed.\n\n" +
 			"The name and labels are decided HERE, not by the machine redeeming\n" +
 			"the token. That is the point: a label is a capability, and a worker\n" +
 			"that advertises its own can grant itself whatever a label gates.\n\n" +
 			"The token is single-use and short-lived. It is a bearer credential --\n" +
 			"whoever holds it becomes this worker -- so it is shown once and the\n" +
 			"control plane keeps only a hash.",
-		Run: runEnrol,
+		Run: runEnroll,
 	})
 }
 
-func runEnrol(ctx context.Context, env *Env, args []string) error {
-	cmd := commands["enrol"]
+func runEnroll(ctx context.Context, env *Env, args []string) error {
+	cmd := commands["enroll"]
 	fs := newFlagSet(cmd, env)
 	labels := fs.String("labels", "", "comma-separated capabilities this worker may advertise")
-	client := fs.Bool("client", false, "enrol a person at a terminal rather than a worker")
+	client := fs.Bool("client", false, "enroll a person at a terminal rather than a worker")
 	positional, err := parseArgs(fs, args)
 	if err != nil {
 		return err
 	}
 	if len(positional) != 1 {
-		return usagef("usage: je enrol <name> [--labels a,b] [--client]")
+		return usagef("usage: je enroll <name> [--labels a,b] [--client]")
 	}
 
 	// Both is a real thing and worth allowing: a laptop that runs `macos` jobs
 	// and is also where somebody types `je run` is one machine with one
-	// certificate, and making it enrol twice would give it two identities and
+	// certificate, and making it enroll twice would give it two identities and
 	// make "who did this" depend on which command was running.
 	var roles []string
 	if *client {
@@ -69,7 +75,7 @@ func runEnrol(ctx context.Context, env *Env, args []string) error {
 		reqCtx, cancel := withTimeout(ctx)
 		defer cancel()
 
-		out, err := c.MintEnrolment(reqCtx, api.MintEnrolmentRequest{
+		out, err := c.MintEnrollment(reqCtx, api.MintEnrollmentRequest{
 			Name: positional[0], Labels: splitLabels(*labels), Roles: roles,
 		})
 		if err != nil {
@@ -110,32 +116,32 @@ func runEnrol(ctx context.Context, env *Env, args []string) error {
 					"command. Reading is unaffected.\n\n"+
 					"Machines that will still need to write:\n"+
 					"  beside the control plane   je identity join        (no token needed)\n"+
-					"  anywhere else              je enrol <name> --client, then redeem it\n")
+					"  anywhere else              je enroll <name> --client, then redeem it\n")
 		}
 		return nil
 	})
 }
 
-// enrolAt redeems a token against a control plane named directly.
+// enrollAt redeems a token against a control plane named directly.
 //
 // Not withClient: that resolves from this machine's own data directory, and a
 // machine that is becoming a worker has none. Being told where to go is the
-// whole situation enrolment exists for.
-func enrolAt(ctx context.Context, env *Env, addr, token, pin string) error {
+// whole situation enrollment exists for.
+func enrollAt(ctx context.Context, env *Env, addr, token, pin string) error {
 	if pin == "" {
 		// There is no unpinned path left. A token is a bearer credential, and
 		// handing it to whatever answers an address was tolerable only while a
 		// plaintext control plane was a thing that existed (D25).
 		return fmt.Errorf(
 			"--ca-pin is required with --token.\n" +
-				"It is the fingerprint printed beside the token by `je enrol`, and it is\n" +
+				"It is the fingerprint printed beside the token by `je enroll`, and it is\n" +
 				"what proves the control plane answering this address is the one that\n" +
 				"issued the token -- checked before the token is sent.")
 	}
 
 	// The control plane is verified BEFORE the token is sent. A token is a
 	// bearer credential -- whoever receives it becomes this worker -- so
-	// handing it to whatever answers the address would make enrolment the one
+	// handing it to whatever answers the address would make enrollment the one
 	// step where an impostor is free.
 	caPEM, err := fetchAuthority(ctx, addr, pin)
 	if err != nil {
@@ -145,7 +151,7 @@ func enrolAt(ctx context.Context, env *Env, addr, token, pin string) error {
 	if err != nil {
 		return err
 	}
-	return enrolWorker(ctx, env, c, token)
+	return enrollWorker(ctx, env, c, token)
 }
 
 // fetchAuthority downloads the control plane's CA over an unverified
@@ -153,7 +159,7 @@ func enrolAt(ctx context.Context, env *Env, addr, token, pin string) error {
 //
 // Unverified is safe here precisely because nothing is trusted yet and nothing
 // secret is sent: the response is a public certificate, and it is discarded
-// unless its fingerprint is the one printed by `je enrol` on the other machine.
+// unless its fingerprint is the one printed by `je enroll` on the other machine.
 func fetchAuthority(ctx context.Context, addr, pin string) ([]byte, error) {
 	client := &http.Client{
 		Timeout: 15 * time.Second,
@@ -196,18 +202,18 @@ func fetchAuthority(ctx context.Context, addr, pin string) ([]byte, error) {
 	return body, nil
 }
 
-// enrolWorker redeems a token on the machine that is becoming a worker.
+// enrollWorker redeems a token on the machine that is becoming a worker.
 //
 // The private key is generated here and never leaves: what crosses the network
 // is a public key and a token, and what comes back is a certificate. A control
 // plane that is compromised can refuse to issue, and cannot learn this key.
-// autoEnrol gives a worker on the control plane's own machine an identity,
+// autoEnroll gives a worker on the control plane's own machine an identity,
 // with nobody asked for anything (D25).
 //
 // Skipped silently when there is nothing to do. No token file means the control
-// plane is somewhere else, and a worker there enrols with a token and a pin
+// plane is somewhere else, and a worker there enrolls with a token and a pin
 // instead; an identity already present means there is nothing to bootstrap.
-func autoEnrol(ctx context.Context, env *Env, target, name string, labels, roles []string) error {
+func autoEnroll(ctx context.Context, env *Env, target, name string, labels, roles []string) error {
 	if _, err := os.Stat(env.Layout.IdentityCert()); err == nil {
 		return nil
 	}
@@ -225,27 +231,27 @@ func autoEnrol(ctx context.Context, env *Env, target, name string, labels, roles
 	caPEM, err := os.ReadFile(env.Layout.BootstrapCA())
 	if err != nil {
 		return fmt.Errorf(
-			"there is a local enrolment token but no authority beside it at %s: %w",
+			"there is a local enrollment token but no authority beside it at %s: %w",
 			env.Layout.BootstrapCA(), err)
 	}
 	c, err := DialVerified(target, caPEM)
 	if err != nil {
 		return err
 	}
-	return enrolWorkerAs(ctx, env, c, strings.TrimSpace(string(token)), name, labels, roles)
+	return enrollWorkerAs(ctx, env, c, strings.TrimSpace(string(token)), name, labels, roles)
 }
 
-func enrolWorker(ctx context.Context, env *Env, c *Client, token string) error {
-	return enrolWorkerAs(ctx, env, c, token, "", nil, nil)
+func enrollWorker(ctx context.Context, env *Env, c *Client, token string) error {
+	return enrollWorkerAs(ctx, env, c, token, "", nil, nil)
 }
 
-// enrolWorkerAs redeems a token and writes the identity it is issued.
+// enrollWorkerAs redeems a token and writes the identity it is issued.
 //
 // name, labels and roles are honoured only for a bootstrap token, where the
 // holder is on the control plane's own machine and names itself. For a minted
 // token the control plane ignores all three, because what the identity may be
 // was decided when the token was issued (D25).
-func enrolWorkerAs(ctx context.Context, env *Env, c *Client, token, name string, labels, roles []string) error {
+func enrollWorkerAs(ctx context.Context, env *Env, c *Client, token, name string, labels, roles []string) error {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return err
@@ -258,12 +264,12 @@ func enrolWorkerAs(ctx context.Context, env *Env, c *Client, token, name string,
 
 	reqCtx, cancel := withTimeout(ctx)
 	defer cancel()
-	out, err := c.Enrol(reqCtx, api.EnrolRequest{
+	out, err := c.Enroll(reqCtx, api.EnrollRequest{
 		Token: token, PublicKey: string(pubPEM),
 		Name: name, Labels: labels, Roles: roles,
 		// Bound at the moment the identity is decided, when this machine
 		// already has a key. Empty is ordinary: a machine that has never run
-		// `je worker keygen` enrols without one and registers it later (D25).
+		// `je worker keygen` enrolls without one and registers it later (D25).
 		AgeRecipient: ageRecipientOf(env),
 	})
 	if err != nil {
@@ -298,8 +304,8 @@ func enrolWorkerAs(ctx context.Context, env *Env, c *Client, token, name string,
 }
 
 // certName reads back what the control plane decided this identity is called,
-// which for a bootstrap enrolment is what was asked for and for a token
-// enrolment may not be.
+// which for a bootstrap enrollment is what was asked for and for a token
+// enrollment may not be.
 func certName(certPEM string) string {
 	block, _ := pem.Decode([]byte(certPEM))
 	if block == nil {

@@ -128,7 +128,7 @@ func Run(ctx context.Context, cfg Config) error {
 		return err
 	}
 
-	// A worker on this machine enrols with no token of its own: it reads this
+	// A worker on this machine enrolls with no token of its own: it reads this
 	// one, which it can only do if it already has the access that would let it
 	// read the CA key (D25). Removed on the way out so a stale file cannot
 	// outlive the process that honoured it.
@@ -140,7 +140,7 @@ func Run(ctx context.Context, cfg Config) error {
 	// and runs nothing (C11).
 	if err := publishBootstrap(eng, cfg); err != nil {
 		ln.Close()
-		return fmt.Errorf("preparing local enrolment: %w", err)
+		return fmt.Errorf("preparing local enrollment: %w", err)
 	}
 	// Only the token goes; the authority stays, because a worker that enrolled
 	// needs it to keep verifying this control plane after it restarts.
@@ -222,7 +222,7 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 }
 
-// publishBootstrap writes what a worker needs to enrol itself: the authority to
+// publishBootstrap writes what a worker needs to enroll itself: the authority to
 // verify this control plane, and a token that says it may (D25).
 func publishBootstrap(eng *engine.Engine, cfg Config) error {
 	authority, err := eng.Authority()

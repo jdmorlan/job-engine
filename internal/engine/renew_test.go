@@ -18,11 +18,11 @@ func TestRenewalIssuesAFreshCertificateForTheSameIdentity(t *testing.T) {
 	ctx := context.Background()
 	e, _ := chainFixture(t, nil, nil)
 
-	token, err := e.MintEnrolment(ctx, "laptop", []string{"macos"}, nil)
+	token, err := e.MintEnrollment(ctx, "laptop", []string{"macos"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, _, err := e.Enrol(ctx, token, publicKeyPEM(t), "", nil, nil, "")
+	first, _, err := e.Enroll(ctx, token, publicKeyPEM(t), "", nil, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,8 +68,8 @@ func TestRenewalUpdatesTheRecordedFingerprint(t *testing.T) {
 	ctx := context.Background()
 	e, _ := chainFixture(t, nil, nil)
 
-	token, _ := e.MintEnrolment(ctx, "laptop", nil, nil)
-	if _, _, err := e.Enrol(ctx, token, publicKeyPEM(t), "", nil, nil, ""); err != nil {
+	token, _ := e.MintEnrollment(ctx, "laptop", nil, nil)
+	if _, _, err := e.Enroll(ctx, token, publicKeyPEM(t), "", nil, nil, ""); err != nil {
 		t.Fatal(err)
 	}
 	before := workerNamed(t, e, "laptop").Fingerprint

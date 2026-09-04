@@ -93,7 +93,7 @@ func runWaiting(ctx context.Context, env *Env, args []string) error {
 			// mints one belongs here rather than in a page somebody has to know
 			// to go and read.
 			fmt.Fprintln(env.Stdout,
-				"  On another machine, enrol it first:  je enrol <name> --labels <label>")
+				"  On another machine, enroll it first:  je enroll <name> --labels <label>")
 			fmt.Fprintln(env.Stdout)
 		}
 

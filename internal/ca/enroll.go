@@ -11,21 +11,21 @@ import (
 	"time"
 )
 
-// TokenLifetime is how long an enrolment token is good for.
+// TokenLifetime is how long an enrollment token is good for.
 //
 // Short because a token is a bearer credential: whoever holds it becomes a
 // worker. Fifteen minutes is enough to paste it into another terminal and not
 // much else, which is the window it should have.
 const TokenLifetime = 15 * time.Minute
 
-// ErrBadToken is an enrolment attempt with a token that is wrong, used, or
+// ErrBadToken is an enrollment attempt with a token that is wrong, used, or
 // expired.
 //
 // One error for all three deliberately. Distinguishing "expired" from "never
 // existed" tells somebody guessing tokens which guesses were close.
-var ErrBadToken = errors.New("enrolment token is not valid")
+var ErrBadToken = errors.New("enrollment token is not valid")
 
-// Tokens issues and redeems one-time enrolment tokens.
+// Tokens issues and redeems one-time enrollment tokens.
 //
 // Held in memory rather than the database, and that is a decision rather than
 // laziness: a token is valid for minutes, so a control plane restart
@@ -73,7 +73,7 @@ type Grant struct {
 
 func NewTokens() *Tokens { return &Tokens{issued: map[string]pending{}} }
 
-// Issue mints a token that will enrol exactly one worker, under a name and
+// Issue mints a token that will enroll exactly one worker, under a name and
 // labels chosen *here*.
 //
 // Both are fixed at issue time on purpose. Labels are capabilities and a worker
@@ -82,7 +82,7 @@ func NewTokens() *Tokens { return &Tokens{issued: map[string]pending{}} }
 // Whoever mints the token decides what the machine is allowed to claim to be.
 func (t *Tokens) Issue(worker string, labels, roles []string) (string, error) {
 	if worker == "" {
-		return "", errors.New("an enrolment token needs a worker name")
+		return "", errors.New("an enrollment token needs a worker name")
 	}
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
@@ -128,9 +128,9 @@ func (t *Tokens) IssueBootstrap() (string, error) {
 
 // Redeem consumes a token and returns what it was issued for.
 //
-// One use only: the token is deleted whether or not the enrolment that follows
+// One use only: the token is deleted whether or not the enrollment that follows
 // succeeds. A token that could be retried is a token that can be replayed, and
-// a failed enrolment is cheap to reissue.
+// a failed enrollment is cheap to reissue.
 func (t *Tokens) Redeem(token string) (Grant, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()

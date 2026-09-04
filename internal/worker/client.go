@@ -181,7 +181,7 @@ func (c *Client) Renew(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	out, err := do[api.RenewResponse](ctx, c, http.MethodPost, "/v1/enrol/renew",
+	out, err := do[api.RenewResponse](ctx, c, http.MethodPost, "/v1/enroll/renew",
 		api.RenewRequest{PublicKey: string(pem.EncodeToMemory(
 			&pem.Block{Type: "PUBLIC KEY", Bytes: pubDER}))})
 	if err != nil {

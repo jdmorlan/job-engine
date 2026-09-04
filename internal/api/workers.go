@@ -204,7 +204,7 @@ func (s *Server) pathInt(w http.ResponseWriter, r *http.Request, name string) (i
 // actingAsSelf refuses a worker endpoint invoked for somebody else's id.
 //
 // Only meaningful once a request carries a verified identity; on a plaintext
-// listener there is none and this is a no-op, which is what keeps enrolment
+// listener there is none and this is a no-op, which is what keeps enrollment
 // additive rather than a breaking change. Where there IS one, a worker holding
 // a certificate for `laptop` cannot claim work leased to `buildbox` -- and
 // without this the certificate would prove who you are while changing nothing

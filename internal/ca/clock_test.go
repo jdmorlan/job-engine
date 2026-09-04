@@ -13,7 +13,7 @@ import (
 )
 
 // A clock that is wrong surfaces as a certificate that looks expired, which
-// sends people to look at the certificate. Saying so at enrolment costs a
+// sends people to look at the certificate. Saying so at enrollment costs a
 // sentence; not saying it costs somebody an afternoon (D25).
 func TestClockSkewIsRefusedWithBothTimes(t *testing.T) {
 	far := time.Now().Add(-90 * time.Minute).UTC().Format(http.TimeFormat)
