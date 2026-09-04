@@ -47,7 +47,7 @@ func runInit(ctx context.Context, env *Env, args []string) error {
 	name := filepath.Base(abs)
 	files := map[string]string{
 		"README.md":  repoReadme(name),
-		".gitignore": "# The engine keeps its own state elsewhere; nothing here is generated.\n",
+		".gitignore": gitignore(),
 	}
 	for _, sub := range []string{"chains", "scripts"} {
 		if err := os.MkdirAll(filepath.Join(abs, sub), 0o755); err != nil {
@@ -84,16 +84,23 @@ func runInit(ctx context.Context, env *Env, args []string) error {
 	// The steps that actually reach a running job. A source is a repository
 	// the control plane fetches (D22), so pushing is not optional politeness --
 	// it is how the engine ever sees any of this.
+	// `cd .` is not a step. Printed only when init was given a directory
+	// other than the one you are standing in, which is the only time it is
+	// something to do rather than noise in a list of instructions.
+	step := fmt.Sprintf("  cd %s\n", dir)
+	if here, err := os.Getwd(); err == nil && here == abs {
+		step = ""
+	}
 	fmt.Fprintf(env.Stdout, `
 next
-  cd %s
-  je new <job> --language python     writes a job and its script here
+%s  je new <job> --language python     writes a job and its script here
+  je try <job>                       run it here while you get it working
   git init && git add -A && git commit -m "jobs"
   gh repo create %s --private --source=. --push
 
 then point the engine at it:
   je source add %s <you>/%s
-`, dir, name, name, name)
+`, step, name, name, name)
 
 	if len(skipped) > 0 {
 		fmt.Fprintf(env.Stderr, "\nleft alone (already present): %v\n", skipped)
@@ -148,4 +155,25 @@ func title(name string) string {
 		return "jobs"
 	}
 	return titleFromSlug(name)
+}
+
+// gitignore covers what running a job here leaves behind.
+//
+// It used to say "nothing here is generated", which stopped being true when the
+// worker started preparing trees: `je try` installs your dependencies and
+// writes the helpers your job imports (D28, D21), both into the tree it is
+// standing in. That is the same thing a worker does to its own cache copy, and
+// it is the right place for it -- but in your working copy it is somebody's
+// first `git add -A`, and node_modules is not a thing to commit.
+func gitignore() string {
+	return `# What running a job here leaves behind.
+#
+# ` + "`je try`" + ` prepares this tree the way a worker would: your dependencies
+# installed from your lockfile, and the helpers your job imports written where
+# your language resolves them. Both belong to the machine, not to the repository.
+node_modules/
+.venv/
+__pycache__/
+.je-prepared-*
+`
 }
