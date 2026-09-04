@@ -10,6 +10,8 @@ import (
 	"github.com/jdmorlan/job-engine/internal/engine"
 	"github.com/jdmorlan/job-engine/internal/model"
 	"github.com/jdmorlan/job-engine/internal/paths"
+	"github.com/jdmorlan/job-engine/internal/store"
+	"github.com/jdmorlan/job-engine/internal/testsupport"
 )
 
 // chainFixture writes a set of job files and chain files, and loads them.
@@ -20,26 +22,45 @@ func chainFixture(t *testing.T, jobs, chains map[string]string) (*engine.Engine,
 	t.Helper()
 
 	dir := t.TempDir()
-	layout := paths.Layout{Data: dir, Jobs: filepath.Join(dir, "jobs")}
-	if err := os.MkdirAll(layout.Chains(), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	for slug, script := range jobs {
-		body := "command: [\"/bin/sh\", \"-c\", " + quote(script) + "]\n"
-		write(t, filepath.Join(layout.Jobs, slug+".yaml"), body)
-	}
-	for name, body := range chains {
-		write(t, filepath.Join(layout.Chains(), name+".yaml"), body)
-	}
+	layout := paths.Layout{Data: dir}
 
 	e := newEngine(t, layout, nil)
 	t.Cleanup(func() { e.Close(context.Background()) })
 
-	if _, err := e.LoadFromDisk(context.Background()); err != nil {
-		t.Fatalf("loading definitions: %v", err)
+	// A repository, served from a directory the test edits. Definitions reach
+	// the engine the only way they can now: by being fetched.
+	tree := filepath.Join(dir, "repo")
+	if err := os.MkdirAll(filepath.Join(tree, "chains"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for slug, script := range jobs {
+		body := "command: [\"/bin/sh\", \"-c\", " + quote(script) + "]\n"
+		write(t, filepath.Join(tree, slug+".yaml"), body)
+	}
+	for name, body := range chains {
+		write(t, filepath.Join(tree, "chains", name+".yaml"), body)
+	}
+
+	hub := testsupport.NewGitHub(t)
+	hub.Add("you/"+testSource, tree)
+	rememberFixture(e, tree, hub)
+	engine.SetGitHubBaseURLForTest(e, hub.URL)
+
+	if _, err := e.AddSource(context.Background(), store.Source{
+		Name: testSource, Kind: store.SourceKindGitHub, Location: "you/" + testSource,
+	}); err != nil {
+		t.Fatalf("registering the fixture source: %v", err)
 	}
 	return e, layout
 }
+
+// testSource is what fixture definitions are registered under. Every job it
+// loads is named <testSource>/<slug>, because a job always comes from a source
+// somebody named now.
+const testSource = "src"
+
+// qual is the name a fixture job is known by.
+func qual(slug string) string { return testSource + "/" + slug }
 
 func write(t *testing.T, path, body string) {
 	t.Helper()
@@ -125,7 +146,7 @@ steps:
 	if view.State != engine.ChainComplete {
 		t.Fatalf("state = %q, want complete", view.State)
 	}
-	if view.Trigger == nil || view.Trigger.Job != "extract" {
+	if view.Trigger == nil || view.Trigger.Job != qual("extract") {
 		t.Fatalf("trigger = %+v, want the extract run that set it off", view.Trigger)
 	}
 	if len(view.Steps) != 2 {
@@ -275,7 +296,7 @@ steps:
 
 func TestARemovedChainFileStopsFiringAndKeepsItsHistory(t *testing.T) {
 	ctx := context.Background()
-	e, layout := chainFixture(t,
+	e, _ := chainFixture(t,
 		map[string]string{"extract": `echo one`, "rollup": `echo two`},
 		map[string]string{"daily": `
 steps:
@@ -288,10 +309,10 @@ steps:
 	}
 	drainQueue(t, e)
 
-	if err := os.Remove(filepath.Join(layout.Chains(), "daily.yaml")); err != nil {
+	if err := os.Remove(filepath.Join(chainsDir(e), "daily.yaml")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.LoadFromDisk(ctx); err != nil {
+	if _, err := e.Sync(ctx); err != nil {
 		t.Fatalf("reloading without the chain file: %v", err)
 	}
 
@@ -315,7 +336,7 @@ steps:
 
 func TestARuleThatCannotFireSaysSoInsteadOfNothing(t *testing.T) {
 	ctx := context.Background()
-	e, layout := chainFixture(t,
+	e, _ := chainFixture(t,
 		map[string]string{"extract": `echo one`, "rollup": `echo two`},
 		map[string]string{"daily": `
 steps:
@@ -327,9 +348,9 @@ steps:
 	// which is D10's misconfigured state. Rewritten after the first load
 	// rather than before it, so the chain is wired to a job that was fine when
 	// the wiring was written -- which is how this happens in practice.
-	write(t, filepath.Join(layout.Jobs, "rollup.yaml"),
+	write(t, filepath.Join(treeDir(e), "rollup.yaml"),
 		"command: [\"echo\", \"hi\"]\nsecrets: [MISSING_TOKEN]\n")
-	if _, err := e.LoadFromDisk(ctx); err != nil {
+	if _, err := e.Sync(ctx); err != nil {
 		t.Fatal(err)
 	}
 
@@ -354,7 +375,7 @@ steps:
 		if !strings.Contains(string(ev.Payload), "MISSING_TOKEN") {
 			t.Errorf("route.failed does not say why: %s", ev.Payload)
 		}
-		if !strings.Contains(string(ev.Payload), `"chain":"daily"`) {
+		if !strings.Contains(string(ev.Payload), `"chain":"src/daily"`) {
 			t.Errorf("route.failed does not name the chain: %s", ev.Payload)
 		}
 		return
@@ -418,7 +439,7 @@ steps:
 			t.Errorf("step %d (%s) was not found by the chain view", s.Step, s.Job)
 		}
 	}
-	if view.Trigger == nil || view.Trigger.Job != "extract" {
+	if view.Trigger == nil || view.Trigger.Job != qual("extract") {
 		t.Fatalf("trigger = %+v", view.Trigger)
 	}
 }

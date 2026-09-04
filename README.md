@@ -69,17 +69,35 @@ does not — it removes a service *here*, and a control plane in Kubernetes
 carries on. The danger is not an error, it is a command that succeeds and
 changes something other than what you meant.
 
-**Definitions belong in a repository of yours.** A source is a whole tree, not a
-pile of YAML (D22): the scripts a job runs live beside it and travel to the
-worker with it, and secrets are encrypted into it and granted to named machines.
-`je demo` shows the shape — the examples live in `demo/` in this repository and
-are registered as a source, exactly as your own jobs in your own repository
-would be. The engine reads a source; it does not manage the repository it came
-from.
+**Definitions live in a repository. That is the only kind of source there is.**
+
+```console
+$ je source add house you/house-jobs
+$ je demo                              the examples, from this project's repo
+```
+
+There is no local jobs directory, and the engine's data directory holds engine
+state and a cache — nothing you authored. That is not tidiness: a directory of
+job files on the control plane's disk could only ever run on a worker that
+shared that disk, so it broke the moment there were two machines. A repository
+travels; every worker fetches the tree its job belongs to, so the same job runs
+on your laptop, in a container, or in a cluster without changing anything.
+
+Job names carry their source — `house/water-plants` — and `je new` writes into
+the repository you are standing in:
+
+```console
+$ cd ~/repos/house-jobs
+$ je new water-plants --language python
+wrote water-plants.yaml
+wrote scripts/water-plants.py
+```
+
+Then commit, push, and `je source sync`.
 
 In development, `je reset` tears down everything on this machine — containers,
-services, volumes, databases, certificates — and leaves the jobs directory alone
-unless you pass `--jobs`. It only removes what *this* data directory owns, and
+services, volumes, databases, certificates and the cache of fetched trees.
+Nothing it removes is a definition, because none of them are here. It only removes what *this* data directory owns, and
 says what it left and why:
 
 ```console
@@ -89,9 +107,8 @@ This will remove, on this machine only:
   the control-plane container (je-control-plane)
   docker volume je-data
   .je/state.db
+  .je/cache
   ...
-
-Kept: ~/.je/jobs -- --jobs removes it too.
 
 There is no undo. Type ".je" to confirm:
 ```
@@ -578,15 +595,11 @@ Fetched sources are re-read on request and once when the control plane starts.
 A source that cannot be reached keeps serving the tree it last fetched and says
 why in `je source`, so a laptop that wakes without a network keeps working.
 
-Every engine has a built-in source, `local` — your jobs directory. Registering
-nothing still leaves somewhere to put a job file.
-
-**A job's name carries its source**, because two repos will eventually both
-contain a `sync.yaml` and you may own neither:
+**A job's name carries its source**, always, because two repos will eventually
+both contain a `sync.yaml` and you may own neither:
 
 ```console
-$ je run ingest              # fine while only one source has it
-$ je run weather/ingest      # always works
+$ je run weather/ingest
 $ je run sync
 je run: "sync" is ambiguous: home/sync and weather/sync -- name the source, e.g. home/sync
 ```
@@ -613,7 +626,7 @@ to read.
 A job is a YAML file naming a command. The file's name is the job's name.
 
 ```yaml
-# jobs/weather-ingest.yaml
+# weather-ingest.yaml, in your jobs repository
 name: Weather Ingest
 command: ["python3", "scripts/ingest_weather.py"]
 workdir: ~/code/almanac
@@ -681,7 +694,7 @@ A job never names another job. What happens after what lives in one file per
 flow, and the file's name is the chain's name.
 
 ```yaml
-# jobs/chains/daily-weather.yaml
+# chains/daily-weather.yaml, in your jobs repository
 description: ingest readings, normalise them, roll them up
 
 steps:
@@ -909,7 +922,10 @@ property of the binary, not a goal (D23).
   lock            the single-writer flock
   secrets.json    the local secret store, mode 0600 (D10)
   daemon.json     the control plane's address, so clients can find it
-  jobs/           the built-in `local` source (override with JE_JOBS_DIR)
-    chains/       chain files, one flow per file
-  sources/        fetched repositories, cached under the commit they came from
+  ca/             the authority it issues worker and client identities from
+  cache/
+    sources/      fetched repositories, under the commit they came from
 ```
+
+Nothing here is a definition. Everything under `cache/` can be deleted and
+re-fetched, and everything else is state this engine produced.

@@ -108,9 +108,6 @@ func installControlPlane(ctx context.Context, env *Env, addr string, mode instal
 				// bind mount goes through VirtioFS and has the same class of
 				// silent locking pathology D19 warns about for NFS.
 				"je-data:/var/lib/je",
-				// Definitions are read-only and safe to bind -- no SQLite
-				// involved -- and editing job files on the host is the point.
-				env.Layout.Jobs + ":/var/lib/je/jobs:ro",
 			},
 			// D9/D19: containers default to UTC and schedules mean local time
 			// to a human. This is the "why did my 3am job run at 8pm" bug.

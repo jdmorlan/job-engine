@@ -24,6 +24,7 @@ import (
 	"github.com/jdmorlan/job-engine/internal/engine"
 	"github.com/jdmorlan/job-engine/internal/paths"
 	"github.com/jdmorlan/job-engine/internal/store"
+	"github.com/jdmorlan/job-engine/internal/testsupport"
 	"github.com/jdmorlan/job-engine/internal/worker"
 )
 
@@ -123,7 +124,19 @@ func compressLifetimes(t *testing.T, leaf, renewBefore time.Duration) func() {
 func startTLSDaemon(t *testing.T) (base string, layout paths.Layout) {
 	t.Helper()
 	dir := t.TempDir()
-	layout = paths.Layout{Data: dir, Jobs: filepath.Join(dir, "jobs")}
+	layout = paths.Layout{Data: dir}
+
+	// One job, in a repository, because that is the only place a job can be.
+	tree := filepath.Join(dir, "repo")
+	if err := os.MkdirAll(tree, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tree, "hello.yaml"),
+		[]byte("command: [\"/bin/sh\", \"-c\", \"true\"]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hub := testsupport.NewGitHub(t)
+	hub.Add("you/src", tree)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	ready := make(chan struct{})
@@ -131,8 +144,9 @@ func startTLSDaemon(t *testing.T) (base string, layout paths.Layout) {
 	go func() {
 		done <- daemon.Run(ctx, daemon.Config{
 			Layout: layout, Addr: "127.0.0.1:0", Version: "test",
-			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-			Ready:  ready,
+			GitHubAPI: hub.URL,
+			Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+			Ready:     ready,
 		})
 	}()
 	select {
@@ -154,7 +168,23 @@ func startTLSDaemon(t *testing.T) (base string, layout paths.Layout) {
 	if !info.TLS {
 		t.Fatal("the runtime file does not record that this control plane serves TLS")
 	}
-	return "https://" + info.Address, layout
+	base = "https://" + info.Address
+
+	// Registered before any client identity exists, so this is an ungated
+	// write -- the same order a real first-run has.
+	body, _ := json.Marshal(api.AddSourceRequest{
+		Name: "src", Kind: store.SourceKindGitHub, Location: "you/src",
+	})
+	resp, err := insecureClient().Post(base+"/v1/sources", "application/json",
+		strings.NewReader(string(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		t.Fatalf("registering the fixture source: %s", resp.Status)
+	}
+	return base, layout
 }
 
 // enrollAWorker performs the real flow: mint, redeem, write the identity, and
@@ -287,7 +317,6 @@ func TestARunningWorkerRenewsItselfUnattended(t *testing.T) {
 	w, err := worker.New(worker.Options{
 		Name: "unattended", Labels: []string{store.DefaultLabel},
 		Concurrency: 1, Version: "test",
-		JobsDir:  filepath.Join(layout.Data, "jobs"),
 		CacheDir: layout.Data,
 		Client:   client,
 		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -351,7 +380,7 @@ func TestALocalWorkerEnrollsItselfFromTheDataDirectory(t *testing.T) {
 // outlive the process that honoured it.
 func TestTheBootstrapTokenDoesNotOutliveTheControlPlane(t *testing.T) {
 	dir := t.TempDir()
-	layout := paths.Layout{Data: dir, Jobs: filepath.Join(dir, "jobs")}
+	layout := paths.Layout{Data: dir}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	ready := make(chan struct{})
@@ -384,7 +413,7 @@ func TestTheBootstrapTokenDoesNotOutliveTheControlPlane(t *testing.T) {
 // all speak TLS. This one fails.
 func TestThereIsNoPlaintextListener(t *testing.T) {
 	dir := t.TempDir()
-	layout := paths.Layout{Data: dir, Jobs: filepath.Join(dir, "jobs")}
+	layout := paths.Layout{Data: dir}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	ready := make(chan struct{})
@@ -518,14 +547,8 @@ func TestTheActorComesFromTheCertificate(t *testing.T) {
 	base, layout := startTLSDaemon(t)
 	client := enrollClient(t, base, layout, "jays-laptop")
 
-	write(t, filepath.Join(layout.Jobs, "hello.yaml"),
-		"command: [\"/bin/sh\", \"-c\", \"true\"]\n", 0o644)
-	if code := postSync(t, client, base); code != http.StatusOK {
-		t.Fatalf("sync = %d", code)
-	}
-
 	// The body claims somebody else entirely. It must not be believed.
-	body, _ := json.Marshal(api.TriggerRequest{Job: "hello", Actor: "somebody-else"})
+	body, _ := json.Marshal(api.TriggerRequest{Job: "src/hello", Actor: "somebody-else"})
 	resp, err := client.Post(base+"/v1/runs", "application/json", strings.NewReader(string(body)))
 	if err != nil {
 		t.Fatal(err)

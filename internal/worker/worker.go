@@ -44,14 +44,12 @@ type Options struct {
 	// Version must match the control plane's (C10).
 	Version string
 
-	// JobsDir is where this machine keeps job definitions and the code beside
-	// them. It is what an unset `workdir` resolves to (D20: paths are resolved
-	// by whoever will use them).
-	JobsDir string
-
 	// CacheDir is where this machine keeps trees fetched from the control
 	// plane. Content-addressed by commit, so it is disposable: deleting it
 	// costs a re-download and nothing else (D25).
+	//
+	// This is the only place a worker keeps anything a job runs from. There is
+	// no jobs directory: every job arrives with the tree it belongs to.
 	CacheDir string
 
 	// IdentityFile is the age key that lets this worker read secrets encrypted
@@ -102,17 +100,11 @@ func New(opts Options) (*Worker, error) {
 	if opts.Concurrency <= 0 {
 		opts.Concurrency = engine.DefaultConcurrency
 	}
-	if opts.JobsDir == "" {
-		return nil, errors.New("a worker needs a jobs directory to resolve workdirs against")
-	}
 	if opts.Logger == nil {
 		opts.Logger = slog.New(slog.NewTextHandler(os.Stderr, nil))
 	}
 	if opts.CacheDir == "" {
-		// Beside the jobs directory rather than in it: fetched trees are not
-		// definitions this machine owns, and `je demo --remove` should never
-		// be able to reach them.
-		opts.CacheDir = filepath.Join(filepath.Dir(opts.JobsDir), "cache")
+		return nil, errors.New("a worker needs a cache directory for the trees it fetches")
 	}
 
 	return &Worker{
@@ -482,10 +474,11 @@ func (w *Worker) resolveWorkdir(declared, sourceRoot string) (string, error) {
 		return "", err
 	}
 
-	// A job from a registered source runs in that source's tree, because its
-	// code arrived with its definition and lives beside it there (D22). Only
-	// the built-in local source falls back to this worker's jobs directory.
-	base := w.opts.JobsDir
+	// A job runs in its source's tree, because its code arrived with its
+	// definition and lives beside it there (D22). Every job has one: there is
+	// no source that is a directory on somebody's disk any more, so there is
+	// no case left where a worker has to guess where the code is.
+	base := sourceRoot
 	if sourceRoot != "" {
 		if _, err := os.Stat(sourceRoot); err != nil {
 			// Said rather than papered over. Falling back to this worker's own

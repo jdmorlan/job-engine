@@ -18,16 +18,16 @@ import (
 // on names alone, with no key anywhere near the engine (D25).
 func TestARepoSecretSatisfiesADeclarationWithoutAKey(t *testing.T) {
 	ctx := context.Background()
-	e, layout := chainFixture(t, nil, nil)
+	e, _ := chainFixture(t, nil, nil)
 
-	writeSecretsFile(t, layout.Jobs, "WEATHER_API_KEY", "hunter2")
-	writeJobFile(t, layout.Jobs, "ingest", "command: [\"/bin/sh\", \"-c\", \"true\"]\nsecrets: [WEATHER_API_KEY]\n")
+	writeSecretsFile(t, treeDir(e), "WEATHER_API_KEY", "hunter2")
+	writeJobFile(t, treeDir(e), "ingest", "command: [\"/bin/sh\", \"-c\", \"true\"]\nsecrets: [WEATHER_API_KEY]\n")
 
 	if _, err := e.Sync(ctx); err != nil {
 		t.Fatal(err)
 	}
 
-	job := jobBySlug(t, e, "ingest")
+	job := jobBySlug(t, e, qual("ingest"))
 	if job.ConfigError != "" {
 		t.Fatalf("a job whose secret is encrypted beside it was misconfigured: %s", job.ConfigError)
 	}
@@ -37,16 +37,16 @@ func TestARepoSecretSatisfiesADeclarationWithoutAKey(t *testing.T) {
 // which is the whole of D10's pit of success.
 func TestASecretNothingSuppliesIsStillMisconfigured(t *testing.T) {
 	ctx := context.Background()
-	e, layout := chainFixture(t, nil, nil)
+	e, _ := chainFixture(t, nil, nil)
 
-	writeSecretsFile(t, layout.Jobs, "WEATHER_API_KEY", "hunter2")
-	writeJobFile(t, layout.Jobs, "ingest", "command: [\"/bin/sh\", \"-c\", \"true\"]\nsecrets: [SOMETHING_ELSE]\n")
+	writeSecretsFile(t, treeDir(e), "WEATHER_API_KEY", "hunter2")
+	writeJobFile(t, treeDir(e), "ingest", "command: [\"/bin/sh\", \"-c\", \"true\"]\nsecrets: [SOMETHING_ELSE]\n")
 
 	if _, err := e.Sync(ctx); err != nil {
 		t.Fatal(err)
 	}
 
-	job := jobBySlug(t, e, "ingest")
+	job := jobBySlug(t, e, qual("ingest"))
 	if !strings.Contains(job.ConfigError, "SOMETHING_ELSE") {
 		t.Errorf("ConfigError = %q, want it to name the secret nothing supplies", job.ConfigError)
 	}
@@ -57,24 +57,24 @@ func TestASecretNothingSuppliesIsStillMisconfigured(t *testing.T) {
 // taking down every job in the source alongside it.
 func TestABrokenSecretsFileDoesNotRejectTheSync(t *testing.T) {
 	ctx := context.Background()
-	e, layout := chainFixture(t, nil, nil)
+	e, _ := chainFixture(t, nil, nil)
 
-	if err := os.WriteFile(filepath.Join(layout.Jobs, secretfile.Name),
+	if err := os.WriteFile(filepath.Join(treeDir(e), secretfile.Name),
 		[]byte("this is not a secrets file\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	writeJobFile(t, layout.Jobs, "needs", "command: [\"/bin/sh\", \"-c\", \"true\"]\nsecrets: [WEATHER_API_KEY]\n")
-	writeJobFile(t, layout.Jobs, "fine", "command: [\"/bin/sh\", \"-c\", \"true\"]\n")
+	writeJobFile(t, treeDir(e), "needs", "command: [\"/bin/sh\", \"-c\", \"true\"]\nsecrets: [WEATHER_API_KEY]\n")
+	writeJobFile(t, treeDir(e), "fine", "command: [\"/bin/sh\", \"-c\", \"true\"]\n")
 
 	if _, err := e.Sync(ctx); err != nil {
 		t.Fatalf("a broken secrets file rejected the whole sync: %v", err)
 	}
 
-	if got := jobBySlug(t, e, "needs").ConfigError; !strings.Contains(got, secretfile.Name) {
+	if got := jobBySlug(t, e, qual("needs")).ConfigError; !strings.Contains(got, secretfile.Name) {
 		t.Errorf("ConfigError = %q, want it to name the unreadable file rather than "+
 			"claim the secret was never set", got)
 	}
-	if got := jobBySlug(t, e, "fine").ConfigError; got != "" {
+	if got := jobBySlug(t, e, qual("fine")).ConfigError; got != "" {
 		t.Errorf("a job that needs no secrets was taken down too: %s", got)
 	}
 }
@@ -127,10 +127,10 @@ func jobBySlug(t *testing.T, e *engine.Engine, slug string) store.Job {
 // read, and puts no value in the environment (D25).
 func TestDispatchCarriesNamesForSecretsTheControlPlaneCannotRead(t *testing.T) {
 	ctx := context.Background()
-	e, layout := chainFixture(t, nil, nil)
+	e, _ := chainFixture(t, nil, nil)
 
-	writeSecretsFile(t, layout.Jobs, "WEATHER_API_KEY", "sk-live-value")
-	writeJobFile(t, layout.Jobs, "ingest",
+	writeSecretsFile(t, treeDir(e), "WEATHER_API_KEY", "sk-live-value")
+	writeJobFile(t, treeDir(e), "ingest",
 		"command: [\"/bin/sh\", \"-c\", \"true\"]\nsecrets: [WEATHER_API_KEY]\n")
 	if _, err := e.Sync(ctx); err != nil {
 		t.Fatal(err)
@@ -142,7 +142,7 @@ func TestDispatchCarriesNamesForSecretsTheControlPlaneCannotRead(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.TriggerRun(ctx, "ingest", engine.RunOptions{}); err != nil {
+	if _, err := e.TriggerRun(ctx, qual("ingest"), engine.RunOptions{}); err != nil {
 		t.Fatal(err)
 	}
 

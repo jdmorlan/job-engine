@@ -35,10 +35,13 @@ func repo(t *testing.T, jobs map[string]string, chains map[string]string) string
 	return dir
 }
 
+// addSource registers a second repository, served from a directory by the same
+// fake GitHub the fixture uses.
 func addSource(t *testing.T, e *engine.Engine, name, dir string) engine.LoadResult {
 	t.Helper()
+	hubFor(e).Add("you/"+name, dir)
 	result, err := e.AddSource(context.Background(), store.Source{
-		Name: name, Kind: store.SourceKindDir, Location: dir,
+		Name: name, Kind: store.SourceKindGitHub, Location: "you/" + name,
 	})
 	if err != nil {
 		t.Fatalf("registering %s: %v", name, err)
@@ -59,10 +62,12 @@ func TestAJobFromASourceIsNamedForIt(t *testing.T) {
 	for _, j := range jobs {
 		names[j.Slug] = j.Source
 	}
-	// The built-in local source qualifies to the bare slug: the first job
-	// somebody writes should not have to know sources are a concept.
-	if names["scratch"] != store.LocalSource {
-		t.Errorf("local job is named %v, want a bare slug", names)
+	// Every job carries its source, because every job comes from one. There is
+	// no built-in source qualifying to a bare slug any more: a definition lives
+	// in a repository somebody registered, and the name it was registered under
+	// is worth carrying.
+	if names[qual("scratch")] != testSource {
+		t.Errorf("fixture job is named %v, want %s", names, qual("scratch"))
 	}
 	if names["weather/ingest"] != "weather" {
 		t.Errorf("source job is named %v, want weather/ingest", names)
@@ -129,7 +134,7 @@ func TestABrokenSourceDoesNotTakeTheOthersDown(t *testing.T) {
 			live[j.Slug] = true
 		}
 	}
-	for _, want := range []string{"scratch", "good/fine", "bad/also-fine"} {
+	for _, want := range []string{qual("scratch"), "good/fine", "bad/also-fine"} {
 		if !live[want] {
 			t.Errorf("%s stopped loading because a different source is broken", want)
 		}
@@ -229,22 +234,23 @@ func TestRemovingASourceKeepsItsHistory(t *testing.T) {
 	}
 }
 
-func TestTheBuiltInSourceCannotBeRemovedOrReRegistered(t *testing.T) {
+// A source is a repository. Anything else is refused at registration, which is
+// the moment somebody can still do something about it.
+//
+// The directory kind used to be accepted here, and it never travelled: a job
+// whose code sat on the control plane's disk could only run on a worker sharing
+// that disk, so it was broken the moment there were two machines (D22/D25).
+func TestASourceMustBeARepository(t *testing.T) {
 	ctx := context.Background()
 	e, _ := chainFixture(t, map[string]string{"scratch": `echo local`}, nil)
 
-	if _, err := e.RemoveSource(ctx, store.LocalSource); err == nil {
-		t.Error("the built-in source was removed, leaving nowhere to put a job file")
-	}
 	if _, err := e.AddSource(ctx, store.Source{
-		Name: store.LocalSource, Kind: store.SourceKindDir, Location: t.TempDir(),
+		Name: "onefile", Kind: "dir", Location: t.TempDir(),
 	}); err == nil {
-		t.Error("the built-in source was re-registered over")
+		t.Error("a directory was registered as a source")
 	}
 }
 
-// githubStub serves the two requests a fetch makes, so the whole path -- ref to
-// commit, tarball, unpack, load, run -- is exercised without a network.
 func githubStub(t *testing.T, sha string, files map[string]string) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -287,65 +293,6 @@ func githubStub(t *testing.T, sha string, files map[string]string) *httptest.Ser
 	}))
 }
 
-// The control plane has to be able to hand a pinned tree to a worker that
-// cannot see its disk, and to refuse the two cases that have no tree to give
-// (D25).
-// A source registered with --path is a real thing to want -- one repository
-// holding python-jobs/ and typescript-jobs/, registered separately -- and until
-// the demo used one, nothing exercised it (D22).
-//
-// Two bugs hid behind that. The secrets file was looked up at
-// <subpath>/<subpath>/, because SourceDir already joins the subpath. And the
-// tree served to a worker was the repository root rather than the source root,
-// so a remote worker would have run every job one directory above its code.
-func TestASubpathSourceLoadsAndServesItsOwnRoot(t *testing.T) {
-	ctx := context.Background()
-	e, _ := chainFixture(t, nil, nil)
-
-	const sha = "b4c92d1ffffffffffffffffffffffffffffffffff"
-	server := githubStub(t, sha, map[string]string{
-		"README.md":             "not a job\n",
-		"demo/hello.yaml":       "command: [\"/bin/sh\", \"-c\", \"true\"]\n",
-		"demo/scripts/hello.sh": "#!/bin/sh\necho hi\n",
-		"other/ignored.yaml":    "command: [\"/bin/sh\", \"-c\", \"true\"]\n",
-	})
-	defer server.Close()
-	engine.SetGitHubBaseURLForTest(e, server.URL)
-
-	if _, err := e.AddSource(ctx, store.Source{
-		Name: "demo", Kind: store.SourceKindGitHub, Location: "you/jobs", Subpath: "demo",
-	}); err != nil {
-		t.Fatalf("registering a subpath source: %v", err)
-	}
-
-	// Only the subpath's definitions load -- the sibling directory is not this
-	// source's, and a repository root full of other things is the normal case.
-	jobs, err := e.Jobs(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var slugs []string
-	for _, j := range jobs {
-		slugs = append(slugs, j.Slug)
-	}
-	if len(slugs) != 1 || slugs[0] != "demo/hello" {
-		t.Fatalf("jobs = %v, want just demo/hello from the subpath", slugs)
-	}
-
-	// What a worker is served must be the source root, not the repository root.
-	dir, err := e.SourceTreeDir(ctx, "demo", sha)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(filepath.Join(dir, "hello.yaml")); err != nil {
-		t.Errorf("the served tree is not the source root: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(dir, "demo")); err == nil {
-		t.Error("the served tree is the repository root, so a worker would run " +
-			"every job one directory above its code")
-	}
-}
-
 func TestAPinnedTreeIsServableAndAnythingElseIsRefused(t *testing.T) {
 	ctx := context.Background()
 	e, _ := chainFixture(t, nil, nil)
@@ -375,11 +322,6 @@ func TestAPinnedTreeIsServableAndAnythingElseIsRefused(t *testing.T) {
 	// empty archive that fails as "command not found" on the other machine.
 	if _, err := e.SourceTreeDir(ctx, "weather", "0000000000000000000000000000000000000000"); err == nil {
 		t.Error("a revision that was never fetched was served anyway")
-	}
-
-	// The built-in local source has no commit, so there is nothing to pin.
-	if _, err := e.SourceTreeDir(ctx, store.LocalSource, sha); err == nil {
-		t.Error("a dir source was served as though it had a revision")
 	}
 }
 

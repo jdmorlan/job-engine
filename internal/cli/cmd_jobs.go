@@ -50,7 +50,11 @@ func runJobs(ctx context.Context, env *Env, args []string) error {
 		}
 
 		if len(jobs) == 0 {
-			fmt.Fprintf(env.Stdout, "no jobs in %s\n", env.Layout.Jobs)
+			fmt.Fprintln(env.Stdout,
+				"no jobs loaded.\n\n"+
+					"Definitions live in a repository and reach the engine as a source:\n"+
+					"  je source add <name> <owner/repo>\n"+
+					"  je demo                          the examples, from this project's repo")
 			return nil
 		}
 

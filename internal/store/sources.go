@@ -8,17 +8,19 @@ import (
 )
 
 // Source kinds (D22).
-const (
-	SourceKindDir    = "dir"
-	SourceKindGitHub = "github"
-)
-
-// LocalSource is the built-in source every engine has.
 //
-// It exists so that registering nothing still gives you somewhere to put a job
-// file. It cannot be removed, and its location is empty, meaning "wherever the
-// jobs directory is configured to be".
-const LocalSource = "local"
+// One kind, and the constant stays so that adding a second is a change in one
+// place rather than a string appearing everywhere.
+//
+// The directory kind is gone, along with the built-in `local` source that was
+// a directory inside the engine's own data directory. Definitions live in a
+// repository you own and reach the engine as a registered source; the data
+// directory holds engine state and a cache of fetched trees, and nothing a
+// person authored. The deciding argument is that a directory source never
+// travelled: a job whose code sat on the control plane's disk could only run on
+// a worker that shared that disk, so the moment there were two machines the
+// kind was already broken.
+const SourceKindGitHub = "github"
 
 // Source is a named place definitions come from.
 type Source struct {
@@ -48,35 +50,24 @@ type Source struct {
 // it loaded keep a readable name.
 func (s Source) Removed() bool { return s.RemovedAt != nil }
 
-// Builtin reports whether this source is the one that cannot be removed.
-func (s Source) Builtin() bool { return s.Name == LocalSource }
-
 // Qualify returns the identity of a definition from this source.
 //
-// The local source qualifies to the bare slug. That is a departure from D22's
-// "the local directory is a source named local, so nothing is a special case",
-// and it is the same trade the rest of the engine makes for defaults: the first
-// job somebody writes should not have to know that sources are a concept, and
-// "local/" on every row of every view carries no information until there is a
-// second source.
-//
-// Uniqueness is unaffected -- "ingest" and "weather/ingest" are different
-// strings -- so this is a naming choice and not a correctness one.
-func (s Source) Qualify(slug string) string {
-	if s.Builtin() {
-		return slug
-	}
-	return s.Name + "/" + slug
-}
+// Always prefixed now. The built-in source used to qualify to a bare slug so
+// that somebody's first job did not have to know sources were a concept -- a
+// trade that made sense while there was a source you got without asking. There
+// is not, so every job comes from a source somebody named, and the name is
+// worth carrying.
+func (s Source) Qualify(slug string) string { return s.Name + "/" + slug }
 
-// SourceOfName splits a qualified name back into its source and slug.
+// SourceOfName splits a qualified name back into its source and slug. An
+// unqualified name has no source, which is a caller's problem to report.
 func SourceOfName(qualified string) (source, slug string) {
 	for i := range qualified {
 		if qualified[i] == '/' {
 			return qualified[:i], qualified[i+1:]
 		}
 	}
-	return LocalSource, qualified
+	return "", qualified
 }
 
 // UpsertSource registers a source or updates its registration.
@@ -122,9 +113,6 @@ func (s *Store) RecordSourceSync(ctx context.Context, name, revision, syncErr st
 // carry this source, so `weather/ingest` in a run list a year from now needs
 // `weather` to still be something the database can describe (D19, D22).
 func (s *Store) DeleteSource(ctx context.Context, name string) error {
-	if name == LocalSource {
-		return fmt.Errorf("%s is built in and cannot be removed", LocalSource)
-	}
 	res, err := s.state.ExecContext(ctx,
 		`UPDATE sources SET removed_at = ? WHERE name = ? AND removed_at IS NULL`,
 		formatTime(time.Now()), name)
@@ -145,7 +133,7 @@ const selectSource = `
 // Sources returns every registered source, by name.
 func (s *Store) Sources(ctx context.Context) ([]Source, error) {
 	rows, err := s.state.QueryContext(ctx,
-		selectSource+` WHERE removed_at IS NULL ORDER BY name = ? DESC, name`, LocalSource)
+		selectSource+` WHERE removed_at IS NULL ORDER BY name`)
 	if err != nil {
 		return nil, fmt.Errorf("listing sources: %w", err)
 	}

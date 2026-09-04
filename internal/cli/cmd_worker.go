@@ -171,7 +171,6 @@ func runWorker(ctx context.Context, env *Env, args []string) error {
 		Name:         *name,
 		Labels:       splitLabels(*labels),
 		Concurrency:  *concurrency,
-		JobsDir:      env.Layout.Jobs,
 		CacheDir:     env.Layout.Data,
 		IdentityFile: env.Layout.AgeIdentity(),
 		Version:      env.Version,

@@ -221,16 +221,10 @@ func (e *Engine) loadRoutes(ctx context.Context, registered store.Source, snap j
 	return len(storedChains), len(storedRoutes), nil
 }
 
-// LoadFromDisk loads the built-in local source, which is source #1.
-func (e *Engine) LoadFromDisk(ctx context.Context) (LoadResult, error) {
-	local, err := e.store.SourceByName(ctx, store.LocalSource)
-	if err != nil {
-		return LoadResult{}, err
-	}
-	return e.loadDir(ctx, local, e.opts.Layout.Jobs)
-}
-
-// loadDir loads one directory-backed source.
+// loadDir loads a source from an unpacked tree on disk.
+//
+// Every source is a repository now, so `dir` is always somewhere in the cache:
+// the tree fetched for a particular commit. It is not somewhere a person edits.
 func (e *Engine) loadDir(ctx context.Context, registered store.Source, dir string) (LoadResult, error) {
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		// Not an error: a fresh install has no jobs directory and must start.
@@ -245,25 +239,16 @@ func (e *Engine) loadDir(ctx context.Context, registered store.Source, dir strin
 	})
 }
 
-// SourceDir is where a directory-backed source reads from.
+// SourceDir is the unpacked tree a source currently reads from.
 //
-// The built-in local source has no location of its own: it means "wherever the
-// jobs directory is configured to be", so JE_JOBS_DIR keeps working and nobody
-// has to register anything to write their first job.
+// Always in the cache, under the commit it came from. Empty until it has been
+// fetched once, which is what a job dispatched from an unfetched source has to
+// report rather than guess about.
 func (e *Engine) SourceDir(src store.Source) string {
-	if src.Kind == store.SourceKindGitHub {
-		// A fetched source lives in the cache, under the commit it came from.
-		// Empty until it has been fetched once, which is what a job dispatched
-		// from an unfetched source has to report rather than guess about.
-		if src.Revision == "" {
-			return ""
-		}
-		return filepath.Join(e.opts.Layout.SourceTree(src.Name, src.Revision), src.Subpath)
+	if src.Revision == "" {
+		return ""
 	}
-	if src.Location == "" {
-		return e.opts.Layout.Jobs
-	}
-	return src.Location
+	return filepath.Join(e.opts.Layout.SourceTree(src.Name, src.Revision), src.Subpath)
 }
 
 // Definition returns the parsed definition a job currently runs under.

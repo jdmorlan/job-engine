@@ -24,10 +24,16 @@ func init() {
 			"That is why this does not write twenty commented-out settings. A\n" +
 			"file full of defaults you did not choose is the thing this engine's\n" +
 			"job files exist not to be.\n\n" +
-			"--script also writes scripts/<name>.sh with the whole job protocol\n" +
-			"in it: the cursor, the output channel, and events. There is no SDK\n" +
-			"to import -- the filesystem is the contract (D6) -- so the template\n" +
-			"is the documentation.",
+			"--language also writes scripts/<name>.<ext> with the whole job\n" +
+			"protocol in it: the cursor, the output channel, and events. There is\n" +
+			"no SDK to import -- the filesystem is the contract (D6) -- so the\n" +
+			"template is the documentation.\n\n" +
+			"  je new nightly --language sh       scripts/nightly.sh\n" +
+			"  je new ingest --language python    scripts/ingest.py\n\n" +
+			"It names the interpreter and the file extension and nothing else. It\n" +
+			"deliberately does not write `language:` into the job file: that field\n" +
+			"opts a job into shim injection, which is not implemented (D21), so a\n" +
+			"job declaring it loads as misconfigured and will not run.",
 		Run: runNew,
 	})
 }
@@ -36,7 +42,8 @@ func runNew(ctx context.Context, env *Env, args []string) error {
 	fs := newFlagSet(commands["new"], env)
 	var (
 		chain       = fs.Bool("chain", false, "write a chain file instead of a job")
-		script      = fs.Bool("script", false, "also write scripts/<name>.sh and point the job at it")
+		language    = fs.String("language", "", "also write scripts/<name>.<ext> in this language and point the job at it")
+		script      = fs.Bool("script", false, "deprecated alias for --language sh")
 		command     = fs.String("command", "", "the command to run, as you would type it")
 		description = fs.String("description", "", "one line saying what this is for")
 		every       = fs.String("every", "", "run on an interval, e.g. 15m")
@@ -58,6 +65,11 @@ func runNew(ctx context.Context, env *Env, args []string) error {
 		return err
 	}
 
+	lang, err := resolveLanguage(env, *language, *script)
+	if err != nil {
+		return err
+	}
+
 	if *chain {
 		return writeChainFile(env, root, name, *description)
 	}
@@ -67,30 +79,24 @@ func runNew(ctx context.Context, env *Env, args []string) error {
 		every:       *every,
 		cron:        *cron,
 		runsOn:      *runsOn,
-		script:      *script,
+		language:    lang,
 	})
 }
 
 // jobsRoot decides which repository a new file belongs in.
 //
-// The rule is the one somebody would guess: if you are standing in a jobs
-// repository, that is the one you meant. `je init` creates a chains/ directory,
-// so its presence is what a repository looks like from here -- and the path
-// written is always printed, so a wrong guess is visible immediately rather
-// than being discovered when the job does not appear.
+// The rule is the one somebody would guess: the repository you are standing in.
+// The path written is always printed, so a wrong guess is visible immediately
+// rather than being discovered when the job does not appear.
 func jobsRoot(env *Env, override string) (string, error) {
 	if override != "" {
 		return filepath.Abs(override)
 	}
 
-	cwd, err := os.Getwd()
-	if err != nil {
-		return env.Layout.Jobs, nil //nolint:nilerr // no cwd is not a reason to fail
-	}
-	if info, err := os.Stat(filepath.Join(cwd, "chains")); err == nil && info.IsDir() {
-		return cwd, nil
-	}
-	return env.Layout.Jobs, nil
+	// The current directory, because that is where a jobs repository is when
+	// you are working in one. There is no fallback to somewhere the engine
+	// owns: it owns no definitions.
+	return os.Getwd()
 }
 
 type jobTemplate struct {
@@ -99,7 +105,7 @@ type jobTemplate struct {
 	every       string
 	cron        string
 	runsOn      string
-	script      bool
+	language    scriptLanguage
 }
 
 func writeJobFile(env *Env, root, name string, t jobTemplate) error {
@@ -124,13 +130,13 @@ func writeJobFile(env *Env, root, name string, t jobTemplate) error {
 	}
 
 	jobPath := filepath.Join(root, name+".yaml")
-	scriptRel := filepath.Join("scripts", name+".sh")
+	scriptRel := filepath.Join("scripts", name+t.language.ext)
 	scriptPath := filepath.Join(root, scriptRel)
 
 	if err := refuseToClobber(jobPath); err != nil {
 		return err
 	}
-	if t.script {
+	if t.language.set() {
 		if err := refuseToClobber(scriptPath); err != nil {
 			return err
 		}
@@ -144,8 +150,8 @@ func writeJobFile(env *Env, root, name string, t jobTemplate) error {
 	b.WriteString("\n")
 
 	switch {
-	case t.script:
-		fmt.Fprintf(&b, "command: [\"/bin/sh\", \"%s\"]\n", scriptRel)
+	case t.language.set():
+		fmt.Fprintf(&b, "command: [%q, %q]\n", t.language.interpreter, scriptRel)
 	case t.command != "":
 		fmt.Fprintf(&b, "command: %s\n", yamlStringList(strings.Fields(t.command)))
 	default:
@@ -180,11 +186,11 @@ func writeJobFile(env *Env, root, name string, t jobTemplate) error {
 	}
 
 	fmt.Fprintf(env.Stdout, "wrote %s\n", jobPath)
-	if t.script {
+	if t.language.set() {
 		if err := os.MkdirAll(filepath.Dir(scriptPath), 0o755); err != nil {
 			return err
 		}
-		if err := os.WriteFile(scriptPath, []byte(scriptTemplate(name)), 0o755); err != nil {
+		if err := os.WriteFile(scriptPath, []byte(t.language.template(name)), 0o755); err != nil {
 			return err
 		}
 		fmt.Fprintf(env.Stdout, "wrote %s\n", scriptPath)

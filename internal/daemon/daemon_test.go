@@ -21,9 +21,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jdmorlan/job-engine/internal/api"
 	"github.com/jdmorlan/job-engine/internal/daemon"
 	"github.com/jdmorlan/job-engine/internal/paths"
 	"github.com/jdmorlan/job-engine/internal/store"
+	"github.com/jdmorlan/job-engine/internal/testsupport"
 	"github.com/jdmorlan/job-engine/internal/worker"
 )
 
@@ -47,21 +49,24 @@ func startDaemonIn(t *testing.T, jobs ...string) (string, paths.Layout) {
 	t.Helper()
 
 	dir := t.TempDir()
-	layout := paths.Layout{Data: dir, Jobs: dir + "/jobs"}
+	layout := paths.Layout{Data: dir}
 
-	// Optional job fixtures, given as alternating name and shell script.
-	if len(jobs) > 0 {
-		if err := os.MkdirAll(layout.Jobs, 0o755); err != nil {
+	// Job fixtures live in a repository, because that is the only kind of
+	// source there is. The stub serves it, and the daemon fetches it exactly as
+	// it would fetch anybody's (D22).
+	tree := filepath.Join(dir, "repo")
+	if err := os.MkdirAll(tree, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i+1 < len(jobs); i += 2 {
+		body := fmt.Sprintf("command: [\"/bin/sh\", \"-c\", %q]\n", jobs[i+1])
+		if err := os.WriteFile(
+			filepath.Join(tree, jobs[i]+".yaml"), []byte(body), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		for i := 0; i+1 < len(jobs); i += 2 {
-			body := fmt.Sprintf("command: [\"/bin/sh\", \"-c\", %q]\n", jobs[i+1])
-			if err := os.WriteFile(
-				filepath.Join(layout.Jobs, jobs[i]+".yaml"), []byte(body), 0o644); err != nil {
-				t.Fatal(err)
-			}
-		}
 	}
+	hub := testsupport.NewGitHub(t)
+	hub.Add("you/src", tree)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	ready := make(chan struct{})
@@ -69,7 +74,8 @@ func startDaemonIn(t *testing.T, jobs ...string) (string, paths.Layout) {
 
 	go func() {
 		done <- daemon.Run(ctx, daemon.Config{
-			Layout: layout,
+			Layout:    layout,
+			GitHubAPI: hub.URL,
 			// Port 0: the OS picks a free one, so tests never collide with a
 			// real daemon or with each other. The runtime file is what makes
 			// this discoverable, which is the same mechanism the CLI uses.
@@ -104,6 +110,7 @@ func startDaemonIn(t *testing.T, jobs ...string) (string, paths.Layout) {
 	if err != nil {
 		t.Fatalf("reading runtime file: %v", err)
 	}
+	registerFixtureSource(t, "https://"+info.Address, layout)
 	if !info.TLS {
 		t.Fatal("the runtime file does not say this control plane serves TLS")
 	}
@@ -150,19 +157,15 @@ func startDaemonWithWorker(t *testing.T, jobs ...string) string {
 		t.Fatal(err)
 	}
 
-	// Asked over the API rather than passed in, which is what a worker on
-	// another machine would have to do anyway.
-	var health struct {
-		JobsDir string `json:"jobs_dir"`
-	}
-	getJSON(t, base+"/v1/health", &health)
-
+	// A cache and nothing else. There is no jobs directory to be told about:
+	// every job arrives with the tree it belongs to, fetched from the control
+	// plane (D22/D25).
 	w, err := worker.New(worker.Options{
 		Name:        "test-worker",
 		Labels:      []string{store.DefaultLabel},
 		Concurrency: 2,
 		Version:     "test",
-		JobsDir:     health.JobsDir,
+		CacheDir:    t.TempDir(),
 		Client:      wc,
 		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
@@ -602,5 +605,24 @@ func writeFile(t *testing.T, path, body string) {
 	}
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// registerFixtureSource points the control plane at the repository the stub is
+// serving, which is the only way definitions get in now (D22).
+func registerFixtureSource(t *testing.T, base string, layout paths.Layout) {
+	t.Helper()
+	body, _ := json.Marshal(api.AddSourceRequest{
+		Name: "src", Kind: store.SourceKindGitHub, Location: "you/src",
+	})
+	resp, err := httpClient(t, layout).Post(base+"/v1/sources", "application/json",
+		bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		out, _ := io.ReadAll(resp.Body)
+		t.Fatalf("registering the fixture source: %s: %s", resp.Status, out)
 	}
 }

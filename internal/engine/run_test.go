@@ -13,6 +13,8 @@ import (
 	"github.com/jdmorlan/job-engine/internal/engine"
 	"github.com/jdmorlan/job-engine/internal/model"
 	"github.com/jdmorlan/job-engine/internal/paths"
+	"github.com/jdmorlan/job-engine/internal/store"
+	"github.com/jdmorlan/job-engine/internal/testsupport"
 )
 
 // jobFixture writes a job file into a fresh data directory and returns an
@@ -35,24 +37,32 @@ func jobFixtureAt(t *testing.T, name, script string, now func() time.Time, extra
 	t.Helper()
 
 	dir := t.TempDir()
-	layout := paths.Layout{Data: dir, Jobs: filepath.Join(dir, "jobs")}
-	if err := os.MkdirAll(layout.Jobs, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	body := fmt.Sprintf("command: [\"/bin/sh\", \"-c\", %q]\n", script)
-	for _, line := range extra {
-		body += line + "\n"
-	}
-	if err := os.WriteFile(filepath.Join(layout.Jobs, name+".yaml"), []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	layout := paths.Layout{Data: dir}
 
 	e := newEngine(t, layout, now)
 	t.Cleanup(func() { e.Close(context.Background()) })
 
-	if _, err := e.LoadFromDisk(context.Background()); err != nil {
-		t.Fatalf("loading definitions: %v", err)
+	tree := filepath.Join(dir, "repo")
+	if err := os.MkdirAll(tree, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := fmt.Sprintf("command: [\"/bin/sh\", \"-c\", %q]\n", script)
+	for _, line := range extra {
+		body += line + "\n"
+	}
+	if err := os.WriteFile(filepath.Join(tree, name+".yaml"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	hub := testsupport.NewGitHub(t)
+	hub.Add("you/"+testSource, tree)
+	rememberFixture(e, tree, hub)
+	engine.SetGitHubBaseURLForTest(e, hub.URL)
+
+	if _, err := e.AddSource(context.Background(), store.Source{
+		Name: testSource, Kind: store.SourceKindGitHub, Location: "you/" + testSource,
+	}); err != nil {
+		t.Fatalf("registering the fixture source: %v", err)
 	}
 	return e, layout
 }
@@ -317,7 +327,7 @@ func TestJobEnvironmentIsExactlyTheProtocol(t *testing.T) {
 	if lines[0].Line != "absent" {
 		t.Errorf("the job inherited an unrelated environment variable: %q", lines[0].Line)
 	}
-	if want := "job=env attempt=1 by=run.requested"; lines[1].Line != want {
+	if want := "job=src/env attempt=1 by=run.requested"; lines[1].Line != want {
 		t.Errorf("protocol variables = %q, want %q", lines[1].Line, want)
 	}
 }
@@ -383,7 +393,7 @@ func TestDeclaredSecretIsInjectedAndRedacted(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Reload so the load-time secret check sees the new values.
-	if _, err := e.LoadFromDisk(ctx); err != nil {
+	if _, err := e.Sync(ctx); err != nil {
 		t.Fatal(err)
 	}
 
@@ -446,7 +456,7 @@ func TestSecretBecomingAvailableClearsTheError(t *testing.T) {
 	if err := e.Secrets().Set("LATE_TOKEN", "value-goes-here"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.LoadFromDisk(ctx); err != nil {
+	if _, err := e.Sync(ctx); err != nil {
 		t.Fatal(err)
 	}
 

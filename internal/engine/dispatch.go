@@ -329,10 +329,10 @@ func (e *Engine) dispatchFor(ctx context.Context, p Prepared, worker store.Worke
 	}
 
 	// Where this job's code lives, which is a fact about its source rather than
-	// about this worker (D22). Absent for the built-in local source, whose root
-	// is the jobs directory the worker already knows.
+	// about this worker (D22). Every job has one now, and it is a tree fetched
+	// from a repository -- so a worker anywhere can obtain it.
 	var sourceRoot, sourceName, sourceRevision string
-	if p.Job.Source != "" && p.Job.Source != store.LocalSource {
+	if p.Job.Source != "" {
 		src, err := e.store.SourceByName(ctx, p.Job.Source)
 		if err != nil {
 			return nil, fmt.Errorf("job %s: reading its source: %w", p.Job.Slug, err)

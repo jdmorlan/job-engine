@@ -103,8 +103,6 @@ func (e *Engine) Sync(ctx context.Context) (LoadResult, error) {
 // loadRegistered loads whichever kind of source this is.
 func (e *Engine) loadRegistered(ctx context.Context, src store.Source) (LoadResult, error) {
 	switch src.Kind {
-	case store.SourceKindDir:
-		return e.loadDir(ctx, src, e.SourceDir(src))
 	case store.SourceKindGitHub:
 		result, err := e.loadGitHub(ctx, src)
 		if err == nil && result.Revision != src.Revision {

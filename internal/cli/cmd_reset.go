@@ -21,9 +21,9 @@ func init() {
 			"web client, container or native service -- and deletes the state they\n" +
 			"accumulated: the databases, the certificate authority, this machine's\n" +
 			"identity and keys, and the docker volumes holding them.\n\n" +
-			"It leaves the jobs directory alone unless you pass --jobs. Definitions\n" +
-			"belong in a repository of yours and reach the engine as a registered\n" +
-			"source (D22), so they are not this command's business either way.\n\n" +
+			"Nothing here is a definition. Job definitions live in a repository of\n" +
+			"yours and reach the engine as a registered source (D22), so the worst\n" +
+			"this can cost you is a re-fetch and the history you chose to discard.\n\n" +
 			"It also does not touch a control plane somewhere else, and cannot: a\n" +
 			"reset is a local operation by nature. Against a cluster you would be\n" +
 			"deleting a namespace, which is not this tool's job.\n\n" +
@@ -37,7 +37,6 @@ func runReset(ctx context.Context, env *Env, args []string) error {
 	cmd := commands["reset"]
 	fs := newFlagSet(cmd, env)
 	yes := fs.Bool("yes", false, "do it without asking")
-	alsoJobs := fs.Bool("jobs", false, "delete the job definitions too")
 	dryRun := fs.Bool("print", false, "list what would be removed, and remove nothing")
 	if extra, err := parseArgs(fs, args); err != nil {
 		return err
@@ -45,12 +44,9 @@ func runReset(ctx context.Context, env *Env, args []string) error {
 		return usagef("unexpected argument %q", extra[0])
 	}
 
-	plan, skipped, kept := planReset(ctx, env, *alsoJobs)
+	plan, skipped := planReset(ctx, env)
 	if len(plan) == 0 {
 		fmt.Fprintf(env.Stdout, "nothing to remove: %s is already clean\n", env.Layout.Data)
-		if kept != "" {
-			fmt.Fprintf(env.Stdout, "\n%s\n", kept)
-		}
 		reportSkipped(env, skipped)
 		return nil
 	}
@@ -58,9 +54,6 @@ func runReset(ctx context.Context, env *Env, args []string) error {
 	fmt.Fprintf(env.Stdout, "This will remove, on this machine only:\n\n")
 	for _, step := range plan {
 		fmt.Fprintf(env.Stdout, "  %s\n", step.describe)
-	}
-	if kept != "" {
-		fmt.Fprintf(env.Stdout, "\n%s\n", kept)
 	}
 	reportSkipped(env, skipped)
 	if *dryRun {
@@ -114,7 +107,7 @@ type resetStep struct {
 // global to the machine and a data directory is not, so a reset run in a
 // scratch directory would otherwise remove the containers and volumes of a real
 // deployment -- which is exactly what it did the first time this was run.
-func planReset(ctx context.Context, env *Env, alsoJobs bool) (plan []resetStep, skipped []string, kept string) {
+func planReset(ctx context.Context, env *Env) (plan []resetStep, skipped []string) {
 
 	// Containers first: they hold the ports, and a native service coming back
 	// up while a container still owns :7620 fails confusingly.
@@ -196,21 +189,7 @@ func planReset(ctx context.Context, env *Env, alsoJobs bool) (plan []resetStep, 
 			do:       func(ctx context.Context, env *Env) error { return os.RemoveAll(path) },
 		})
 	}
-	// Definitions are not touched, and this does not reason about them. They
-	// belong in a repository of yours and reach the engine as a registered
-	// source (D22); a jobs directory inside the data directory is a leftover
-	// convenience, not something this command should have opinions about.
-	if alsoJobs {
-		if _, err := os.Stat(env.Layout.Jobs); err == nil {
-			plan = append(plan, resetStep{
-				describe: env.Layout.Jobs + " (asked for with --jobs)",
-				do:       func(ctx context.Context, env *Env) error { return os.RemoveAll(env.Layout.Jobs) },
-			})
-		}
-	} else if entries, err := os.ReadDir(env.Layout.Jobs); err == nil && len(entries) > 0 {
-		kept = fmt.Sprintf("Kept: %s -- --jobs removes it too.", env.Layout.Jobs)
-	}
-	return plan, skipped, kept
+	return plan, skipped
 }
 
 // sameDir compares two paths as the same directory, following symlinks where it
@@ -274,8 +253,10 @@ func resettablePaths(env *Env) []string {
 		l.Runtime(), l.Endpoint(), l.Lock(),
 		l.CADir(), l.BootstrapDir(),
 		l.IdentityCert(), l.IdentityKey(), l.IdentityCA(), l.AgeIdentity(),
-		filepath.Join(l.Data, "cache"),
-		filepath.Join(l.Data, "sources"),
+		// Fetched source trees. Deleting them costs a re-fetch and nothing
+		// else, which is the whole reason they live under a directory called
+		// cache (D22).
+		l.Cache(),
 	}
 }
 

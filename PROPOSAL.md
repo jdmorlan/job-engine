@@ -3677,43 +3677,64 @@ worker" are all reachable over a channel that already exists and is
 authenticated. Nothing about that is blocked; it simply is not built. It is the
 obvious next item, and it is what makes `je workers` more than a status board.
 
-### Definitions belong in a repository -- and the engine does not manage one
+### D27. Only repositories are sources
 
-> *"Why is the core of je caring about the status of a git repo? I had said it
-> would be nice if the CLI could modify secrets or other future things on a
-> repo, but not that it was managing the repo full scale. If I have job
-> definitions, those should be outside of any file folders that je manages."*
+> *"Directory sources -- this concept needs to go away. There are only git
+> sources in my opinion. I can literally reset and start over right now. I want
+> to get this right, not worry about migration paths."*
 
-**Two separate things, and the first attempt conflated them.**
+**Done, and it removed more than it added.**
 
-`je reset` kept the jobs directory unconditionally, which looked like a special
-case worth removing. The fix built for it asked git whether the tree was
-committed and pushed, and used the answer to decide whether the directory could
-be deleted -- plus a nudge on `je source` and a `git init` inside `je init`.
-That is the engine managing repositories, which is not what was asked for and
-is not its business. It is reverted: `internal/cli/jobsdir.go` is gone, `je
-init` writes a tree and runs no git, and `je source` says nothing about it.
+`<data>/jobs` is gone, and with it the built-in `local` source, the `dir` source
+kind, `paths.Layout.Jobs`, `Layout.Chains`, `JE_JOBS_DIR`, `worker.Options.JobsDir`
+and the `jobs_dir` field on health. The engine's data directory now holds engine
+state and a cache, and nothing a person authored.
 
-**The one place the CLI touches git stays**, because it was asked for
-specifically and is narrow: `je secret set --source` and `je secret recipients
-add` edit a secrets file inside a repository you own and offer to commit it.
-That is the CLI helping with a file, not managing a repository.
+**The deciding argument was not tidiness.** A directory source never travelled:
+a job whose code sat on the control plane's disk could only run on a worker
+sharing that disk. That failure was demonstrated in this session -- a job
+dispatched to a second worker died with *"this job runs in .../jobs, which this
+worker cannot see"* -- so the kind was already broken the moment there were two
+machines, which is the shape the container and cluster deployments are for.
+Every source is a repository, every tree reaches a worker by being fetched, and
+that whole error class is gone.
 
-**The real point was upstream of all of it.** The question is not "is
-`<data>/jobs` a repository", it is why definitions are inside a directory the
-engine owns at all. `je demo` already shows the shape that works: the examples
-live in `demo/` in this repository and are registered as a source with a
-subpath, exactly as somebody's own jobs in their own repository would be. The
-built-in `local` source pointing at `<data>/jobs` is the leftover, and it is the
-only reason a reset ever had a question to ask about definitions.
+**What follows from it, and is worth noticing:**
 
-**Open:** whether `local` is removed outright -- every deployment registering a
-source, which is what `demo` already does -- or moved so that it points
-somewhere the engine does not otherwise manage. `quickstart`, `demo`, `je new`
-and the compose and install mounts all assume `<data>/jobs` today, so it is a
-real change rather than a rename, and it is a breaking one so soon after v0.5.0.
+- **Every job name is qualified.** `demo/demo-hello`, not `demo-hello`. The bare
+  slug existed so somebody's first job did not have to know sources were a
+  concept -- a trade that made sense while there was a source you got without
+  asking. There is not.
+- **The cache is called a cache.** Fetched trees moved from `<data>/sources` to
+  `<data>/cache/sources`, keyed by commit. `je reset` deletes it without
+  ceremony, because deleting it costs a re-fetch.
+- **Containers mount nothing.** Compose and `install --docker` used to bind a
+  host jobs directory, which is meaningless in Kubernetes and was the last
+  reason the container deployment differed from a cluster one.
+- **`je new` writes to the directory you are standing in.** It used to write
+  into engine state. It writes into your repository now, which is where a
+  definition lives.
+- **The engine gained one configurable**, `GitHubAPI`, which is GitHub
+  Enterprise support and is what lets a test serve a repository without
+  reaching the internet. The test fixtures fetch through it, so every source
+  test now exercises the real path: resolve a commit, fetch a tarball, unpack
+  it, load from the tree. That is strictly better than the directory fixture it
+  replaced, which tested none of it.
 
-**The second gap is `upgrade` for a split deployment.** It now handles every
+**No migration path, deliberately**, at the request of the only person running
+this. `0011_no_local_source.sql` tombstones what a `dir` source provided rather
+than deleting it -- the runs happened and `je runs` must keep saying so -- and
+that is the whole of it.
+
+**What did NOT change is the boundary.** The control plane reads sources. It
+does not write to a repository, detect that one changed, or open a pull request;
+`internal/engine` shells out to git nowhere, and fetches tarballs over HTTPS.
+Editing definitions from a UI is a separate module in the platform whose output
+the engine sees only as `je source sync`. The one place the CLI touches git is
+`je secret set --source`, which edits a secrets file in a repository you own and
+offers to commit it -- helping with a file, not managing a repository.
+
+**The second gap is `upgrade` for a split deployment.****The second gap is `upgrade` for a split deployment.** It now handles every
 component on the machine it runs on, which is the whole answer for one box and
 half of it for two. The other half is the same channel: a control plane that can
 tell a worker to replace itself.

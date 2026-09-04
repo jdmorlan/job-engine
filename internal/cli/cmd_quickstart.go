@@ -106,9 +106,8 @@ func runQuickstart(ctx context.Context, env *Env, args []string) error {
 		return err
 	}
 	w, err := worker.New(worker.Options{
-		Name:    defaultWorkerName(),
-		Labels:  splitLabels(*labels),
-		JobsDir: env.Layout.Jobs,
+		Name:   defaultWorkerName(),
+		Labels: splitLabels(*labels),
 		// The same two paths `je worker run` passes. Leaving them to the
 		// worker's own defaults put its age key under <data>/cache while
 		// `je worker keygen` wrote <data>/identity, so a secret encrypted to

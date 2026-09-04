@@ -158,11 +158,14 @@ func TestTheTourUsesQualifiedNames(t *testing.T) {
 func demoEnv(t *testing.T) (*Env, *bytes.Buffer) {
 	t.Helper()
 	dir := t.TempDir()
+	// `je new` writes into the directory you are standing in, because that is
+	// where a jobs repository is. The engine owns no directory to write into.
+	t.Chdir(t.TempDir())
 	out := &bytes.Buffer{}
 	return &Env{
 		Stdout: out,
 		Stderr: &bytes.Buffer{},
 		Stdin:  strings.NewReader(""),
-		Layout: paths.Layout{Data: dir, Jobs: filepath.Join(dir, "jobs")},
+		Layout: paths.Layout{Data: dir},
 	}, out
 }

@@ -142,6 +142,6 @@ func workerWithKey(t *testing.T, values map[string]string) (*Worker, string) {
 	}
 
 	return &Worker{opts: Options{
-		Name: "test", JobsDir: tree, CacheDir: data, IdentityFile: identity,
+		Name: "test", CacheDir: data, IdentityFile: identity,
 	}}, tree
 }

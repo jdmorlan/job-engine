@@ -154,7 +154,6 @@ func workerAgainstStub(t *testing.T) (*Worker, *int) {
 	worker, err := New(Options{
 		Name:     "test",
 		Version:  "test",
-		JobsDir:  filepath.Join(t.TempDir(), "jobs"),
 		CacheDir: t.TempDir(),
 		Client:   client,
 		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),

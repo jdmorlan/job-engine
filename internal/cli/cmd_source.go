@@ -168,16 +168,11 @@ func addSource(ctx context.Context, env *Env, spec sourceSpec) error {
 		TokenSecret: spec.token,
 	}
 
-	// A path and owner/repo are told apart by shape, so that the thing
-	// somebody would type -- `je source add you/weather-jobs` -- works without
-	// a flag saying which kind it is. A local directory that exists always
-	// wins, since that is unambiguous evidence.
-	local, err := filepath.Abs(spec.location)
-	_, statErr := os.Stat(local)
+	// Repositories only. A directory source used to be accepted here and it
+	// never travelled: a job whose code sat on the control plane's disk could
+	// only run on a worker sharing that disk, so it was already broken the
+	// moment there were two machines (D22/D25).
 	switch {
-	case err == nil && statErr == nil:
-		req.Kind = store.SourceKindDir
-		req.Location = local
 	case gitsource.LooksLikeRepo(spec.location):
 		repo, err := gitsource.ParseRepo(spec.location)
 		if err != nil {
@@ -310,9 +305,6 @@ func printLoaded(env *Env, name string, result engine.LoadResult) {
 }
 
 func sourceWhere(s engine.SourceStatus) string {
-	if s.Kind == store.SourceKindDir {
-		return collapseHome(s.Path)
-	}
 	if s.Ref != "" {
 		return s.Location + "@" + s.Ref
 	}

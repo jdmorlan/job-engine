@@ -29,7 +29,7 @@ func newEngine(t *testing.T, layout paths.Layout, now func() time.Time) *engine.
 func tempLayout(t *testing.T) paths.Layout {
 	t.Helper()
 	dir := t.TempDir()
-	return paths.Layout{Data: dir, Jobs: dir + "/jobs"}
+	return paths.Layout{Data: dir}
 }
 
 func TestStartAndStopAreRecorded(t *testing.T) {

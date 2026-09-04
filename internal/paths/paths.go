@@ -19,11 +19,6 @@ type Layout struct {
 	// Data is the engine's data directory. Everything below is inside it,
 	// which is what makes "one directory to back up" true.
 	Data string
-
-	// Jobs is where job and chain definitions are read from. It defaults to
-	// <Data>/jobs but is separately overridable, because D2 expects it to
-	// often be a git repo you already have somewhere else.
-	Jobs string
 }
 
 // Resolve picks the layout from the environment, applying the documented
@@ -46,14 +41,10 @@ func Resolve() (Layout, error) {
 		return Layout{}, fmt.Errorf("resolving data dir %q: %w", data, err)
 	}
 
-	jobs := os.Getenv("JE_JOBS_DIR")
-	if jobs == "" {
-		jobs = filepath.Join(abs, "jobs")
-	} else if jobs, err = filepath.Abs(jobs); err != nil {
-		return Layout{}, fmt.Errorf("resolving jobs dir: %w", err)
-	}
-
-	return Layout{Data: abs, Jobs: jobs}, nil
+	// No jobs directory. Definitions are not read from anywhere the engine
+	// owns: they live in a repository and arrive as a registered source, so
+	// there is nothing here to configure and JE_JOBS_DIR is gone with it.
+	return Layout{Data: abs}, nil
 }
 
 // StateDB holds runs, events, definitions and cursors (Appendix A).
@@ -93,8 +84,18 @@ func (l Layout) Endpoint() string { return filepath.Join(l.Data, "endpoint.json"
 // the same commit do no work. It also means the path a job ran from is
 // reconstructible from the revision recorded against the run.
 func (l Layout) SourceTree(source, revision string) string {
-	return filepath.Join(l.Data, "sources", source, revision)
+	return filepath.Join(l.Cache(), "sources", source, revision)
 }
+
+// Cache is everything under the data directory that can be thrown away and
+// re-obtained.
+//
+// Named as a cache because that is what it is: fetched source trees, keyed by
+// the commit they came from. Definitions are not kept here and are not kept
+// anywhere else the engine owns -- they live in a repository and arrive by
+// being fetched, so the copy on this disk is a consequence rather than a
+// source of truth (D22). `je reset` deletes this without ceremony.
+func (l Layout) Cache() string { return filepath.Join(l.Data, "cache") }
 
 // CA is where the control plane keeps the certificate authority it issues
 // worker identities from (D25).
@@ -152,10 +153,6 @@ func (l Layout) AgeIdentity() string { return filepath.Join(l.Data, "identity") 
 // because that directory belongs to the control plane and a worker on another
 // machine has never seen it.
 func (l Layout) IdentityCA() string { return filepath.Join(l.Data, "ca.crt") }
-
-// Chains is where chain files live -- one flow per file, filename is the
-// chain name (D17).
-func (l Layout) Chains() string { return filepath.Join(l.Jobs, "chains") }
 
 // EnsureData creates the data directory if it is missing.
 //

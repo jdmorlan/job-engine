@@ -218,7 +218,7 @@ func TestMissedWindowsAreRecorded(t *testing.T) {
 	if err := json.Unmarshal(missed.Payload, &payload); err != nil {
 		t.Fatalf("parsing schedule.missed payload: %v", err)
 	}
-	if payload.Job != "sleeper" || payload.Policy != "skip" {
+	if payload.Job != qual("sleeper") || payload.Policy != "skip" {
 		t.Errorf("payload = %+v", payload)
 	}
 	// Ten minutes on a one-minute grid. The exact count depends on where the
@@ -271,7 +271,7 @@ func TestWaitingShowsScheduledAndBlocked(t *testing.T) {
 	if len(w.Scheduled) != 1 {
 		t.Fatalf("scheduled = %+v, want one entry", w.Scheduled)
 	}
-	if w.Scheduled[0].Job != "scheduled" {
+	if w.Scheduled[0].Job != qual("scheduled") {
 		t.Errorf("job = %q", w.Scheduled[0].Job)
 	}
 	if !w.Scheduled[0].Next.After(time.Now()) {

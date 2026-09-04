@@ -27,17 +27,13 @@ func (w *Worker) resolveSecrets(d engine.Dispatch, root string) (map[string]stri
 	if len(d.Secrets) == 0 {
 		return nil, nil
 	}
-	// The same base resolveWorkdir uses. A job from the built-in local source
-	// carries no SourceRoot -- its root is "wherever this worker keeps
-	// definitions" -- so the secrets beside those definitions are found the
-	// same way the code beside them is (D22).
-	if root == "" {
-		root = w.opts.JobsDir
-	}
+	// The same base resolveWorkdir uses: the source tree this job arrived with.
+	// A secrets file lives beside the definitions it belongs to, so it is found
+	// exactly where the code is (D22/D25).
 	if root == "" {
 		return nil, fmt.Errorf(
-			"this job needs %s, which is encrypted in its source -- but this worker "+
-				"has no definitions directory to look in",
+			"this job needs %s, which is encrypted in its source -- but the dispatch "+
+				"carried no source tree to look in",
 			strings.Join(d.Secrets, ", "))
 	}
 

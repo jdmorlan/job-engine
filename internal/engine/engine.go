@@ -37,6 +37,10 @@ type Options struct {
 	// is what a test wants; the daemon passes a real one.
 	Logger *slog.Logger
 
+	// GitHubAPI overrides where the GitHub API is, for GitHub Enterprise and
+	// for tests that serve a repository locally. Empty means api.github.com.
+	GitHubAPI string
+
 	// Version is reported by Health and gates worker registration: D20/C10
 	// refuses version skew loudly rather than negotiating.
 	Version string
@@ -83,7 +87,11 @@ type Engine struct {
 	routesMu sync.RWMutex
 	routes   map[string][]compiledRoute
 
-	// githubBaseURL is empty in the product and set by tests to a stub. See
+	// githubBaseURL is where the GitHub API lives. Empty means the real one.
+	//
+	// Configurable because GitHub Enterprise answers on a different host, which
+	// is a real deployment rather than a test affordance -- and it is what lets
+	// a test serve a repository without reaching the internet. See
 	// export_test.go.
 	githubBaseURL string
 
@@ -144,14 +152,15 @@ func New(opts Options) (*Engine, error) {
 	}
 
 	return &Engine{
-		opts:    opts,
-		log:     opts.Logger,
-		now:     opts.Now,
-		store:   st,
-		secrets: secrets.Open(opts.Layout.Data),
-		tokens:  ca.NewTokens(),
-		lock:    lock,
-		broker:  newLogBroker(),
+		opts:          opts,
+		githubBaseURL: opts.GitHubAPI,
+		log:           opts.Logger,
+		now:           opts.Now,
+		store:         st,
+		secrets:       secrets.Open(opts.Layout.Data),
+		tokens:        ca.NewTokens(),
+		lock:          lock,
+		broker:        newLogBroker(),
 
 		scheduleReloads: make(chan chan error),
 	}, nil
@@ -313,7 +322,6 @@ func (e *Engine) Health(ctx context.Context) Health {
 		StartedAt:    e.startedAt,
 		Uptime:       e.now().Sub(e.startedAt),
 		DataDir:      e.opts.Layout.Data,
-		JobsDir:      e.opts.Layout.Jobs,
 		LastDowntime: e.downtime,
 		UncleanStop:  e.uncleanStop,
 	}

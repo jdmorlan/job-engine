@@ -15,7 +15,12 @@ import (
 // not parse does not just fail itself -- it stops every other job loading too.
 func loadJobsDir(t *testing.T, env *Env) jobdef.Snapshot {
 	t.Helper()
-	snap, err := jobdef.FSSource{FS: os.DirFS(env.Layout.Jobs), Root: "."}.Load(context.Background())
+	// Whatever directory `je new` wrote into, which is the one it was run in.
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap, err := jobdef.FSSource{FS: os.DirFS(dir), Root: "."}.Load(context.Background())
 	if err != nil {
 		t.Fatalf("what je new wrote does not load: %v", err)
 	}
@@ -50,7 +55,7 @@ func TestNewWritesAJobThatLoadsAndRuns(t *testing.T) {
 
 	// P3: the file holds only what was asked for. Anything else in here is a
 	// default restated, which is what job files exist not to be.
-	body, err := os.ReadFile(filepath.Join(env.Layout.Jobs, "weather-ingest.yaml"))
+	body, err := os.ReadFile(filepath.Join(cwd(t), "weather-ingest.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +81,7 @@ func TestNewScriptWritesAWorkingProtocolExample(t *testing.T) {
 		t.Errorf("command = %q, want it pointing at the script that was written", got)
 	}
 
-	path := filepath.Join(env.Layout.Jobs, "scripts", "nightly.sh")
+	path := filepath.Join(cwd(t), "scripts", "nightly.sh")
 	info, err := os.Stat(path)
 	if err != nil {
 		t.Fatalf("the script was not written: %v", err)
@@ -148,9 +153,19 @@ func TestNewRefusesToClobberOrToWriteSomethingBroken(t *testing.T) {
 			// A rejected invocation must leave nothing behind, or the second
 			// attempt fails with "already exists" about a file that was never
 			// usable.
-			if _, statErr := os.Stat(filepath.Join(env.Layout.Jobs, "x.yaml")); statErr == nil {
+			if _, statErr := os.Stat(filepath.Join(cwd(t), "x.yaml")); statErr == nil {
 				t.Error("a rejected je new left a file behind")
 			}
 		})
 	}
+}
+
+// cwd is where `je new` wrote, which is where the test is standing.
+func cwd(t *testing.T) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }

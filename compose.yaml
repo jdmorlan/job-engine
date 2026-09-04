@@ -31,9 +31,6 @@ services:
       # through VirtioFS/gRPC-FUSE, which has the same class of locking
       # pathology D19 warns about for NFS -- silent, and weeks out.
       - je-data:/var/lib/je
-      # Definitions are read-only and safe to bind: no SQLite involved, and
-      # editing job YAML on the host is the point (P3).
-      - ./jobs:/var/lib/je/jobs:ro
       # What a worker needs to enroll itself: the token, and the authority to
       # verify this control plane with (D25). Its own volume rather than sharing
       # the data one, because the databases and the secret store live there and
@@ -59,12 +56,12 @@ services:
       # It enrolls itself from here on every start, and writes its identity to
       # the container's own layer -- which it may lose freely, because
       # re-enrolling is free and C2 says a worker holds nothing worth keeping.
+      #
+      # No definitions are mounted, and none can be: a job's code arrives with
+      # its tree, fetched from the control plane (D22/D25). Register a source
+      # once and every worker gets it, wherever it runs:
+      #   je source add house you/your-jobs
       - je-bootstrap:/var/lib/je/bootstrap:ro
-      # The same definitions the control plane reads. A job from a *directory*
-      # source runs only on a worker that can see that directory (D22), so a
-      # worker without this can run nothing from ./jobs. A job from a repository
-      # needs none of this: its tree travels to the worker (D25).
-      - ./jobs:/var/lib/je/jobs:ro
     depends_on:
       control-plane:
         condition: service_started

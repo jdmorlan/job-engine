@@ -70,10 +70,7 @@ func (e *Engine) Sources(ctx context.Context) ([]SourceStatus, error) {
 
 	out := make([]SourceStatus, 0, len(sources))
 	for _, src := range sources {
-		status := SourceStatus{Source: src}
-		if src.Kind == store.SourceKindDir {
-			status.Path = e.SourceDir(src)
-		}
+		status := SourceStatus{Source: src, Path: e.SourceDir(src)}
 		for _, j := range jobs {
 			if j.Source == src.Name && !j.Removed() {
 				status.Jobs++
@@ -105,26 +102,7 @@ func (e *Engine) AddSource(ctx context.Context, src store.Source) (LoadResult, e
 			"source name %q must be lowercase letters, digits and dashes -- it "+
 				"prefixes every job name from this source", src.Name)
 	}
-	if src.Name == store.LocalSource {
-		return LoadResult{}, fmt.Errorf("%s is the built-in source and cannot be re-registered",
-			store.LocalSource)
-	}
-
 	switch src.Kind {
-	case store.SourceKindDir:
-		abs, err := filepath.Abs(src.Location)
-		if err != nil {
-			return LoadResult{}, err
-		}
-		src.Location = abs
-		// Checked here rather than at the next sync. The control plane is the
-		// thing that has to be able to read this directory, and it may not be
-		// on the machine you typed the path on -- which is exactly the mistake
-		// worth catching at registration time.
-		if _, err := os.Stat(abs); err != nil {
-			return LoadResult{}, fmt.Errorf(
-				"the control plane cannot read %s: %w", abs, err)
-		}
 	case store.SourceKindGitHub:
 		repo, err := gitsource.ParseRepo(src.Location)
 		if err != nil {
@@ -218,14 +196,11 @@ func (e *Engine) SyncSource(ctx context.Context, name string) (LoadResult, error
 // remove history applies at least as strongly to removing a whole repo. The runs
 // happened, and `je runs` has to keep saying so.
 func (e *Engine) RemoveSource(ctx context.Context, name string) (int64, error) {
-	src, err := e.store.SourceByName(ctx, name)
-	if err != nil {
+	// Confirms it exists, so removing a name nobody registered says so rather
+	// than reporting that it tombstoned nothing.
+	if _, err := e.store.SourceByName(ctx, name); err != nil {
 		return 0, err
 	}
-	if src.Builtin() {
-		return 0, fmt.Errorf("%s is built in and cannot be removed", store.LocalSource)
-	}
-
 	// Order matters: tombstone while the rows still name the source, then drop
 	// the registration.
 	removed, err := e.store.DeleteJobsExceptInSource(ctx, name, nil)
@@ -282,7 +257,7 @@ func SourceOfJob(qualified string) string {
 // sourceRevision is the commit a job's code currently comes from, or empty for
 // a job that is just a file on disk.
 func (e *Engine) sourceRevision(ctx context.Context, job store.Job) (string, error) {
-	if job.Source == "" || job.Source == store.LocalSource {
+	if job.Source == "" {
 		return "", nil
 	}
 	src, err := e.store.SourceByName(ctx, job.Source)

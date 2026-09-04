@@ -23,7 +23,7 @@ func TestControlPlaneRunsNothingWithoutAWorker(t *testing.T) {
 	ctx := context.Background()
 	e, _ := jobFixture(t, "orphan", `echo hi`)
 
-	run, err := e.TriggerRun(ctx, "orphan", engine.RunOptions{})
+	run, err := e.TriggerRun(ctx, qual("orphan"), engine.RunOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +47,7 @@ func TestUnservableWorkIsVisibleNotSilent(t *testing.T) {
 	ctx := context.Background()
 	e, _ := jobFixture(t, "macjob", `echo hi`, "runs_on: macos")
 
-	if _, err := e.TriggerRun(ctx, "macjob", engine.RunOptions{}); err != nil {
+	if _, err := e.TriggerRun(ctx, qual("macjob"), engine.RunOptions{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -78,7 +78,7 @@ func TestJobsArePinnedNotPlaced(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := e.TriggerRun(ctx, "macjob", engine.RunOptions{}); err != nil {
+	if _, err := e.TriggerRun(ctx, qual("macjob"), engine.RunOptions{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -175,7 +175,7 @@ func TestAStaleWorkerIsRefusedWorkNotJustRegistration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.TriggerRun(ctx, "any", engine.RunOptions{}); err != nil {
+	if _, err := e.TriggerRun(ctx, qual("any"), engine.RunOptions{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -255,7 +255,7 @@ func TestExpiredLeaseIsLostNotFailed(t *testing.T) {
 	e, _ := jobFixtureAt(t, "vanisher", `echo hi`, clock)
 
 	workerID := ensureWorker(t, e)
-	run, err := e.TriggerRun(ctx, "vanisher", engine.RunOptions{})
+	run, err := e.TriggerRun(ctx, qual("vanisher"), engine.RunOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -313,7 +313,7 @@ func TestFencingRejectsALateResult(t *testing.T) {
 	e, _ := jobFixtureAt(t, "slowpoke", `echo hi`, clock)
 
 	workerID := ensureWorker(t, e)
-	run, err := e.TriggerRun(ctx, "slowpoke", engine.RunOptions{})
+	run, err := e.TriggerRun(ctx, qual("slowpoke"), engine.RunOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -372,7 +372,7 @@ func TestHeartbeatRevokesRunsTheWorkerNoLongerHolds(t *testing.T) {
 	e, _ := jobFixtureAt(t, "holder", `echo hi`, clock)
 
 	workerID := ensureWorker(t, e)
-	if _, err := e.TriggerRun(ctx, "holder", engine.RunOptions{}); err != nil {
+	if _, err := e.TriggerRun(ctx, qual("holder"), engine.RunOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	dispatch, err := e.Claim(ctx, workerID)
@@ -419,12 +419,12 @@ func TestSecretsReachTheWorkerAndOnlyDeclaredOnes(t *testing.T) {
 	if err := e.Secrets().Set("OTHER_TOKEN", "sk-other-9999999"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.LoadFromDisk(ctx); err != nil {
+	if _, err := e.Sync(ctx); err != nil {
 		t.Fatal(err)
 	}
 
 	workerID := ensureWorker(t, e)
-	if _, err := e.TriggerRun(ctx, "needy", engine.RunOptions{}); err != nil {
+	if _, err := e.TriggerRun(ctx, qual("needy"), engine.RunOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	dispatch, err := e.Claim(ctx, workerID)
@@ -451,7 +451,7 @@ func TestDispatchOmitsTheChannelPathsTheWorkerOwns(t *testing.T) {
 	e, _ := jobFixture(t, "plain", `echo hi`)
 
 	workerID := ensureWorker(t, e)
-	if _, err := e.TriggerRun(ctx, "plain", engine.RunOptions{}); err != nil {
+	if _, err := e.TriggerRun(ctx, qual("plain"), engine.RunOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	dispatch, err := e.Claim(ctx, workerID)
@@ -482,7 +482,7 @@ func TestDispatchOmitsTheChannelPathsTheWorkerOwns(t *testing.T) {
 // in-flight run for a change that touches none of them.
 func TestSyncPicksUpANewJobWithoutARestart(t *testing.T) {
 	ctx := context.Background()
-	e, layout := jobFixture(t, "first", `echo one`)
+	e, _ := jobFixture(t, "first", `echo one`)
 
 	jobs, err := e.Jobs(ctx)
 	if err != nil {
@@ -492,7 +492,7 @@ func TestSyncPicksUpANewJobWithoutARestart(t *testing.T) {
 		t.Fatalf("started with %d jobs, want 1", len(jobs))
 	}
 
-	writeJob(t, layout.Jobs, "second", `echo two`)
+	writeJob(t, treeDir(e), "second", `echo two`)
 
 	result, err := e.Sync(ctx)
 	if err != nil {
@@ -534,12 +534,12 @@ func TestSyncPicksUpANewJobWithoutARestart(t *testing.T) {
 // describes, which is the state you cannot reason about at 2am.
 func TestSyncIsAtomic(t *testing.T) {
 	ctx := context.Background()
-	e, layout := jobFixture(t, "good", `echo fine`)
+	e, _ := jobFixture(t, "good", `echo fine`)
 
 	// A new valid job and a broken one land together.
-	writeJob(t, layout.Jobs, "alsogood", `echo also fine`)
+	writeJob(t, treeDir(e), "alsogood", `echo also fine`)
 	if err := os.WriteFile(
-		filepath.Join(layout.Jobs, "broken.yaml"),
+		filepath.Join(treeDir(e), "broken.yaml"),
 		[]byte("command: [\"/bin/sh\"]\nthis_is: not a field\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -552,7 +552,7 @@ func TestSyncIsAtomic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(jobs) != 1 || jobs[0].Slug != "good" {
+	if len(jobs) != 1 || jobs[0].Slug != qual("good") {
 		t.Errorf("jobs = %+v, want only the previously loaded one", jobs)
 	}
 }
@@ -562,7 +562,7 @@ func TestSyncIsAtomic(t *testing.T) {
 // timeline.
 func TestSyncTombstonesRatherThanDeletes(t *testing.T) {
 	ctx := context.Background()
-	e, layout := jobFixture(t, "doomed", `echo hi`)
+	e, _ := jobFixture(t, "doomed", `echo hi`)
 
 	if _, err := runJob(t, e, "doomed", engine.RunOptions{}); err != nil {
 		t.Fatal(err)
@@ -572,7 +572,7 @@ func TestSyncTombstonesRatherThanDeletes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := os.Remove(filepath.Join(layout.Jobs, "doomed.yaml")); err != nil {
+	if err := os.Remove(filepath.Join(treeDir(e), "doomed.yaml")); err != nil {
 		t.Fatal(err)
 	}
 	result, err := e.Sync(ctx)
@@ -612,7 +612,7 @@ func TestWorkdirIsResolvedByTheWorker(t *testing.T) {
 	e, _ := jobFixture(t, "plain", `echo hi`)
 
 	workerID := ensureWorker(t, e)
-	if _, err := e.TriggerRun(ctx, "plain", engine.RunOptions{}); err != nil {
+	if _, err := e.TriggerRun(ctx, qual("plain"), engine.RunOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	dispatch, err := e.Claim(ctx, workerID)
@@ -633,7 +633,7 @@ func TestDeclaredAbsoluteWorkdirSurvivesTheWire(t *testing.T) {
 	e, _ := jobFixture(t, "elsewhere", `echo hi`, "workdir: /tmp")
 
 	workerID := ensureWorker(t, e)
-	if _, err := e.TriggerRun(ctx, "elsewhere", engine.RunOptions{}); err != nil {
+	if _, err := e.TriggerRun(ctx, qual("elsewhere"), engine.RunOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	dispatch, err := e.Claim(ctx, workerID)

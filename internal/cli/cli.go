@@ -136,7 +136,6 @@ func Main(ctx context.Context, args []string, env *Env) int {
 	}
 	if *dataDir != "" {
 		layout.Data = *dataDir
-		layout.Jobs = layout.Data + "/jobs"
 	}
 	env.Layout = layout
 

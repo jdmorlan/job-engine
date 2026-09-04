@@ -34,6 +34,10 @@ type Config struct {
 	Version string
 	Logger  *slog.Logger
 
+	// GitHubAPI overrides where the GitHub API is, for GitHub Enterprise and
+	// for tests that serve a repository locally. Empty means api.github.com.
+	GitHubAPI string
+
 	// TLSHosts are additional names the control plane will be reached by, for
 	// its own certificate.
 	//
@@ -65,9 +69,10 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 
 	eng, err := engine.New(engine.Options{
-		Layout:  cfg.Layout,
-		Logger:  cfg.Logger,
-		Version: cfg.Version,
+		Layout:    cfg.Layout,
+		Logger:    cfg.Logger,
+		Version:   cfg.Version,
+		GitHubAPI: cfg.GitHubAPI,
 	})
 	if err != nil {
 		return err

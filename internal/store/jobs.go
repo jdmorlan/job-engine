@@ -36,14 +36,12 @@ type Job struct {
 	Declared map[string]int `json:"declared,omitempty"`
 }
 
-// sourceOrLocal defaults the source, so a caller that predates sources (a test,
-// an embedding consumer) still writes a valid row.
-func (j Job) sourceOrLocal() string {
-	if j.Source == "" {
-		return LocalSource
-	}
-	return j.Source
-}
+// sourceOrLocal is retained as the one place a missing source is caught.
+//
+// There is no default any more: every job comes from a registered source, so an
+// empty one is a bug in the caller rather than something to paper over with a
+// built-in name.
+func (j Job) sourceOrLocal() string { return j.Source }
 
 // Removed reports whether this job's definition file is gone.
 func (j Job) Removed() bool { return j.RemovedAt != nil }
