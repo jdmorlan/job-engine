@@ -136,6 +136,14 @@ func (l Layout) BootstrapCA() string { return filepath.Join(l.BootstrapDir(), "c
 func (l Layout) IdentityCert() string { return filepath.Join(l.Data, "worker.crt") }
 func (l Layout) IdentityKey() string  { return filepath.Join(l.Data, "worker.key") }
 
+// AgeIdentity is the key this machine reads encrypted secrets with (D25).
+//
+// Here rather than computed by whoever needs it, because it was computed twice
+// and the two disagreed: `je worker keygen` wrote <data>/identity while a
+// worker started by `je quickstart` looked in <data>/cache/identity, so the key
+// you had just been told to create was never found. One definition is the fix.
+func (l Layout) AgeIdentity() string { return filepath.Join(l.Data, "identity") }
+
 // IdentityCA is the authority a worker keeps after enrolling, so it can go on
 // verifying the control plane across restarts without the bootstrap directory
 // being mounted (D25).

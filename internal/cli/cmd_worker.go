@@ -78,7 +78,7 @@ func runWorker(ctx context.Context, env *Env, args []string) error {
 		if len(positional) != 1 {
 			return usagef("unexpected argument %q", positional[1])
 		}
-		return runWorkerKeygen(env)
+		return runWorkerKeygen(ctx, env)
 	case "run", "join":
 		if len(positional) != 1 {
 			return usagef("unexpected argument %q", positional[1])
@@ -172,7 +172,7 @@ func runWorker(ctx context.Context, env *Env, args []string) error {
 		Concurrency:  *concurrency,
 		JobsDir:      env.Layout.Jobs,
 		CacheDir:     env.Layout.Data,
-		IdentityFile: filepath.Join(env.Layout.Data, worker.IdentityFileName),
+		IdentityFile: env.Layout.AgeIdentity(),
 		Version:      env.Version,
 		Client:       client,
 		Logger:       logger,
@@ -299,16 +299,23 @@ func splitLabels(raw string) []string {
 // as to the secrets themselves. What is printed is the recipient, which is
 // public by construction and is the thing you paste into a source's secrets
 // file to let this machine read it (D25).
-func runWorkerKeygen(env *Env) error {
-	path := filepath.Join(env.Layout.Data, worker.IdentityFileName)
+func runWorkerKeygen(ctx context.Context, env *Env) error {
+	path := ageIdentityPath(env)
 
-	if _, err := os.Stat(path); err == nil {
+	existing, err := readAgeIdentity(env)
+	if err == nil {
 		// Refused rather than overwritten. Replacing this key silently would
 		// make every secret encrypted to it unreadable, with no way back and
 		// nothing said.
-		return fmt.Errorf("%s already exists.\n"+
-			"Replacing it would make every secret encrypted to it unreadable.\n"+
-			"Its public key is:  je worker keygen --show", path)
+		//
+		// Registering it again is not refused, though: a machine whose key
+		// predates the control plane knowing about keys has one to tell it
+		// about, and that is the whole point of the second half of this
+		// command (D25).
+		fmt.Fprintf(env.Stderr, "%s already exists; keeping it.\n", path)
+		return registerAgeKey(ctx, env, existing.Recipient().String())
+	} else if !os.IsNotExist(err) {
+		return err
 	}
 
 	id, err := age.GenerateX25519Identity()
@@ -322,14 +329,73 @@ func runWorkerKeygen(env *Env) error {
 		return err
 	}
 
-	fmt.Fprintf(env.Stdout, "wrote %s\n\n", path)
+	fmt.Fprintf(env.Stdout, "wrote %s\n", path)
 	fmt.Fprintf(env.Stdout, "public key  %s\n\n", id.Recipient())
-	fmt.Fprintln(env.Stdout,
-		"Add it as a recipient of a source's secrets so this machine can read them:\n"+
-			"  je secret recipients add <source> "+id.Recipient().String()+"\n\n"+
-			"Until then this worker can run jobs that need no secrets, and will say\n"+
-			"so plainly for the ones that do.")
+	return registerAgeKey(ctx, env, id.Recipient().String())
+}
+
+// registerAgeKey tells the control plane which key this identity reads with, so
+// a recipient list can name the machine instead of the key (D25).
+//
+// Best-effort by design. A machine that cannot reach a control plane, or that
+// has no identity yet, still has a usable key on disk -- and the enrolment it
+// performs later carries the key with it, so the binding happens anyway. Making
+// this fatal would mean `je worker keygen` could not be run before enrolling,
+// which is the order somebody will naturally use.
+func registerAgeKey(ctx context.Context, env *Env, recipient string) error {
+	client, err := Connect(env.Layout)
+	if err != nil {
+		return explainUnregisteredKey(env, recipient,
+			"there is no control plane to tell about it here")
+	}
+	regCtx, cancel := withTimeout(ctx)
+	defer cancel()
+
+	name, err := client.RegisterAgeKey(regCtx, recipient)
+	if err != nil {
+		return explainUnregisteredKey(env, recipient, err.Error())
+	}
+
+	fmt.Fprintf(env.Stdout, "registered as %s's key on the control plane.\n\n", name)
+	fmt.Fprintf(env.Stdout,
+		"Let this machine read a source's secrets -- by name, not by pasting a key:\n"+
+			"  je secret recipients add --source <src> %s\n", name)
 	return nil
+}
+
+func explainUnregisteredKey(env *Env, recipient, why string) error {
+	fmt.Fprintf(env.Stderr,
+		"\nThe key is on disk, but the control plane does not know about it: %s.\n"+
+			"This machine can still run jobs that need no secrets.\n\n"+
+			"When it can reach one, run `je worker keygen` again to register it --\n"+
+			"or enrol, which carries the key with it:\n"+
+			"  je worker run --token <t> --ca-pin <fp> --addr <host:port>\n\n"+
+			"To add it by hand meanwhile:\n"+
+			"  je secret recipients add --source <src> %s\n", why, recipient)
+	return nil
+}
+
+// ageIdentityPath is where this machine's secret-reading key lives.
+func ageIdentityPath(env *Env) string { return env.Layout.AgeIdentity() }
+
+// readAgeIdentity loads this machine's secret-reading key.
+func readAgeIdentity(env *Env) (*age.X25519Identity, error) {
+	body, err := os.ReadFile(ageIdentityPath(env))
+	if err != nil {
+		return nil, err
+	}
+	return age.ParseX25519Identity(strings.TrimSpace(string(body)))
+}
+
+// ageRecipientOf is the public half of this machine's key, or "" when it has
+// none. Used at enrolment, where a key that exists should be bound at the
+// moment the identity is decided rather than in a second step (D25).
+func ageRecipientOf(env *Env) string {
+	id, err := readAgeIdentity(env)
+	if err != nil {
+		return ""
+	}
+	return id.Recipient().String()
 }
 
 // dialControlPlane connects a worker to the control plane.

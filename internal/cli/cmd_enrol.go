@@ -261,6 +261,10 @@ func enrolWorkerAs(ctx context.Context, env *Env, c *Client, token, name string,
 	out, err := c.Enrol(reqCtx, api.EnrolRequest{
 		Token: token, PublicKey: string(pubPEM),
 		Name: name, Labels: labels, Roles: roles,
+		// Bound at the moment the identity is decided, when this machine
+		// already has a key. Empty is ordinary: a machine that has never run
+		// `je worker keygen` enrols without one and registers it later (D25).
+		AgeRecipient: ageRecipientOf(env),
 	})
 	if err != nil {
 		return err

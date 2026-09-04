@@ -24,10 +24,19 @@ const DefaultLabel = "default"
 // It holds no durable state of its own (C2) -- this row is a registration and
 // a lease, and losing it costs the worker nothing but its in-flight runs.
 type Worker struct {
-	ID           string     `json:"id"`
-	Name         string     `json:"name"`
-	Labels       []string   `json:"labels"`
-	Roles        []string   `json:"roles"`
+	ID     string   `json:"id"`
+	Name   string   `json:"name"`
+	Labels []string `json:"labels"`
+	Roles  []string `json:"roles"`
+
+	// AgeRecipient is the public half of the key this identity reads encrypted
+	// secrets with, when it has registered one (D25).
+	//
+	// Public by construction, so it travels in views freely: it is what you
+	// encrypt *to*, and holding it grants nothing. What matters is that the
+	// control plane learned it from the identity itself rather than from
+	// somebody pasting it.
+	AgeRecipient string     `json:"age_recipient,omitempty"`
 	Version      string     `json:"version"`
 	RegisteredAt time.Time  `json:"registered_at"`
 	LastSeenAt   time.Time  `json:"last_seen_at"`
@@ -121,7 +130,7 @@ func (s *Store) TouchWorker(ctx context.Context, id string, at time.Time) error 
 func (s *Store) Workers(ctx context.Context) ([]Worker, error) {
 	rows, err := s.state.QueryContext(ctx, `
 		SELECT id, name, labels, version, roles, registered_at, last_seen_at, gone_at,
-		       enrolled_at, cert_fingerprint
+		       enrolled_at, cert_fingerprint, age_recipient
 		FROM workers ORDER BY last_seen_at DESC`)
 	if err != nil {
 		return nil, err
@@ -132,12 +141,14 @@ func (s *Store) Workers(ctx context.Context) ([]Worker, error) {
 	for rows.Next() {
 		var w Worker
 		var labels, roles string
-		var goneAt, enrolledAt, fingerprint sql.NullString
+		var goneAt, enrolledAt, fingerprint, recipient sql.NullString
 		var registered, lastSeen string
 		if err := rows.Scan(&w.ID, &w.Name, &labels, &w.Version, &roles,
-			&registered, &lastSeen, &goneAt, &enrolledAt, &fingerprint); err != nil {
+			&registered, &lastSeen, &goneAt, &enrolledAt, &fingerprint,
+			&recipient); err != nil {
 			return nil, err
 		}
+		w.AgeRecipient = recipient.String
 		if enrolledAt.Valid {
 			at, err := parseTime(enrolledAt.String)
 			if err != nil {
@@ -398,14 +409,19 @@ func (s *Store) EnrolWorker(ctx context.Context, w Worker) error {
 	_, err = s.state.ExecContext(ctx, `
 		INSERT INTO workers (id, name, labels, version, roles,
 		                     registered_at, last_seen_at, gone_at,
-		                     enrolled_at, cert_fingerprint)
-		VALUES (?, ?, ?, '', ?, ?, ?, NULL, ?, ?)
+		                     enrolled_at, cert_fingerprint, age_recipient)
+		VALUES (?, ?, ?, '', ?, ?, ?, NULL, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			name = excluded.name, labels = excluded.labels, roles = excluded.roles,
 			enrolled_at = excluded.enrolled_at,
-			cert_fingerprint = excluded.cert_fingerprint`,
+			cert_fingerprint = excluded.cert_fingerprint,
+			-- A re-enrolment that brought no key keeps the one on record. A
+			-- worker re-enrolling is the same machine with the same age key,
+			-- and clearing it would silently make every secret encrypted to it
+			-- unreadable.
+			age_recipient = COALESCE(NULLIF(excluded.age_recipient, ''), workers.age_recipient)`,
 		w.ID, w.Name, string(labels), string(roles),
-		now, now, now, w.Fingerprint)
+		now, now, now, w.Fingerprint, w.AgeRecipient)
 	if err != nil {
 		return fmt.Errorf("enrolling worker: %w", err)
 	}
@@ -445,6 +461,29 @@ func (s *Store) AnyClientIdentity(ctx context.Context) (bool, error) {
 		}
 	}
 	return false, rows.Err()
+}
+
+// RecordAgeRecipient binds an age public key to an identity that already
+// exists.
+//
+// The later half of the binding: a worker enrolled before it had a key, or one
+// that ran `je worker keygen` afterwards, registers it over its own mTLS
+// connection. The name comes from the verified certificate and never from a
+// body, so this cannot be done on somebody else's behalf (D25).
+func (s *Store) RecordAgeRecipient(ctx context.Context, id, recipient string) error {
+	res, err := s.state.ExecContext(ctx,
+		`UPDATE workers SET age_recipient = ? WHERE id = ? AND enrolled_at IS NOT NULL`,
+		recipient, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		// Enrolled rows only. A row that registered by claiming a name is not
+		// an identity, and letting one register a key would put a pasted claim
+		// back into the one place D25 took it out of.
+		return sql.ErrNoRows
+	}
+	return nil
 }
 
 // RecordFingerprint updates which certificate an identity presents.

@@ -3398,6 +3398,10 @@ real `sops` binary rather than on having read the spec carefully.
    public half.
 4. **Load-time validation without keys** -- declared-but-absent secrets
    **shipped**; the capability/recipient invariant needs step 5.
+5. ~~**Workers as recipients, by name.**~~ **Shipped** as part of step 7 of the
+   identity work below: `je secret set --source` writes the file, `je secret
+   recipients add --source X <name>` grants access to an identity rather than to
+   a pasted key, and `je worker keygen` registers the key it creates.
 5. **Enrolled identity and mTLS. Shipped.** `je enrol <name> --labels <caps>` on
    the control plane mints a one-time token; `je worker run --token <t> --ca-pin
    <fp>` on the other machine generates a keypair, verifies the control plane
@@ -3421,10 +3425,8 @@ real `sops` binary rather than on having read the spec carefully.
    over the same verified transport as everything else, and it is nobody rather
    than whoever it says it is.
 
-   What remains for the recipient list to be fully trustworthy is binding a
-   worker's age public key to its enrolled identity, so `je secret recipients
-   add <worker>` can resolve a name to a key the control plane knows rather than
-   one somebody pasted.
+   What remained for the recipient list to be fully trustworthy -- binding a
+   worker's age public key to its enrolled identity -- is step 7 below.
 
 Identity moved last deliberately. Steps 2-4 are useful without it and it is the
 largest piece; doing it first would have blocked everything behind the thing least
@@ -3560,12 +3562,62 @@ order:
 certificate."*** That is a better sentence, and it closes the gap D20 opened the
 moment a worker could live on somebody else's machine.
 
+7. ~~**Client identity, and the age key binding.**~~ **Shipped.** The two
+   halves the flip did not need, done after it rather than before.
+
+   **An actor is proved.** `je enrol <name> --client` mints an identity for a
+   person; `je identity join` redeems it, and beside the control plane needs no
+   token for the same reason a local worker does not. When a connection carries
+   a verified certificate its common name *is* the actor and the body is not
+   consulted, so D7's "the person responsible" stops being a field the
+   responsible party fills in for itself. `je events` grew an ACTOR column,
+   because attribution no view renders is not attribution.
+
+   **Writing requires an identity**, once a deployment has issued a client one.
+   Two decisions inside that:
+
+   - **Gated on the HTTP method, not a list of routes.** A list is a thing
+     somebody forgets to add to, and the endpoint they forget is by definition
+     the one nobody thought about. Two exemptions, both argued: redeeming a
+     token is how a caller with nothing obtains something, and renewal already
+     demands a certificate whether or not the gate is armed. Minting is *not*
+     exempt — it decides what a machine may call itself.
+   - **Armed by the deployment's own state**, not by configuration. Before the
+     first client identity there is nobody to be, and refusing writes would mean
+     a fresh deployment could do nothing at all. A config flag would be a value
+     that can be true while no certificate exists, which is precisely the state
+     where nothing works. `je enrol --client` says what it is about to change
+     while it can still be reconsidered.
+
+   Reads stay open throughout. A certificate answers "who is this"; "who may
+   look" is the question N1 keeps out, and answering it would break every read
+   command for the CLI and the web client.
+
+   **An age key is bound to the identity**, at enrolment when the machine
+   already has one and over its own mTLS connection when it does not. `je secret
+   recipients add --source X buildbox` resolves a name to the key that identity
+   registered, so "this machine may read production credentials" is a statement
+   about an identity this control plane issued rather than about a string
+   somebody pasted. Pasting still works and says plainly that nothing checked
+   it.
+
+   **`je secret set --source` writes your checkout and offers to commit.** Not
+   the control plane's copy: that is a cache the next sync overwrites, so the
+   change would appear to work and then vanish. Offering rather than doing keeps
+   the tool out of somebody's history uninvited, and a conventional message
+   means the diff D23 wants reviewed arrives described.
+
+   **A path bug this found**, and it was found by running it rather than by
+   reading it: `je worker keygen` wrote `<data>/identity` while a worker started
+   by `je quickstart` looked in `<data>/cache/identity`, so the key you had just
+   been told to create was never found. One path computed in two places. It is
+   `paths.Layout.AgeIdentity()` now.
+
 **Order was: renewal, local auto-enrolment, compose, clock skew, the test
-harness, then the flip.** Renewal first because everything after it depends on
-certificates being something you never think about. Client identity — binding
-`RunOptions.Actor` and an age recipient to a verified certificate — turned out
-not to be a prerequisite for the flip, and is the largest thing still open in
-D25.
+harness, the flip, then client identity and the key binding.** Renewal first
+because everything after it depends on certificates being something you never
+think about. Client identity turned out not to be a prerequisite for the flip,
+which is why it came after it.
 
 **Your response:**
 

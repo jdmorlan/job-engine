@@ -1,0 +1,19 @@
+-- 0010_age_recipients: an identity's age public key, so a recipient list names
+-- machines rather than pasted keys (D25).
+--
+-- `je secret recipients add <source> <name>` has to turn a name into a key, and
+-- until now there was nowhere for that key to live: `je worker keygen` printed
+-- a public key and told a human to paste it somewhere. A pasted key is exactly
+-- the class of claim D25 removed everywhere else -- nothing checks that the key
+-- you pasted belongs to the machine you meant, so "this worker may read
+-- production credentials" is a sentence about a string somebody copied.
+--
+-- Bound to the enrolled identity, which is the only place the binding is worth
+-- anything: the control plane already decided what this machine is called and
+-- what it may advertise, so recording which key it reads with is the same
+-- decision continued rather than a new kind of trust.
+--
+-- Null for every identity that has not registered one, which includes every
+-- worker enrolled before this migration. They keep working and read nothing
+-- encrypted to them, which is what was already true.
+ALTER TABLE workers ADD COLUMN age_recipient TEXT;

@@ -188,6 +188,37 @@ before this change cannot talk to a control plane after it, and says so rather
 than failing in the handshake — **upgrading the control plane means restarting
 its workers.**
 
+#### Who did this
+
+A person gets a certificate too, and then `je run` is attributed to somebody
+rather than to whatever the request body claimed:
+
+```console
+$ je enrol jays-laptop --client       # on the control plane
+$ je identity join --token ... --ca-pin ... --addr ...    # on the laptop
+enrolled as jays-laptop
+
+$ je events
+ID  WHEN                 TYPE           ACTOR        SOURCE
+8   2026-09-03 21:10:37  run.requested  jays-laptop  cli
+```
+
+Beside the control plane itself, `je identity join` needs no token — it reads
+the one in the data directory, which it can only do if it already has the access
+that would let it read the CA key.
+
+**Issuing the first client identity changes the deployment**, and `je enrol
+--client` says so before you redeem it: from then on, a request that *changes*
+something must present a certificate. `je run`, `je secret set`, `je source add`
+and minting further identities all refuse an unidentified caller. Reading is
+untouched — a certificate answers "who is this", and "who may look" is a
+question this system does not ask.
+
+Before that first client exists there is nobody to be, so writes are open. The
+gate is armed by the deployment's own state rather than by a setting, because a
+setting can be true while no certificate exists, and that is the state where
+nothing works.
+
 ### When a worker disappears
 
 If a worker stops answering, the control plane cannot tell "it died" from "it is
@@ -671,6 +702,53 @@ definition error, not a 3am exit code** — which is the whole of D10.
 Values are stripped from log lines *before* they reach the database, so copying
 the log file later cannot leak them. There is no `je secret get`.
 
+#### Secrets the control plane cannot read
+
+The store above lives with the control plane, which means the control plane can
+read it. That is right for one machine and wrong the moment a worker runs
+somewhere you do not fully control, so a secret can instead be encrypted into
+the source it belongs to:
+
+```console
+$ je secret set --source weather STATION_API_KEY
+Value for STATION_API_KEY (not echoed):
+set STATION_API_KEY in weather
+
+commit this?  secrets(weather): set STATION_API_KEY
+[y/N] y
+committed: secrets(weather): set STATION_API_KEY
+```
+
+It edits **your checkout** and offers to commit, rather than sending the value
+anywhere. That is the point: under D23 granting access should be a diff somebody
+reviews, and the control plane's copy of a source tree is a cache that the next
+sync overwrites.
+
+The file is SOPS-shaped — **names cleartext, values encrypted** — so the control
+plane can still tell that a declared secret exists without holding any key, and
+`je jobs` still says `misconfigured` before it is set. The worker decrypts it,
+and redacts it from log lines *before they cross the network*.
+
+Who can read it is a list of machines, resolved by name:
+
+```console
+$ je worker keygen                       # on the machine that needs to read
+wrote ~/.je/identity
+public key  age19clwgef...
+registered as buildbox's key on the control plane.
+
+$ je secret recipients add --source weather buildbox
+buildbox can now read weather's secrets
+  age19clwgef...
+  it can read every value in the file, including ones set earlier
+```
+
+**The name is the point.** A pasted age key is a string nobody checked — nothing
+ties it to the machine you meant. `buildbox` resolves to the key that identity
+registered over its own certificate, so "this machine may read production
+credentials" is a statement about an identity the control plane issued. Pasting
+a key still works and says plainly that nothing verified it.
+
 ### Not built yet
 
 Retries, job sources (D22), container executor, the TypeScript shim (D21),
@@ -696,9 +774,11 @@ in-flight runs. Watching the directory automatically is still open. A job
 declaring `language:` loads but is marked misconfigured and will not run, rather
 than running without what it asked for.
 
-**Secrets reach a worker in the dispatch.** That is correct for a trusted
-network and wrong for anything else, and it is the real work item behind putting
-a worker on a machine you do not fully control (D10).
+**A secret in the control plane's own store reaches a worker in the dispatch.**
+That is correct for a trusted network and wrong for anything else, which is why
+`je secret set --source` exists: those never reach the control plane at all. Two
+stores is the honest state of it, and the seam is deliberate rather than
+overlooked (D10/D25).
 
 ## Layout
 

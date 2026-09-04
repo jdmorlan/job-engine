@@ -15,6 +15,8 @@ func (s *Server) registerEnrolment(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/enrol", s.handleEnrol)
 	mux.HandleFunc("POST /v1/enrol/renew", s.handleRenew)
 	mux.HandleFunc("GET /v1/ca", s.handleCA)
+	mux.HandleFunc("POST /v1/identity/age-key", s.handleRegisterAgeKey)
+	mux.HandleFunc("GET /v1/identities/{name}/age-key", s.handleAgeKeyFor)
 }
 
 // MintEnrolmentRequest names the worker being enrolled and what it will be
@@ -105,6 +107,14 @@ type EnrolRequest struct {
 	Name   string   `json:"name,omitempty"`
 	Labels []string `json:"labels,omitempty"`
 	Roles  []string `json:"roles,omitempty"`
+
+	// AgeRecipient is the public half of the key this machine reads encrypted
+	// secrets with, bound to the identity at the moment it is decided (D25).
+	//
+	// Sent here rather than registered afterwards so that a fresh worker is one
+	// step, not two. Optional: a machine with no key enrols without one and
+	// registers it later over its own mTLS connection.
+	AgeRecipient string `json:"age_recipient,omitempty"`
 }
 
 // EnrolResponse is the issued identity and the authority to verify the control
@@ -119,7 +129,7 @@ func (s *Server) handleEnrol(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(s, w, r, &req) {
 		return
 	}
-	cert, caPEM, err := s.engine.Enrol(r.Context(), req.Token, []byte(req.PublicKey), req.Name, req.Labels, req.Roles)
+	cert, caPEM, err := s.engine.Enrol(r.Context(), req.Token, []byte(req.PublicKey), req.Name, req.Labels, req.Roles, req.AgeRecipient)
 	switch {
 	case errors.Is(err, ca.ErrBadToken):
 		// One status and one sentence for expired, used and never-issued
@@ -182,4 +192,47 @@ func (s *Server) handleRenew(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, RenewResponse{Certificate: string(cert)})
+}
+
+// AgeKeyRequest registers the public half of this machine's secret-reading key.
+type AgeKeyRequest struct {
+	Recipient string `json:"recipient"`
+}
+
+// AgeKeyResponse is the key an identity reads with. Public by construction: it
+// is what you encrypt to, and holding it grants nothing.
+type AgeKeyResponse struct {
+	Name      string `json:"name"`
+	Recipient string `json:"recipient"`
+}
+
+func (s *Server) handleRegisterAgeKey(w http.ResponseWriter, r *http.Request) {
+	// The identity comes from the certificate and never from the body, so a
+	// machine can register a key for itself and for nothing else.
+	name := IdentityOf(r.Context())
+	if name == "" {
+		s.writeError(w, http.StatusUnauthorized,
+			"registering an age key is authenticated by this machine's own "+
+				"certificate, and this connection presented none")
+		return
+	}
+	var req AgeKeyRequest
+	if !decodeBody(s, w, r, &req) {
+		return
+	}
+	if err := s.engine.RegisterAgeRecipient(r.Context(), name, req.Recipient); err != nil {
+		s.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, AgeKeyResponse{Name: name, Recipient: req.Recipient})
+}
+
+func (s *Server) handleAgeKeyFor(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	recipient, err := s.engine.RecipientFor(r.Context(), name)
+	if err != nil {
+		s.writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, AgeKeyResponse{Name: name, Recipient: recipient})
 }

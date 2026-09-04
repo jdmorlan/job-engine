@@ -522,3 +522,22 @@ func (c *Client) MintEnrolment(ctx context.Context, req api.MintEnrolmentRequest
 func (c *Client) Enrol(ctx context.Context, req api.EnrolRequest) (api.EnrolResponse, error) {
 	return do[api.EnrolResponse](ctx, c, http.MethodPost, "/v1/enrol", req)
 }
+
+// RegisterAgeKey binds this machine's secret-reading key to its identity.
+//
+// The control plane takes the name from the certificate on the connection, so
+// the response says who it decided this is -- which is the value worth printing
+// back, because it is the name a recipient list will use.
+func (c *Client) RegisterAgeKey(ctx context.Context, recipient string) (string, error) {
+	out, err := do[api.AgeKeyResponse](ctx, c, http.MethodPost, "/v1/identity/age-key",
+		api.AgeKeyRequest{Recipient: recipient})
+	return out.Name, err
+}
+
+// AgeKeyFor resolves an identity's name to the key it reads with, so `je secret
+// recipients add` can name a machine rather than take a pasted key.
+func (c *Client) AgeKeyFor(ctx context.Context, name string) (string, error) {
+	out, err := do[api.AgeKeyResponse](ctx, c, http.MethodGet,
+		"/v1/identities/"+url.PathEscape(name)+"/age-key", nil)
+	return out.Recipient, err
+}

@@ -635,3 +635,116 @@ func getInto(t *testing.T, c *http.Client, url string, into any) {
 		t.Fatal(err)
 	}
 }
+
+// An age key is bound to an identity the control plane issued, so a recipient
+// list can name a machine instead of carrying a key somebody pasted (D25).
+func TestAnAgeKeyIsBoundToAnIdentity(t *testing.T) {
+	base, layout := startTLSDaemon(t)
+
+	recipient := "age1zvkyg2lqzraa2lnjvqej32nkuu0ues2s82hzrye869xeexvn73equnujwj"
+	client := enrolClientWithKey(t, base, layout, "jays-laptop", recipient)
+
+	var out api.AgeKeyResponse
+	getInto(t, client, base+"/v1/identities/jays-laptop/age-key", &out)
+	if out.Recipient != recipient {
+		t.Errorf("resolved key = %q, want %q", out.Recipient, recipient)
+	}
+
+	// A name nobody enrolled resolves to nothing, rather than to something
+	// plausible. This is the whole value of the binding: the answer is about an
+	// identity this control plane issued, or there is no answer.
+	resp, err := client.Get(base + "/v1/identities/nobody/age-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("unknown identity = %d, want 404", resp.StatusCode)
+	}
+}
+
+// Registering a key later works, and registers it for the caller -- never for
+// whoever a request body names.
+func TestAnAgeKeyIsRegisteredForTheCallerOnly(t *testing.T) {
+	base, layout := startTLSDaemon(t)
+	client := enrolClientWithKey(t, base, layout, "jays-laptop", "")
+
+	recipient := "age1zvkyg2lqzraa2lnjvqej32nkuu0ues2s82hzrye869xeexvn73equnujwj"
+	body, _ := json.Marshal(api.AgeKeyRequest{Recipient: recipient})
+	resp, err := client.Post(base+"/v1/identity/age-key", "application/json",
+		strings.NewReader(string(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var registered api.AgeKeyResponse
+	if err := json.NewDecoder(resp.Body).Decode(&registered); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if registered.Name != "jays-laptop" {
+		t.Errorf("registered for %q, want the calling certificate's name", registered.Name)
+	}
+
+	// With no certificate there is nobody to register a key for, so the body
+	// cannot be used to name somebody.
+	resp, err = insecureClient().Post(base+"/v1/identity/age-key", "application/json",
+		strings.NewReader(string(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("unidentified key registration = %d, want 401", resp.StatusCode)
+	}
+}
+
+func enrolClientWithKey(t *testing.T, base string, layout paths.Layout, name, recipient string) *http.Client {
+	t.Helper()
+
+	body, _ := json.Marshal(api.MintEnrolmentRequest{Name: name, Roles: []string{store.RoleClient}})
+	resp, err := insecureClient().Post(base+"/v1/enrol/tokens", "application/json",
+		strings.NewReader(string(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mint api.MintEnrolmentResponse
+	if err := json.NewDecoder(resp.Body).Decode(&mint); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	key, pubPEM := keypairPEM(t)
+	body, _ = json.Marshal(api.EnrolRequest{
+		Token: mint.Token, PublicKey: pubPEM, AgeRecipient: recipient,
+	})
+	resp, err = insecureClient().Post(base+"/v1/enrol", "application/json",
+		strings.NewReader(string(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var enrolled api.EnrolResponse
+	if err := json.NewDecoder(resp.Body).Decode(&enrolled); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if enrolled.Certificate == "" {
+		t.Fatal("enrolment returned no certificate")
+	}
+
+	cert, err := tls.X509KeyPair([]byte(enrolled.Certificate), []byte(key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM([]byte(enrolled.CA)) {
+		t.Fatal("the returned authority is not a certificate")
+	}
+	return &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			RootCAs:      pool,
+			MinVersion:   tls.VersionTLS12,
+		}},
+	}
+}

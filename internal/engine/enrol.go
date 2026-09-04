@@ -11,6 +11,7 @@ import (
 
 	"slices"
 
+	"filippo.io/age"
 	"github.com/jdmorlan/job-engine/internal/ca"
 	"github.com/jdmorlan/job-engine/internal/store"
 )
@@ -69,7 +70,7 @@ func (e *Engine) MintEnrolment(ctx context.Context, name string, labels, roles [
 // ordering that matters: registration afterwards can only report liveness,
 // because name and labels are already decided and the store refuses to let a
 // registration change them.
-func (e *Engine) Enrol(ctx context.Context, token string, publicKeyPEM []byte, asName string, asLabels, asRoles []string) (certPEM, caPEM []byte, err error) {
+func (e *Engine) Enrol(ctx context.Context, token string, publicKeyPEM []byte, asName string, asLabels, asRoles []string, ageRecipient string) (certPEM, caPEM []byte, err error) {
 	grant, err := e.tokens.Redeem(token)
 	if err != nil {
 		return nil, nil, err
@@ -128,6 +129,7 @@ func (e *Engine) Enrol(ctx context.Context, token string, publicKeyPEM []byte, a
 		RegisteredAt: now,
 		EnrolledAt:   &now,
 		Fingerprint:  fingerprint,
+		AgeRecipient: ageRecipient,
 	}); err != nil {
 		return nil, nil, err
 	}
@@ -264,4 +266,55 @@ func (e *Engine) IdentityRequired(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("checking whether an identity is required: %w", err)
 	}
 	return armed, nil
+}
+
+// RegisterAgeRecipient binds an age public key to the identity making the
+// request (D25).
+//
+// The name is the caller's verified certificate, never a field in the body, so
+// this cannot be done on somebody else's behalf -- which is the entire reason
+// the binding is worth more than a pasted key. `je secret recipients add
+// <source> <worker>` can then resolve a name to a key the control plane learned
+// from the machine itself.
+//
+// Replacing an existing key is allowed and is not silent: a machine that runs
+// `je worker keygen` again has genuinely changed which key it reads with, and
+// refusing would leave the control plane's record wrong. What it cannot do is
+// make the old ciphertext readable again, which is why the CLI refuses to
+// overwrite the key file itself.
+func (e *Engine) RegisterAgeRecipient(ctx context.Context, name, recipient string) error {
+	if name == "" {
+		return ErrNotEnrolled
+	}
+	if _, err := age.ParseX25519Recipient(recipient); err != nil {
+		return fmt.Errorf("%q is not an age public key: %w", recipient, err)
+	}
+	if err := e.store.RecordAgeRecipient(ctx, WorkerID(name), recipient); err != nil {
+		return fmt.Errorf("recording the age key for %q: %w", name, err)
+	}
+	e.log.Info("age key registered", "identity", name, "recipient", recipient)
+	return nil
+}
+
+// RecipientFor resolves an identity's name to the age public key it reads with.
+//
+// The lookup behind `je secret recipients add <source> <name>`: it turns "this
+// machine may read production credentials" from a string somebody pasted into a
+// statement about an identity this control plane issued.
+func (e *Engine) RecipientFor(ctx context.Context, name string) (string, error) {
+	w, err := e.store.WorkerByID(ctx, WorkerID(name))
+	if err != nil {
+		return "", fmt.Errorf("no identity named %q is enrolled here", name)
+	}
+	if !w.Enrolled() {
+		return "", fmt.Errorf(
+			"%q registered by claiming that name and was never enrolled, so this "+
+				"control plane has nothing to bind a key to", name)
+	}
+	if w.AgeRecipient == "" {
+		return "", fmt.Errorf(
+			"%q has not registered an age key.\n"+
+				"On that machine:  je worker keygen", name)
+	}
+	return w.AgeRecipient, nil
 }

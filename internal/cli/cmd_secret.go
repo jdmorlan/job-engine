@@ -17,15 +17,28 @@ import (
 func init() {
 	register(&Command{
 		Name:  "secret",
-		Args:  "set|list|rm [name]",
+		Args:  "set|list|rm|recipients [name]",
 		Usage: "manage the values jobs declare and the engine injects",
 		Long: "There is no `get`. The CLI never prints a secret value, and only the\n" +
 			"secrets a job declares are injected into it.\n\n" +
 			"A job declaring a secret that is not set is a definition error: it shows\n" +
 			"as misconfigured in `je jobs` and will not run, rather than failing with\n" +
 			"a cryptic exit code hours later.\n\n" +
-			"Secrets live with the control plane, not on this machine, so these\n" +
-			"commands need one running.",
+			"Two places a secret can live, and the difference is who can read it:\n\n" +
+			"  je secret set NAME              the control plane's own store. It holds\n" +
+			"                                  the value and can redact it from logs.\n" +
+			"  je secret set --source X NAME   encrypted into source X's repository,\n" +
+			"                                  readable only by the recipients the file\n" +
+			"                                  names. The control plane cannot read it,\n" +
+			"                                  and the worker decrypts it (D25).\n\n" +
+			"The second is what lets a worker on a machine you do not fully control run\n" +
+			"a job that needs a credential. It edits your checkout and offers to commit,\n" +
+			"because granting access should be a diff somebody reviews.\n\n" +
+			"subcommands:\n" +
+			"  set         store a value, in one place or the other\n" +
+			"  list        names, when they were set, and which jobs use them\n" +
+			"  rm          remove one from the control plane's store\n" +
+			"  recipients  who can read a source's encrypted secrets, and grant more",
 		Run: runSecret,
 	})
 }
@@ -33,21 +46,69 @@ func init() {
 func runSecret(ctx context.Context, env *Env, args []string) error {
 	cmd := commands["secret"]
 	fs := newFlagSet(cmd, env)
+	source := fs.String("source", "", "encrypt into this source's repository instead of the control plane's store")
+	path := fs.String("path", "", "the checkout to edit (default: a directory source's path, or this git repository)")
+	doCommit := fs.Bool("commit", false, "commit the change without asking")
+	noCommit := fs.Bool("no-commit", false, "leave the change uncommitted, and do not ask")
 	positional, err := parseArgs(fs, args)
 	if err != nil {
 		return err
 	}
 	if len(positional) == 0 {
-		return usagef("usage: je secret set|list|rm [name]")
+		return usagef("usage: je secret set|list|rm|recipients [name]")
+	}
+
+	mode := commitAsk
+	switch {
+	case *doCommit && *noCommit:
+		return usagef("--commit and --no-commit ask for opposite things")
+	case *doCommit:
+		mode = commitAlways
+	case *noCommit:
+		mode = commitNever
 	}
 
 	switch positional[0] {
 	case "set":
 		if len(positional) != 2 {
-			return usagef("usage: je secret set <NAME>")
+			return usagef("usage: je secret set [--source <src>] <NAME>")
+		}
+		if *source != "" {
+			return withClient(ctx, env, func(ctx context.Context, c *Client) error {
+				target, err := resolveSourceTree(ctx, env, c, *source, *path)
+				if err != nil {
+					return err
+				}
+				return secretSetInSource(ctx, env, c, target, positional[1], mode)
+			})
 		}
 		return withClient(ctx, env, func(ctx context.Context, c *Client) error {
 			return secretSet(ctx, env, c, positional[1])
+		})
+	case "recipients":
+		if len(positional) < 2 {
+			return usagef("usage: je secret recipients list|add --source <src> [name-or-key]")
+		}
+		if *source == "" {
+			return usagef("je secret recipients needs --source <src>: recipients are a " +
+				"property of one repository's secrets file")
+		}
+		return withClient(ctx, env, func(ctx context.Context, c *Client) error {
+			target, err := resolveSourceTree(ctx, env, c, *source, *path)
+			if err != nil {
+				return err
+			}
+			switch positional[1] {
+			case "list":
+				return secretRecipientsList(env, target)
+			case "add":
+				if len(positional) != 3 {
+					return usagef("usage: je secret recipients add --source <src> <name-or-key>")
+				}
+				return secretRecipientsAdd(ctx, env, c, target, positional[2], mode)
+			default:
+				return usagef("unknown subcommand %q; expected list or add", positional[1])
+			}
 		})
 	case "list":
 		if len(positional) != 1 {
@@ -68,7 +129,8 @@ func runSecret(ctx context.Context, env *Env, args []string) error {
 		// typing this has a mental model to correct, not a typo to fix.
 		return fmt.Errorf("there is no `je secret get`; the CLI never prints a secret value")
 	default:
-		return usagef("unknown subcommand %q; expected set, list or rm", positional[0])
+		return usagef("unknown subcommand %q; expected set, list, rm or recipients",
+			positional[0])
 	}
 }
 

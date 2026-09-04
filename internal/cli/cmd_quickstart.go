@@ -108,9 +108,15 @@ func runQuickstart(ctx context.Context, env *Env, args []string) error {
 		Name:    defaultWorkerName(),
 		Labels:  splitLabels(*labels),
 		JobsDir: env.Layout.Jobs,
-		Version: env.Version,
-		Client:  client,
-		Logger:  logger,
+		// The same two paths `je worker run` passes. Leaving them to the
+		// worker's own defaults put its age key under <data>/cache while
+		// `je worker keygen` wrote <data>/identity, so a secret encrypted to
+		// the key you had just created could not be read here (D25).
+		CacheDir:     env.Layout.Data,
+		IdentityFile: env.Layout.AgeIdentity(),
+		Version:      env.Version,
+		Client:       client,
+		Logger:       logger,
 	})
 	if err != nil {
 		cancel()
