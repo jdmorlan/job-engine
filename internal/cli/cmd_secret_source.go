@@ -308,11 +308,16 @@ func offerCommit(env *Env, t sourceTarget, message string, mode commitMode) erro
 	return nil
 }
 
-func confirm(env *Env, prompt string) bool {
+// interactive reports whether there is a person to ask.
+func interactive(env *Env) bool {
 	stdin, ok := env.Stdin.(*os.File)
-	if !ok || !term.IsTerminal(int(stdin.Fd())) {
-		// Not a person: do nothing rather than commit unattended. A script that
-		// wants the commit says --commit.
+	return ok && term.IsTerminal(int(stdin.Fd()))
+}
+
+func confirm(env *Env, prompt string) bool {
+	if !interactive(env) {
+		// Not a person: do nothing rather than act unattended. A script that
+		// wants it says so with a flag.
 		return false
 	}
 	fmt.Fprint(env.Stderr, prompt)

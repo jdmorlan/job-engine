@@ -26,26 +26,41 @@ JE_INSTALL_DIR=/usr/local/bin  # where to put it
 JE_VERSION=v0.2.0              # pin a release instead of taking the latest
 ```
 
-Updating is `je upgrade`, which verifies the same checksum before replacing
-itself in place:
+Updating is `je upgrade`. It verifies the same checksum before replacing itself,
+and then offers to restart what this machine is running:
 
 ```console
 $ je upgrade
-  current  v0.1.0
-  latest   v0.2.0
+  current  v0.4.1
+  latest   v0.5.0
 
-downloading je_0.2.0_darwin_arm64.tar.gz (4.8 MB)
+downloading je_0.5.0_darwin_arm64.tar.gz (5.5 MB)
 verified sha256 194902ec097ce0a4
 
-upgraded to v0.2.0 at /Users/you/.local/bin/je
+upgraded to v0.5.0 at /Users/you/.local/bin/je
 
-note: a daemon is still running v0.1.0 (pid 4821).
-      Restart it to pick up v0.2.0.
+still running the old version:
+  control-plane  v0.4.1   (container)
+  web            v0.4.1   (container)
+
+restart them on v0.5.0?  [y/N] y
+
+control-plane: pulling ghcr.io/jdmorlan/job-engine:v0.5.0
+  restarted on v0.5.0
 ```
 
-A running daemon keeps executing the old binary until it restarts — replacing a
-file does not replace a process — so both `je upgrade` and `je status` say so
-rather than leaving you to wonder why nothing changed.
+`je` is one binary playing three parts, so replacing it upgrades the CLI, the
+control plane and any worker here at once — but a running process keeps
+executing the old code until it restarts. **You should not have to know whether
+that process is a container or a launchd job**, so this handles both: a
+container is recreated from its own configuration, with the same mounts, ports
+and flags and a new tag.
+
+It asks first, because restarting a control plane drops whatever is mid-flight
+and that is a poor thing to do as a side effect of swapping a file. `--yes`
+skips the question and `--restart` skips the download. The exception is a
+deployment you drive with `docker compose`: that file is yours and owns its
+containers, so `je upgrade` reports them and changes nothing.
 
 `je upgrade --check` reports without installing. Building from source is
 `go build ./cmd/je`.
@@ -337,7 +352,7 @@ other's events.
 
 ```
 je demo           register a repo of example jobs, a chain, and a tour
-je upgrade        install the latest release, checksum-verified
+je upgrade        upgrade this deployment: the binary, and what runs here
 je quickstart     a control plane and a worker, in this terminal
 je control-plane run    the control plane: schedules, history, the API
 je worker run           a worker: the thing that executes jobs

@@ -2,8 +2,10 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os/exec"
+	"sort"
 	"strings"
 )
 
@@ -79,6 +81,12 @@ type dockerSpec struct {
 	volumes   []string
 	env       []string
 	network   string
+
+	// cmd is the whole trailing command, when it is known exactly rather than
+	// assembled. Set only by inspectContainer, which reads what a container is
+	// actually running: an upgrade must reproduce the command that is there,
+	// including flags this version of the CLI would not have written.
+	cmd []string
 }
 
 func (d dockerSpec) argv() []string {
@@ -103,7 +111,11 @@ func (d dockerSpec) argv() []string {
 	if d.network != "" {
 		argv = append(argv, "--network", d.network)
 	}
-	argv = append(argv, d.image, d.component, "run")
+	argv = append(argv, d.image)
+	if len(d.cmd) > 0 {
+		return append(argv, d.cmd...)
+	}
+	argv = append(argv, d.component, "run")
 	return append(argv, d.args...)
 }
 
@@ -217,4 +229,162 @@ func containerImageTag(ctx context.Context, component string) string {
 		return image[i+1:]
 	}
 	return ""
+}
+
+// inspectContainer reconstructs the spec of a running container, so it can be
+// recreated on a new image without anybody having to remember how it was set up.
+//
+// Reading the container rather than a file this CLI wrote is what makes upgrade
+// work for a deployment installed by an older version -- which is every
+// deployment that exists at the moment this is added. It also means the flags
+// reproduced are the ones actually in use rather than the ones this version
+// would choose.
+//
+// Two things docker reports are not what you would pass back:
+//
+//   - Docker Desktop rewrites a bind source to /host_mnt/<path>. Passing that
+//     back creates a bind to a path the host does not have, so the jobs
+//     directory would quietly become an empty one inside the VM.
+//   - Config.Env includes the image's own defaults. Passing them back is
+//     harmless but it pins them: a later image that changed a default would be
+//     overridden by the value baked into the image being replaced.
+func inspectContainer(ctx context.Context, component string) (dockerSpec, error) {
+	name := containerName(component)
+	raw, err := exec.CommandContext(ctx, "docker", "inspect", name).Output()
+	if err != nil {
+		return dockerSpec{}, fmt.Errorf("inspecting %s: %w", name, err)
+	}
+
+	var inspected []struct {
+		Config struct {
+			Image string   `json:"Image"`
+			Cmd   []string `json:"Cmd"`
+			Env   []string `json:"Env"`
+		} `json:"Config"`
+		HostConfig struct {
+			Binds        []string                       `json:"Binds"`
+			NetworkMode  string                         `json:"NetworkMode"`
+			PortBindings map[string][]dockerPortBinding `json:"PortBindings"`
+		} `json:"HostConfig"`
+	}
+	if err := json.Unmarshal(raw, &inspected); err != nil {
+		return dockerSpec{}, fmt.Errorf("reading docker inspect for %s: %w", name, err)
+	}
+	if len(inspected) == 0 {
+		return dockerSpec{}, fmt.Errorf("docker knows no container called %s", name)
+	}
+	c := inspected[0]
+
+	spec := dockerSpec{
+		component: component,
+		image:     c.Config.Image,
+		cmd:       c.Config.Cmd,
+		env:       withoutImageDefaults(ctx, c.Config.Image, c.Config.Env),
+	}
+	if c.HostConfig.NetworkMode != "" && c.HostConfig.NetworkMode != "default" {
+		spec.network = c.HostConfig.NetworkMode
+	}
+	for _, bind := range c.HostConfig.Binds {
+		spec.volumes = append(spec.volumes, hostBind(bind))
+	}
+	// Sorted, so a recreated container's command is stable rather than
+	// depending on Go's map iteration -- which matters because it is printed.
+	for _, port := range sortedKeys(c.HostConfig.PortBindings) {
+		for _, b := range c.HostConfig.PortBindings[port] {
+			container := strings.TrimSuffix(port, "/tcp")
+			published := b.HostPort + ":" + container
+			if b.HostIP != "" {
+				published = b.HostIP + ":" + published
+			}
+			spec.ports = append(spec.ports, published)
+		}
+	}
+	return spec, nil
+}
+
+type dockerPortBinding struct {
+	HostIP   string `json:"HostIp"`
+	HostPort string `json:"HostPort"`
+}
+
+// hostBind undoes Docker Desktop's rewriting of a bind source.
+//
+// On macOS the host path /Users/x/.je/jobs is reported as
+// /host_mnt/Users/x/.je/jobs, which is how the Linux VM sees it and not a path
+// this machine has. Passing it back would mount an empty directory and the
+// symptom would be a control plane that suddenly loads no jobs.
+func hostBind(bind string) string {
+	const desktopPrefix = "/host_mnt/"
+	if strings.HasPrefix(bind, desktopPrefix) {
+		return "/" + strings.TrimPrefix(bind, desktopPrefix)
+	}
+	return bind
+}
+
+// withoutImageDefaults keeps only the environment the container was given
+// explicitly, so replacing it does not pin the old image's defaults.
+func withoutImageDefaults(ctx context.Context, image string, env []string) []string {
+	defaults := map[string]bool{}
+	out, err := exec.CommandContext(ctx, "docker", "inspect",
+		"--format", "{{json .Config.Env}}", image).Output()
+	if err == nil {
+		var baked []string
+		if json.Unmarshal(out, &baked) == nil {
+			for _, e := range baked {
+				defaults[e] = true
+			}
+		}
+	}
+
+	var kept []string
+	for _, e := range env {
+		if defaults[e] {
+			continue
+		}
+		// A variable the image also sets, to a different value, is one somebody
+		// chose -- TZ is exactly this -- so it is kept.
+		kept = append(kept, e)
+	}
+	return kept
+}
+
+func sortedKeys[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// pullImage fetches a tag before anything is torn down, so a network failure
+// costs nothing rather than leaving the component stopped.
+//
+// An image already on this machine is enough. `docker run` would use it without
+// asking the registry, so refusing here would fail an upgrade that is going to
+// work -- on a host with no route to ghcr, or one where the image was loaded by
+// hand. The pull is still attempted first, because the usual case is that it is
+// not here yet.
+func pullImage(ctx context.Context, image string) (pulled bool, err error) {
+	out, pullErr := exec.CommandContext(ctx, "docker", "pull", image).CombinedOutput()
+	if pullErr == nil {
+		return true, nil
+	}
+	if imagePresent(ctx, image) {
+		return false, nil
+	}
+	return false, fmt.Errorf("pulling %s: %s", image, strings.TrimSpace(lastLine(string(out))))
+}
+
+// imagePresent reports whether docker already has this exact tag locally.
+func imagePresent(ctx context.Context, image string) bool {
+	return exec.CommandContext(ctx, "docker", "image", "inspect", image).Run() == nil
+}
+
+// retag replaces the version in an image reference, keeping the repository.
+func retag(image, version string) string {
+	if i := strings.LastIndex(image, ":"); i >= 0 && !strings.Contains(image[i+1:], "/") {
+		return image[:i] + ":" + version
+	}
+	return image + ":" + version
 }
