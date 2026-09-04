@@ -196,11 +196,15 @@ func writeJobFile(env *Env, root, name string, t jobTemplate) error {
 		fmt.Fprintf(env.Stdout, "wrote %s\n", scriptPath)
 	}
 
+	// Commit and push first, deliberately. The engine reads a repository, so a
+	// file that is only on this disk is not a job the engine has -- and
+	// `je sync` on its own would be a command that appears to do nothing.
 	fmt.Fprintln(env.Stdout)
 	tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintf(tw, "  je sync\tload it\n")
-	fmt.Fprintf(tw, "  je explain %s\tevery value, including the ones this file does not set\n", name)
-	fmt.Fprintf(tw, "  je run %s\trun it now\n", name)
+	fmt.Fprintf(tw, "  git add -A && git commit -m %q && git push\tthe engine reads the repository\n", "add "+name)
+	fmt.Fprintf(tw, "  je source sync <source>\tfetch what you just pushed\n")
+	fmt.Fprintf(tw, "  je explain <source>/%s\tevery value, including the ones this file does not set\n", name)
+	fmt.Fprintf(tw, "  je run <source>/%s\trun it now\n", name)
 	return tw.Flush()
 }
 

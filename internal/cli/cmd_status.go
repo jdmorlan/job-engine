@@ -56,7 +56,6 @@ func runStatus(ctx context.Context, env *Env, args []string) error {
 	fmt.Fprintf(tw, "uptime\t%s\n", roundDuration(health.Uptime))
 	fmt.Fprintf(tw, "since\t%s\n", health.StartedAt.Local().Format(time.RFC1123))
 	fmt.Fprintf(tw, "data dir\t%s\n", health.DataDir)
-	fmt.Fprintf(tw, "jobs dir\t%s\n", health.JobsDir)
 
 	// D16 records the engine's own downtime so a gap in a job's history can be
 	// attributed to "the machine was asleep" rather than "something went

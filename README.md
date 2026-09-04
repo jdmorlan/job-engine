@@ -6,9 +6,46 @@
 and event-driven work, and it can always answer three questions: **what ran, why
 it ran, and what it actually processed.**
 
-See [`PITCH.md`](PITCH.md) for why, and [`PROPOSAL.md`](PROPOSAL.md) for the
-design decisions. Comments in the code cite those decisions by number (`D14`,
-`P1`) rather than restating them.
+**New here? [GETTING-STARTED.md](GETTING-STARTED.md)** — fifteen minutes from
+nothing to a job of your own running on a schedule, with no concepts up front.
+
+This README is the other half: how the system is put together and why it is put
+together that way. See [`PITCH.md`](PITCH.md) for the motivation and
+[`PROPOSAL.md`](PROPOSAL.md) for the full argument behind every decision.
+Comments in the code cite those decisions by number (`D14`, `P1`) rather than
+restating them.
+
+## How it works, in one page
+
+Two processes and one rule about where definitions live.
+
+**A control plane** owns the database and decides what should run: it holds the
+schedule, the history, the cursors, and the API. It never executes a job.
+
+**Workers** execute. They hold no state, open no ports, and dial out — so one
+runs fine on a laptop behind NAT. A job picks a worker by *capability*
+(`runs_on: macos`), never by address, and a job nobody can serve waits visibly
+rather than failing quietly.
+
+**Definitions live in a git repository you own**, registered as a *source*. The
+control plane fetches the tree at a commit; a worker gets that same tree when it
+runs the job. That is why a job's code, its scripts and its encrypted secrets
+all travel together, and why the same job runs on your laptop and in a cluster
+without changing.
+
+```
+    your repo ──fetch──▶ ┌───────────────┐            ┌──────────┐
+    (jobs, scripts,      │ control plane │──dispatch─▶│  worker  │
+     secrets)            │  schedule     │◀──result───│  runs it │
+                         │  history      │            └──────────┘
+                         │  cursors      │            ┌──────────┐
+                         │  API          │◀──────────▶│  worker  │
+                         └───────────────┘            └──────────┘
+                                 ▲
+                            je / browser
+```
+
+Everything else in this document is a consequence of those three paragraphs.
 
 ## Install
 

@@ -293,7 +293,6 @@ type Health struct {
 	StartedAt time.Time     `json:"started_at"`
 	Uptime    time.Duration `json:"uptime_ns"`
 	DataDir   string        `json:"data_dir"`
-	JobsDir   string        `json:"jobs_dir"`
 
 	// LastDowntime is how long the engine was down before this start.
 	LastDowntime time.Duration `json:"last_downtime_ns"`

@@ -64,8 +64,14 @@ func TestNewWritesAJobThatLoadsAndRuns(t *testing.T) {
 			t.Errorf("the template restates the default %s:\n%s", unwanted, body)
 		}
 	}
-	if !strings.Contains(out.String(), "je explain weather-ingest") {
+	// Qualified, because a job is named for the source it came from and this
+	// file is not registered anywhere yet -- so the command that will work is
+	// the one naming a source (D27).
+	if !strings.Contains(out.String(), "je explain <source>/weather-ingest") {
 		t.Error("nothing pointed at je explain, which is where the defaults are")
+	}
+	if !strings.Contains(out.String(), "git") {
+		t.Error("nothing said to commit it; the engine reads the repository, not this disk")
 	}
 }
 

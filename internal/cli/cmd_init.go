@@ -81,13 +81,19 @@ func runInit(ctx context.Context, env *Env, args []string) error {
 
 	// Not a tabwriter: one of these lines carries a path, and a single long
 	// path turns an aligned table into a scroll bar.
+	// The steps that actually reach a running job. A source is a repository
+	// the control plane fetches (D22), so pushing is not optional politeness --
+	// it is how the engine ever sees any of this.
 	fmt.Fprintf(env.Stdout, `
 next
   cd %s
-  git init                     if you want it versioned, which is the point
-  je new <job> --script        writes into this repository
-  je source add %s .   register it with the engine
-`, dir, name)
+  je new <job> --language python     writes a job and its script here
+  git init && git add -A && git commit -m "jobs"
+  gh repo create %s --private --source=. --push
+
+then point the engine at it:
+  je source add %s <you>/%s
+`, dir, name, name, name)
 
 	if len(skipped) > 0 {
 		fmt.Fprintf(env.Stderr, "\nleft alone (already present): %v\n", skipped)

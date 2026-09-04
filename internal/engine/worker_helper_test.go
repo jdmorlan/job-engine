@@ -123,13 +123,11 @@ func executeDispatch(t *testing.T, e *engine.Engine, d engine.Dispatch, ctx cont
 
 	// The worker resolves the workdir, so the helper must too -- otherwise it
 	// would test a path the product does not have (D20).
+	// A job runs in its source's tree (D22). Every job has one now, so there
+	// is no fallback left for this to reach for.
 	workdir := d.Workdir
 	if workdir == "" {
-		// A job from a registered source runs in that source's tree (D22);
-		// only the built-in local source falls back to the jobs directory.
-		if workdir = d.SourceRoot; workdir == "" {
-			workdir = e.Health(context.Background()).JobsDir
-		}
+		workdir = d.SourceRoot
 	}
 
 	env := append([]string{}, d.Env...)

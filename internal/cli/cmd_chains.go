@@ -50,16 +50,13 @@ func runChains(ctx context.Context, env *Env, args []string) error {
 			return err
 		}
 		if len(chains) == 0 {
-			health, err := rd.Health(ctx)
-			if err != nil {
-				return err
-			}
 			// Not an error, and not silence either: a chain file in the wrong
 			// place is the most likely reason somebody is running this
 			// command, so say where they go.
-			fmt.Fprintf(env.Stdout,
-				"no chains loaded\n  chain files go in %s/chains/<name>.yaml\n",
-				health.JobsDir)
+			fmt.Fprintln(env.Stdout,
+				"no chains loaded\n"+
+					"  chain files go in chains/<name>.yaml in a source's repository\n"+
+					"  je source     shows which sources are registered")
 			return nil
 		}
 
