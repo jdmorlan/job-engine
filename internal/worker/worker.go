@@ -11,9 +11,11 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"github.com/jdmorlan/job-engine/internal/selfupdate"
 	"log/slog"
 	"net/http"
 	"os"
@@ -90,6 +92,10 @@ type Worker struct {
 	mu      sync.Mutex
 	holding map[int64]context.CancelFunc
 	fatal   error
+
+	// draining stops this worker claiming new work while it finishes what it
+	// has, on the way to a planned restart (D26).
+	draining bool
 
 	// stop ends the worker's own loops when it has been told something it
 	// cannot continue past, such as C10 skew.
@@ -199,6 +205,13 @@ func (w *Worker) register(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if saved.Name != "" && saved.Name != w.opts.Name {
+		// An enrolled worker is called what its enrollment says, not what it
+		// asked to be called (D25). Logging the name it asked for would leave
+		// its own logs disagreeing with `je workers`.
+		w.log.Info("registered under the name this identity was enrolled with",
+			"asked_for", w.opts.Name, "name", saved.Name)
+	}
 	return saved.ID, nil
 }
 
@@ -220,7 +233,7 @@ func (w *Worker) heartbeatLoop(ctx context.Context) {
 		// thing short-lived certificates are supposed to avoid (D25).
 		w.renewIfExpiringSoon(ctx)
 
-		revoked, err := w.client.Heartbeat(ctx, w.id, w.held())
+		revoked, directive, err := w.client.Heartbeat(ctx, w.id, w.held())
 		if err != nil {
 			// A failed heartbeat is not fatal here. The control plane decides
 			// liveness unilaterally (C5), so the worst this costs is a lease
@@ -236,7 +249,63 @@ func (w *Worker) heartbeatLoop(ctx context.Context) {
 			w.log.Warn("lease revoked, abandoning run", "run", runID)
 			w.abandon(runID)
 		}
+
+		if directive != "" {
+			w.actOn(ctx, directive)
+		}
 	}
+}
+
+// actOn carries out something the control plane asked for (D26).
+//
+// Both directives end in this process exiting, and that is the mechanism rather
+// than a shortcoming: what brings a worker back is whatever supervises it, so
+// exiting is how a restart happens for a service, a container, and a Kubernetes
+// pod alike. A worker started by hand in a terminal stops, which is honest --
+// nothing was supervising it, so nothing can restart it.
+//
+// In-flight runs are finished first. Killing them would make "restart this
+// worker" a destructive operation, and C7 already handles the case where a
+// worker vanishes mid-run: the lease expires and the run is reported lost. A
+// planned restart should not need that machinery.
+func (w *Worker) actOn(ctx context.Context, directive string) {
+	switch directive {
+	case store.DirectiveUpgrade:
+		w.log.Info("upgrading, as asked by the control plane")
+		if err := w.upgrade(ctx); err != nil {
+			// Not fatal, and deliberately not followed by a restart: a worker
+			// that failed to replace its binary and restarted anyway would
+			// come back on the same version and be asked again, forever.
+			w.log.Error("upgrade failed; staying on this version", "error", err)
+			return
+		}
+	case store.DirectiveRestart:
+		w.log.Info("restarting, as asked by the control plane")
+	default:
+		w.log.Warn("ignoring an unknown directive", "directive", directive)
+		return
+	}
+	w.drainAndStop()
+}
+
+// drainAndStop stops taking work and ends the run loops once what is in flight
+// has finished.
+func (w *Worker) drainAndStop() {
+	w.mu.Lock()
+	w.draining = true
+	w.mu.Unlock()
+
+	go func() {
+		for {
+			if len(w.held()) == 0 {
+				if w.stop != nil {
+					w.stop()
+				}
+				return
+			}
+			time.Sleep(time.Second)
+		}
+	}()
 }
 
 func (w *Worker) pullLoop(ctx context.Context, slot int) {
@@ -248,6 +317,13 @@ func (w *Worker) pullLoop(ctx context.Context, slot int) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+		}
+
+		// A draining worker finishes what it has and asks for nothing more,
+		// which is what makes a requested restart a planned one rather than
+		// C7 discovering a worker that vanished mid-run (D26).
+		if w.isDraining() {
+			continue
 		}
 
 		dispatch, err := w.client.Claim(ctx, w.id)
@@ -605,4 +681,84 @@ func (w *Worker) lookPath(tool string) (string, error) {
 		}
 	}
 	return exec.LookPath(tool)
+}
+
+// upgrade replaces this worker's own binary, the way `je upgrade` does.
+//
+// The same download, the same checksum verification, the same refusal on a
+// mismatch -- initiated from somewhere else rather than typed here. That is the
+// whole of "upgrade a worker you are not sitting at": there was never anything
+// missing except a way to ask.
+func (w *Worker) upgrade(ctx context.Context) error {
+	target, err := selfupdate.CurrentBinary()
+	if err != nil {
+		return err
+	}
+	if owner := selfupdate.ManagedElsewhere(target); owner != "" {
+		return fmt.Errorf("this binary is managed by %s, so replacing it here would be undone", owner)
+	}
+	if !selfupdate.Writable(target) {
+		return fmt.Errorf("cannot write to %s", filepath.Dir(target))
+	}
+
+	client := selfupdate.NewClient()
+	release, err := client.Latest(ctx)
+	if err != nil {
+		return err
+	}
+	goos, goarch := selfupdate.Platform()
+	asset, err := release.AssetFor(goos, goarch)
+	if err != nil {
+		return err
+	}
+	sums, err := release.Checksums()
+	if err != nil {
+		return err
+	}
+
+	dir := filepath.Dir(target)
+	archive, got, err := selfupdate.Download(ctx, client.HTTP, asset.URL, dir, asset.Name)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(archive)
+
+	sumsPath, _, err := selfupdate.Download(ctx, client.HTTP, sums.URL, dir, sums.Name)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(sumsPath)
+	body, err := os.ReadFile(sumsPath)
+	if err != nil {
+		return err
+	}
+	published, err := selfupdate.ParseChecksums(bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	want, ok := published[asset.Name]
+	if !ok {
+		return fmt.Errorf("%s does not list %s", selfupdate.ChecksumsName, asset.Name)
+	}
+	if want != got {
+		return fmt.Errorf("checksum mismatch for %s", asset.Name)
+	}
+
+	extracted, err := selfupdate.ExtractBinary(archive, "je", dir)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(extracted)
+
+	if err := selfupdate.Replace(target, extracted); err != nil {
+		return err
+	}
+	w.log.Info("replaced this worker's binary", "version", release.TagName, "path", target)
+	return nil
+}
+
+func (w *Worker) isDraining() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.draining
 }

@@ -228,23 +228,60 @@ func (e *Engine) RegisterWorker(ctx context.Context, w store.Worker) (store.Work
 // fencing list. Renewing the run leases here rather than in a separate call is
 // what makes a partitioned worker lose its claim on exactly the runs whose
 // leases lapsed, rather than on all of them or none.
-func (e *Engine) Heartbeat(ctx context.Context, workerID string, holding []int64) ([]int64, error) {
+func (e *Engine) Heartbeat(ctx context.Context, workerID string, holding []int64) ([]int64, string, error) {
 	now := e.now()
 	if err := e.store.TouchWorker(ctx, workerID, now); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	var revoked []int64
 	for _, runID := range holding {
 		ok, err := e.store.RenewRunLease(ctx, runID, workerID, now, LeaseTTL)
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		if !ok {
 			revoked = append(revoked, runID)
 		}
 	}
-	return revoked, nil
+
+	// Anything this worker has been asked to do, taken exactly once (D26).
+	// Read on the heartbeat rather than pushed, because a worker holds the
+	// connection and the control plane cannot reach it -- which is the same
+	// reason a worker behind NAT works at all.
+	directive, err := e.store.TakeDirective(ctx, workerID)
+	if err != nil {
+		return nil, "", err
+	}
+	if directive != "" {
+		e.log.Info("directive delivered", "worker", workerID, "directive", directive)
+	}
+	return revoked, directive, nil
+}
+
+// RequestWorkerDirective asks a named worker to restart, or to upgrade itself
+// and then restart (D26).
+//
+// It is a request rather than a command: the worker acts on it when it next
+// checks in, after finishing whatever it is running. A worker that is offline
+// acts on it when it comes back, which is usually what was wanted -- and if it
+// never comes back, nothing happened, which is also correct.
+func (e *Engine) RequestWorkerDirective(ctx context.Context, name, directive string) error {
+	switch directive {
+	case store.DirectiveRestart, store.DirectiveUpgrade:
+	default:
+		return fmt.Errorf("unknown directive %q; expected %s or %s",
+			directive, store.DirectiveRestart, store.DirectiveUpgrade)
+	}
+	worker, err := e.store.WorkerByID(ctx, WorkerID(name))
+	if err != nil {
+		return fmt.Errorf("no worker named %q is registered", name)
+	}
+	if err := e.store.RequestDirective(ctx, worker.ID, directive, e.now()); err != nil {
+		return err
+	}
+	e.log.Info("directive requested", "worker", name, "directive", directive)
+	return nil
 }
 
 // Claim leases the next run this worker may take and returns its Dispatch.

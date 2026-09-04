@@ -3737,10 +3737,37 @@ the engine sees only as `je source sync`. The one place the CLI touches git is
 `je secret set --source`, which edits a secrets file in a repository you own and
 offers to commit it -- helping with a file, not managing a repository.
 
-**The second gap is `upgrade` for a split deployment.** It now handles every
-component on the machine it runs on, which is the whole answer for one box and
-half of it for two. The other half is the same channel: a control plane that can
-tell a worker to replace itself.
+**The second gap is `upgrade` for a split deployment. Closed.** `je workers
+restart <name>` and `je workers upgrade <name>` reach a worker on another
+machine, over the channel that already existed: the worker holds an
+authenticated polling connection, so the directive rides the heartbeat back.
+
+Three things that fell out of it being a *request* rather than a command:
+
+- **It is a desired state, not a queued message.** Asking twice is one restart,
+  and a worker offline for an hour acts on the latest request rather than
+  replaying an hour of them. A column, not a queue.
+- **Cleared on delivery, not on completion.** What follows is a process exiting,
+  and a process that exits cannot report that it did -- so delivery is the only
+  acknowledgement there can be, and waiting for another would leave every
+  directive stuck forever.
+- **In-flight runs finish first.** The worker stops claiming, drains, then
+  exits. Killing them would make "restart this worker" destructive, and C7's
+  lost-run machinery exists for workers that vanish -- a planned restart should
+  not need it.
+
+What brings a worker back is whatever supervises it, which is also why `upgrade`
+works: the worker replaces its own binary with the same download-verify-replace
+`je upgrade` performs, then exits, and the supervisor starts the new one. A
+worker run by hand in a terminal simply stops, because nothing was supervising
+it.
+
+**One bug, silent, found by asking a real worker to restart and watching it
+not.** The first implementation took the directive with `UPDATE ... SET
+directive = NULL RETURNING directive`. SQLite's RETURNING gives the value
+*after* the update, so it handed back NULL: the directive was consumed and
+discarded on every heartbeat, and the column emptied while nothing happened.
+Read-then-clear in a transaction, and a test that would have caught it.
 
 ### D28. Runtimes: how a job's language gets what it needs — NEW
 

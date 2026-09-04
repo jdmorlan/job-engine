@@ -579,3 +579,11 @@ func (c *Client) AgeKeyFor(ctx context.Context, name string) (string, error) {
 		"/v1/identities/"+url.PathEscape(name)+"/age-key", nil)
 	return out.Recipient, err
 }
+
+// DirectWorker asks a worker to restart, or to upgrade itself and restart.
+func (c *Client) DirectWorker(ctx context.Context, name, directive string) error {
+	_, err := do[api.DirectiveRequest](ctx, c, http.MethodPost,
+		"/v1/workers/"+url.PathEscape(name)+"/directive",
+		api.DirectiveRequest{Directive: directive})
+	return err
+}

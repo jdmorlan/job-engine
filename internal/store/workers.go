@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"time"
@@ -36,6 +37,16 @@ type Worker struct {
 	// runtime differs from a label. Nil means a worker that has not said,
 	// which is not the same as one that can do nothing.
 	Runtimes []string `json:"runtimes,omitempty"`
+
+	// Directive is what this worker has been asked to do the next time it
+	// checks in: restart, or upgrade itself and then restart (D26).
+	//
+	// Empty is the ordinary state. It is a desired state rather than a queued
+	// message -- asking twice is one restart -- and it is cleared when
+	// delivered, because what follows is a process exiting and a process that
+	// exits cannot acknowledge anything.
+	Directive   string     `json:"directive,omitempty"`
+	DirectiveAt *time.Time `json:"directive_at,omitempty"`
 
 	// AgeRecipient is the public half of the key this identity reads encrypted
 	// secrets with, when it has registered one (D25).
@@ -147,7 +158,8 @@ func (s *Store) TouchWorker(ctx context.Context, id string, at time.Time) error 
 func (s *Store) Workers(ctx context.Context) ([]Worker, error) {
 	rows, err := s.state.QueryContext(ctx, `
 		SELECT id, name, labels, version, roles, registered_at, last_seen_at, gone_at,
-		       enrolled_at, cert_fingerprint, age_recipient, runtimes
+		       enrolled_at, cert_fingerprint, age_recipient, runtimes,
+		       directive, directive_at
 		FROM workers ORDER BY last_seen_at DESC`)
 	if err != nil {
 		return nil, err
@@ -159,11 +171,20 @@ func (s *Store) Workers(ctx context.Context) ([]Worker, error) {
 		var w Worker
 		var labels, roles string
 		var goneAt, enrolledAt, fingerprint, recipient, runtimes sql.NullString
+		var directive, directiveAt sql.NullString
 		var registered, lastSeen string
 		if err := rows.Scan(&w.ID, &w.Name, &labels, &w.Version, &roles,
 			&registered, &lastSeen, &goneAt, &enrolledAt, &fingerprint,
-			&recipient, &runtimes); err != nil {
+			&recipient, &runtimes, &directive, &directiveAt); err != nil {
 			return nil, err
+		}
+		w.Directive = directive.String
+		if directiveAt.Valid {
+			at, err := parseTime(directiveAt.String)
+			if err != nil {
+				return nil, err
+			}
+			w.DirectiveAt = &at
 		}
 		w.AgeRecipient = recipient.String
 		if runtimes.Valid && runtimes.String != "" {
@@ -539,4 +560,71 @@ func (s *Store) RuntimesCovered(ctx context.Context, now time.Time, ttl time.Dur
 		}
 	}
 	return covered, nil
+}
+
+// The directives a worker understands (D26).
+const (
+	// DirectiveRestart drains and exits. What brings it back is whatever
+	// supervises it -- launchd, systemd, a container restart policy -- which is
+	// also why a worker run by hand in a terminal simply stops.
+	DirectiveRestart = "restart"
+
+	// DirectiveUpgrade replaces the worker's own binary first, then restarts.
+	// The same download-verify-replace `je upgrade` performs, initiated from
+	// somewhere else.
+	DirectiveUpgrade = "upgrade"
+)
+
+// RequestDirective asks a worker to do something the next time it checks in.
+//
+// Overwrites rather than appends: this is a desired state, and the most recent
+// request is the one that matters.
+func (s *Store) RequestDirective(ctx context.Context, id, directive string, at time.Time) error {
+	res, err := s.state.ExecContext(ctx,
+		`UPDATE workers SET directive = ?, directive_at = ? WHERE id = ?`,
+		directive, formatTime(at), id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+// TakeDirective returns a worker's pending directive and clears it, so it is
+// delivered exactly once.
+// Read and clear in one transaction, rather than an UPDATE ... RETURNING.
+//
+// SQLite's RETURNING gives the value *after* the update, so
+// `SET directive = NULL ... RETURNING directive` hands back NULL -- the
+// directive is consumed and thrown away, and the worker is never told. That
+// shipped and was found by asking a real worker to restart and watching it not:
+// the column emptied, and nothing happened.
+func (s *Store) TakeDirective(ctx context.Context, id string) (string, error) {
+	tx, err := s.state.BeginTx(ctx, nil)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op once committed
+
+	var directive sql.NullString
+	err = tx.QueryRowContext(ctx, `SELECT directive FROM workers WHERE id = ?`, id).Scan(&directive)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil // no such worker, which registration will fix
+	}
+	if err != nil {
+		return "", err
+	}
+	if !directive.Valid || directive.String == "" {
+		return "", nil // nothing pending, which is the ordinary case
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE workers SET directive = NULL, directive_at = NULL WHERE id = ?`, id); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(); err != nil {
+		return "", err
+	}
+	return directive.String, nil
 }

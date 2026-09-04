@@ -381,7 +381,7 @@ func TestHeartbeatRevokesRunsTheWorkerNoLongerHolds(t *testing.T) {
 	}
 
 	// Still held: nothing revoked.
-	revoked, err := e.Heartbeat(ctx, workerID, []int64{dispatch.RunID})
+	revoked, _, err := e.Heartbeat(ctx, workerID, []int64{dispatch.RunID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -394,7 +394,7 @@ func TestHeartbeatRevokesRunsTheWorkerNoLongerHolds(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	revoked, err = e.Heartbeat(ctx, workerID, []int64{dispatch.RunID})
+	revoked, _, err = e.Heartbeat(ctx, workerID, []int64{dispatch.RunID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -707,5 +707,70 @@ func TestAJobWhoseLanguageNothingServesIsUnservable(t *testing.T) {
 	}
 	if len(waiting.UnservedRuntimes) != 0 {
 		t.Errorf("still unservable after a capable worker joined: %v", waiting.UnservedRuntimes)
+	}
+}
+
+// A directive reaches the worker it was meant for, exactly once.
+//
+// The bug this pins down was silent: the first implementation cleared the
+// column with `UPDATE ... SET directive = NULL RETURNING directive`, and
+// SQLite's RETURNING gives the value *after* the update -- so the directive was
+// consumed and thrown away, and the worker was never told. It was found by
+// asking a real worker to restart and watching it not, which is the only way a
+// bug shaped like this gets found.
+func TestADirectiveIsDeliveredOnceToTheWorkerItNames(t *testing.T) {
+	ctx := context.Background()
+	e, _ := jobFixture(t, "hello", `echo hi`)
+
+	for _, name := range []string{"one", "two"} {
+		if _, err := e.RegisterWorker(ctx, store.Worker{
+			ID: engine.WorkerID(name), Name: name,
+			Labels:  []string{name},
+			Roles:   []string{store.RoleExecute},
+			Version: e.Health(ctx).Version,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := e.RequestWorkerDirective(ctx, "two", store.DirectiveRestart); err != nil {
+		t.Fatal(err)
+	}
+
+	// The worker it was not meant for hears nothing.
+	if _, directive, err := e.Heartbeat(ctx, engine.WorkerID("one"), nil); err != nil {
+		t.Fatal(err)
+	} else if directive != "" {
+		t.Errorf("worker one was given %q, which was meant for two", directive)
+	}
+
+	_, directive, err := e.Heartbeat(ctx, engine.WorkerID("two"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if directive != store.DirectiveRestart {
+		t.Fatalf("directive = %q, want %q", directive, store.DirectiveRestart)
+	}
+
+	// And exactly once: a worker that restarted and came back must not be told
+	// to restart again forever.
+	if _, again, err := e.Heartbeat(ctx, engine.WorkerID("two"), nil); err != nil {
+		t.Fatal(err)
+	} else if again != "" {
+		t.Errorf("the directive was delivered twice (%q)", again)
+	}
+}
+
+// Asking a worker nobody registered says so, rather than recording a request
+// that can never be delivered.
+func TestADirectiveForAnUnknownWorkerIsRefused(t *testing.T) {
+	ctx := context.Background()
+	e, _ := jobFixture(t, "hello", `echo hi`)
+
+	if err := e.RequestWorkerDirective(ctx, "nobody", store.DirectiveRestart); err == nil {
+		t.Error("a directive was accepted for a worker that does not exist")
+	}
+	if err := e.RequestWorkerDirective(ctx, "nobody", "explode"); err == nil {
+		t.Error("an unknown directive was accepted")
 	}
 }

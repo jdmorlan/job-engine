@@ -49,8 +49,19 @@ func init() {
 	})
 	register(&Command{
 		Name:  "workers",
-		Usage: "list the workers attached to the control plane",
-		Run:   runWorkers,
+		Args:  "[restart|upgrade <name>]",
+		Usage: "list the workers attached to the control plane, and direct them",
+		Long: "With no arguments, what is attached and what it can run.\n\n" +
+			"`je workers restart <name>` and `je workers upgrade <name>` reach a\n" +
+			"worker on another machine. They are requests rather than commands: the\n" +
+			"worker acts the next time it checks in, after finishing whatever it is\n" +
+			"running -- so a restart never costs an in-flight job.\n\n" +
+			"What brings a worker back is whatever supervises it: a service, a\n" +
+			"container restart policy, a Kubernetes pod. One started by hand in a\n" +
+			"terminal simply stops, because nothing was supervising it.\n\n" +
+			"`upgrade` replaces that worker's own binary first -- the same download\n" +
+			"and checksum check `je upgrade` performs here, asked for from there.",
+		Run: runWorkers,
 	})
 }
 
@@ -199,10 +210,20 @@ func runWorker(ctx context.Context, env *Env, args []string) error {
 func runWorkers(ctx context.Context, env *Env, args []string) error {
 	cmd := commands["workers"]
 	fs := newFlagSet(cmd, env)
-	if extra, err := parseArgs(fs, args); err != nil {
+	extra, err := parseArgs(fs, args)
+	if err != nil {
 		return err
-	} else if len(extra) > 0 {
-		return usagef("unexpected argument %q", extra[0])
+	}
+	if len(extra) > 0 {
+		switch extra[0] {
+		case "restart", "upgrade":
+			if len(extra) != 2 {
+				return usagef("usage: je workers %s <name>", extra[0])
+			}
+			return directWorker(ctx, env, extra[1], extra[0])
+		default:
+			return usagef("unknown subcommand %q; expected restart or upgrade", extra[0])
+		}
 	}
 
 	return withClient(ctx, env, func(ctx context.Context, c *Client) error {
@@ -434,4 +455,23 @@ func dialControlPlane(env *Env, target string) (*worker.Client, error) {
 		}
 	}
 	return worker.DialTLS(target, cert, key, caPath)
+}
+
+// directWorker asks a worker elsewhere to restart, or to upgrade and restart.
+func directWorker(ctx context.Context, env *Env, name, directive string) error {
+	return withClient(ctx, env, func(ctx context.Context, c *Client) error {
+		reqCtx, cancel := withTimeout(ctx)
+		defer cancel()
+
+		if err := c.DirectWorker(reqCtx, name, directive); err != nil {
+			return err
+		}
+		// Said as a request, because that is what it is: the worker acts when
+		// it next checks in, and one that is offline acts when it returns.
+		fmt.Fprintf(env.Stdout, "asked %s to %s\n", name, directive)
+		fmt.Fprintf(env.Stderr,
+			"It acts on this at its next heartbeat, after finishing what it is running.\n"+
+				"Watch for it:  je workers\n")
+		return nil
+	})
 }

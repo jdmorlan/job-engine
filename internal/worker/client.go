@@ -218,11 +218,11 @@ func (c *Client) Register(ctx context.Context, w store.Worker) (store.Worker, er
 	return do[store.Worker](ctx, c, http.MethodPost, "/v1/workers", w)
 }
 
-func (c *Client) Heartbeat(ctx context.Context, id string, holding []int64) ([]int64, error) {
+func (c *Client) Heartbeat(ctx context.Context, id string, holding []int64) ([]int64, string, error) {
 	out, err := do[api.HeartbeatResponse](ctx, c, http.MethodPost,
 		"/v1/workers/"+url.PathEscape(id)+"/heartbeat",
 		api.HeartbeatRequest{Holding: holding})
-	return out.Revoked, err
+	return out.Revoked, out.Directive, err
 }
 
 // Claim asks for work. A nil Dispatch with a nil error means there is none,

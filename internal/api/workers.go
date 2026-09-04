@@ -22,6 +22,7 @@ func (s *Server) registerWorkers(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/workers/{id}/claim", s.handleClaim)
 	mux.HandleFunc("POST /v1/runs/{id}/logs", s.handleAppendLogs)
 	mux.HandleFunc("POST /v1/runs/{id}/complete", s.handleComplete)
+	mux.HandleFunc("POST /v1/workers/{name}/directive", s.handleWorkerDirective)
 }
 
 func (s *Server) handleListWorkers(w http.ResponseWriter, r *http.Request) {
@@ -74,6 +75,12 @@ type HeartbeatRequest struct {
 // and does not.
 type HeartbeatResponse struct {
 	Revoked []int64 `json:"revoked,omitempty"`
+
+	// Directive is something this worker has been asked to do -- restart, or
+	// upgrade itself and restart (D26). Delivered here because a worker holds
+	// the connection and the control plane cannot reach it, which is the same
+	// reason a worker behind NAT works at all.
+	Directive string `json:"directive,omitempty"`
 }
 
 func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
@@ -85,12 +92,12 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	revoked, err := s.engine.Heartbeat(r.Context(), r.PathValue("id"), req.Holding)
+	revoked, directive, err := s.engine.Heartbeat(r.Context(), r.PathValue("id"), req.Holding)
 	if err != nil {
 		s.writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, HeartbeatResponse{Revoked: revoked})
+	writeJSON(w, http.StatusOK, HeartbeatResponse{Revoked: revoked, Directive: directive})
 }
 
 // ClaimResponse carries work, or nothing.
@@ -220,4 +227,28 @@ func (s *Server) actingAsSelf(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 	return true
+}
+
+// DirectiveRequest asks a worker to restart, or to upgrade and restart.
+type DirectiveRequest struct {
+	Directive string `json:"directive"`
+}
+
+// handleWorkerDirective is how a worker on another machine gets told to do
+// something (D26).
+//
+// A write, so it is gated like every other one: on a deployment that has issued
+// a client identity this needs a certificate. That is the right bar -- telling
+// somebody else's machine to replace its own binary is not a thing an
+// unidentified caller should be able to ask for.
+func (s *Server) handleWorkerDirective(w http.ResponseWriter, r *http.Request) {
+	var req DirectiveRequest
+	if !decodeBody(s, w, r, &req) {
+		return
+	}
+	if err := s.engine.RequestWorkerDirective(r.Context(), r.PathValue("name"), req.Directive); err != nil {
+		s.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, DirectiveRequest{Directive: req.Directive})
 }
