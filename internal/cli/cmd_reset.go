@@ -24,6 +24,8 @@ func init() {
 			"Nothing here is a definition. Job definitions live in a repository of\n" +
 			"yours and reach the engine as a registered source (D22), so the worst\n" +
 			"this can cost you is a re-fetch and the history you chose to discard.\n\n" +
+			"That includes a leftover <data>/jobs directory from before v0.6: it is\n" +
+			"not a source any more and nothing reads it.\n\n" +
 			"It also does not touch a control plane somewhere else, and cannot: a\n" +
 			"reset is a local operation by nature. Against a cluster you would be\n" +
 			"deleting a namespace, which is not this tool's job.\n\n" +
@@ -257,6 +259,11 @@ func resettablePaths(env *Env) []string {
 		// else, which is the whole reason they live under a directory called
 		// cache (D22).
 		l.Cache(),
+		// The jobs directory a pre-v0.6 engine read definitions from. It is
+		// not a source any more and nothing reads it, so leaving it behind
+		// would be a directory that looks like definitions and is not -- the
+		// exact confusion removing it was meant to end (D27).
+		filepath.Join(l.Data, "jobs"),
 	}
 }
 
