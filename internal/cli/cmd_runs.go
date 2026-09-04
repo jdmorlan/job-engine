@@ -53,6 +53,16 @@ func runRuns(ctx context.Context, env *Env, args []string) error {
 			return err
 		}
 		if len(runs) == 0 {
+			// "No runs yet" is a lie about a job whose runs retention has
+			// removed, and it is the worst instance of the confusion D13's
+			// counting exists to prevent: an empty list is exactly what a job
+			// that has never run looks like.
+			if removed := removedRuns(ctx, rd, jobSlug); removed > 0 {
+				fmt.Fprintf(env.Stdout,
+					"no runs within the keep period; %d older run(s) have been "+
+						"removed by retention. je explain system/retention\n", removed)
+				return nil
+			}
 			fmt.Fprintln(env.Stdout, "no runs yet")
 			return nil
 		}
@@ -71,7 +81,16 @@ func runRuns(ctx context.Context, env *Env, args []string) error {
 				formatOptionalTime(r.StartedAt), runDuration(r.StartedAt, r.EndedAt),
 				r.AttemptCount)
 		}
-		return tw.Flush()
+		if err := tw.Flush(); err != nil {
+			return err
+		}
+
+		// The floor under the list (D13). Deletion erases its own evidence:
+		// without this line, a year-old job that retention has trimmed to
+		// thirty days is indistinguishable from a job that started last month,
+		// and nothing else in the system can tell you which you are looking
+		// at.
+		return printRetentionFloor(ctx, env, rd, jobSlug)
 	})
 }
 
@@ -113,6 +132,41 @@ func runLogs(ctx context.Context, env *Env, args []string) error {
 		}
 		return nil
 	})
+}
+
+// printRetentionFloor says how much history retention has removed.
+//
+// Scoped to the job being listed when there is one, and totalled across every
+// job otherwise, because the question it answers -- "is this all of it?" -- is
+// asked of whatever list is on the screen.
+func printRetentionFloor(ctx context.Context, env *Env, rd *Client, jobSlug string) error {
+	removed := removedRuns(ctx, rd, jobSlug)
+	if removed == 0 {
+		return nil
+	}
+	fmt.Fprintf(env.Stdout,
+		"\n%d older run(s) have been removed by retention. je explain system/retention\n",
+		removed)
+	return nil
+}
+
+// removedRuns totals what retention has taken, for one job or for all of them.
+//
+// A failure to read it is not worth failing the command over: the list it
+// annotates is correct either way, and this is a footnote to it.
+func removedRuns(ctx context.Context, rd *Client, jobSlug string) int64 {
+	jobs, err := rd.Jobs(ctx)
+	if err != nil {
+		return 0
+	}
+	var removed int64
+	for _, j := range jobs {
+		if jobSlug != "" && j.Slug != jobSlug {
+			continue
+		}
+		removed += j.RunsRemoved
+	}
+	return removed
 }
 
 func formatOptionalTime(t *time.Time) string {

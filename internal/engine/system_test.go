@@ -161,7 +161,7 @@ func TestSweepIsRecordedOnTheTimeline(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := e.Sweep(ctx, "tester"); err != nil {
+	if _, err := e.Sweep(ctx, engine.DefaultPolicy, "tester"); err != nil {
 		t.Fatalf("Sweep: %v", err)
 	}
 	events, err := e.RecentEvents(ctx, 10)

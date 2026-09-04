@@ -28,8 +28,8 @@ func (c *Client) RetryRun(ctx context.Context, id int64, actor string) (store.Ru
 }
 
 // Sweep asks the control plane to run a retention pass.
-func (c *Client) Sweep(ctx context.Context) (engine.Sweep, error) {
-	return do[engine.Sweep](ctx, c, http.MethodPost, "/v1/retention/sweep", nil)
+func (c *Client) Sweep(ctx context.Context, req api.SweepRequest) (engine.Sweep, error) {
+	return do[engine.Sweep](ctx, c, http.MethodPost, "/v1/retention/sweep", req)
 }
 
 // RunDetail fetches the full picture of a run.

@@ -64,6 +64,12 @@ type Definition struct {
 	// advertising it (C12).
 	RunsOn string `json:"runs_on"`
 
+	// KeepLogs exempts this job's output from the deployment's log retention
+	// (D13). The only value is `forever`, and the narrowness is the point: a
+	// per-job number would be a second retention policy to keep in step with
+	// the first, while the thing people actually want is "not this one".
+	KeepLogs KeepLogs `json:"keep_logs,omitempty"`
+
 	Timeout     Duration    `json:"timeout"`
 	Overlap     Overlap     `json:"overlap"`
 	OnInterrupt OnInterrupt `json:"on_interrupt"`
@@ -108,6 +114,15 @@ const (
 	OnInterruptRetry  OnInterrupt = "retry"
 	OnInterruptIgnore OnInterrupt = "ignore"
 )
+
+// KeepLogs is D13's escape hatch: this job's logs are never swept.
+type KeepLogs string
+
+// KeepLogsForever is the only value. Empty means the deployment's policy.
+const KeepLogsForever KeepLogs = "forever"
+
+// Forever reports whether this job's logs are exempt from retention.
+func (k KeepLogs) Forever() bool { return k == KeepLogsForever }
 
 // RetrySpec is D7's automatic half: how many times the engine will try on its
 // own before the run is failed, and how long it waits between attempts.
@@ -338,6 +353,11 @@ func (d *Definition) Validate() error {
 	}
 	if err := d.Retry.validate(); err != nil {
 		return fmt.Errorf("retry: %w", err)
+	}
+	switch d.KeepLogs {
+	case "", KeepLogsForever:
+	default:
+		return fmt.Errorf("keep_logs must be %q if set, got %q", KeepLogsForever, d.KeepLogs)
 	}
 	switch d.State.Commit {
 	case CommitOnSuccess:

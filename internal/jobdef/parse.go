@@ -27,6 +27,7 @@ type rawDefinition struct {
 	Overlap     *Overlap      `yaml:"overlap"`
 	OnInterrupt *OnInterrupt  `yaml:"on_interrupt"`
 	Retry       *rawRetry     `yaml:"retry"`
+	KeepLogs    *KeepLogs     `yaml:"keep_logs"`
 	Enabled     *bool         `yaml:"enabled"`
 	On          []rawSchedule `yaml:"on"`
 	State       *rawState     `yaml:"state"`
@@ -118,6 +119,7 @@ func Parse(path, slug string, body []byte) (*Definition, error) {
 	setIf(&d.Overlap, raw.Overlap)
 	setIf(&d.OnInterrupt, raw.OnInterrupt)
 	setIf(&d.Enabled, raw.Enabled)
+	setIf(&d.KeepLogs, raw.KeepLogs)
 	d.Command = raw.Command
 	d.Secrets = raw.Secrets
 

@@ -70,6 +70,20 @@ func (s *Server) handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, run)
 }
 
+// SweepRequest is the body of POST /v1/retention/sweep.
+//
+// The periods come from the caller because they live in the argv of the
+// `system/retention` job (D13), which is the closest thing this deployment has
+// to a retention policy anybody can read. An empty body means the defaults, so
+// a person typing `je retention sweep` by hand gets the same behaviour as the
+// job.
+type SweepRequest struct {
+	Runs    string `json:"runs,omitempty"`
+	Logs    string `json:"logs,omitempty"`
+	Events  string `json:"events,omitempty"`
+	MaxRuns int    `json:"max_runs,omitempty"`
+}
+
 // handleRetentionSweep runs D13's sweep.
 //
 // A write, so the identity gate covers it the moment a deployment has one
@@ -77,8 +91,45 @@ func (s *Server) handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 // deletes history, and the caller is ordinarily a worker running the engine's
 // own job rather than a person.
 func (s *Server) handleRetentionSweep(w http.ResponseWriter, r *http.Request) {
-	result, err := s.engine.Sweep(r.Context(), actorOf(r, ""))
+	var req SweepRequest
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil && err != io.EOF {
+		s.writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+		return
+	}
+
+	policy := engine.DefaultPolicy
+	policy.MaxRuns = req.MaxRuns
+	for _, f := range []struct {
+		name  string
+		given string
+		dst   *time.Duration
+	}{
+		{"runs", req.Runs, &policy.Runs},
+		{"logs", req.Logs, &policy.Logs},
+		{"events", req.Events, &policy.Events},
+	} {
+		if f.given == "" {
+			continue
+		}
+		d, err := engine.ParsePeriod(f.given)
+		if err != nil {
+			s.writeError(w, http.StatusBadRequest, f.name+": "+err.Error())
+			return
+		}
+		*f.dst = d
+	}
+
+	result, err := s.engine.Sweep(r.Context(), policy, actorOf(r, ""))
 	if err != nil {
+		// A policy this deployment cannot hold is the caller's mistake, not a
+		// failure of the sweep, and the difference matters to a job that will
+		// otherwise retry it every night (D13's coupling rule).
+		if errors.Is(err, engine.ErrBadPolicy) {
+			s.writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		s.writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

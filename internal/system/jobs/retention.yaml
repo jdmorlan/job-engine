@@ -1,7 +1,11 @@
 name: Retention
 description: Removes history past its keep period and returns the space to the disk.
 
-command: ["je", "retention", "sweep"]
+# The keep periods live here, in the argv, because this file is the closest
+# thing a deployment has to a retention policy anybody can read: `je explain
+# system/retention` renders it, and D13's one rule -- events are never kept for
+# less time than runs -- is checked when the sweep runs, not discovered later.
+command: ["je", "retention", "sweep", "--runs", "30d", "--logs", "30d", "--events", "30d"]
 timeout: 30m
 
 on:

@@ -122,6 +122,13 @@ func (e *Engine) Explain(ctx context.Context, slug string) (Explanation, error) 
 	// absence -- including when the answer is no, which is the default.
 	add("retry", retryText(def.Retry), at("retry"))
 	add("on_interrupt", string(def.OnInterrupt), at("on_interrupt"))
+	if def.KeepLogs.Forever() {
+		// Only when it is set. A job with the ordinary policy has nothing to
+		// say here, and a line reading "keep_logs: (default)" would invite the
+		// reader to wonder what the default is in a view whose whole job is
+		// answering that (P3).
+		add("keep_logs", string(def.KeepLogs), at("keep_logs"))
+	}
 	add("state.commit", string(def.State.Commit), at("state.commit"))
 	add("state.primary_cursor", def.State.PrimaryCursor, at("state.primary_cursor"))
 

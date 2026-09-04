@@ -1,0 +1,12 @@
+-- 0016_retention_counts: what retention removed, per job (D13).
+--
+-- Deletion is the one operation that erases its own evidence. After a sweep,
+-- thirty days of history for a job that has run daily for a year is
+-- indistinguishable from a job that started thirty days ago -- and the rows
+-- that would tell you otherwise are precisely the ones that were removed.
+--
+-- So the count is written down as the rows go. It cannot be derived afterwards
+-- from anything, which is why it is a column rather than a query, and it is on
+-- the job rather than in an event because the question it answers -- "is this
+-- all of it?" -- is asked of a job's run list.
+ALTER TABLE jobs ADD COLUMN runs_removed INTEGER NOT NULL DEFAULT 0;

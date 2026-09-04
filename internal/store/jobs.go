@@ -34,6 +34,14 @@ type Job struct {
 	// `je explain` (P3). Stored beside the definition rather than in it,
 	// because a line number describes the file and not the job.
 	Declared map[string]int `json:"declared,omitempty"`
+
+	// RunsRemoved is how many of this job's runs retention has deleted (D13).
+	//
+	// Counted as they go, because nothing afterwards can reconstruct it: the
+	// rows that would say how much history there was are the rows that were
+	// removed. It is what lets a run list say "and 340 older ones are gone"
+	// rather than presenting thirty days as the whole story (P1).
+	RunsRemoved int64 `json:"runs_removed,omitempty"`
 }
 
 // sourceOrLocal is retained as the one place a missing source is caught.
@@ -109,7 +117,7 @@ func (s *Store) UpsertJob(ctx context.Context, j Job) (Job, error) {
 const selectJob = `
 	SELECT j.id, j.name, j.source, j.definition_hash, v.definition, j.file_path,
 	       j.enabled, j.loaded_at, j.load_error, j.config_error, j.removed_at,
-	       j.declared
+	       j.declared, j.runs_removed
 	FROM jobs j
 	JOIN job_versions v ON v.definition_hash = j.definition_hash`
 
@@ -188,7 +196,8 @@ func scanJob(sc scanner) (Job, error) {
 		declared   sql.NullString
 	)
 	if err := sc.Scan(&j.ID, &j.Slug, &j.Source, &j.DefinitionHash, &definition, &j.FilePath,
-		&j.Enabled, &loadedAt, &loadErr, &configErr, &removedAt, &declared); err != nil {
+		&j.Enabled, &loadedAt, &loadErr, &configErr, &removedAt, &declared,
+		&j.RunsRemoved); err != nil {
 		return Job{}, err
 	}
 	j.Definition = json.RawMessage(definition)
