@@ -1,7 +1,7 @@
 name: Counter
 description: Keeps a durable cursor and advances it when the run succeeds.
 
-command: ["/bin/sh", "scripts/counter.sh"]
+command: ["/bin/sh", "counter.sh"]
 
 # Which key in the cursor to show in status views. The cursor itself is
 # whatever JSON your job writes; this just names the interesting part.

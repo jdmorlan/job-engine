@@ -132,9 +132,19 @@ func writeJobFile(env *Env, root, name string, t jobTemplate) error {
 		}
 	}
 
-	jobPath := filepath.Join(root, name+".yaml")
-	scriptRel := filepath.Join("scripts", name+t.language.ext)
-	scriptPath := filepath.Join(root, scriptRel)
+	// A job is a folder, and the folder names it (D2). Everything the job
+	// needs lives in there -- its definition, its code, its fixtures -- so it
+	// is one thing to read, move or delete rather than a definition at the top
+	// level and a file in a shared scripts/ directory that pairs with nothing.
+	//
+	// The script path is relative to the job's own directory, because that is
+	// where the job runs: a command reading "water-plants.mjs" is the point of
+	// the layout, and "scripts/water-plants.mjs" would be the old one wearing
+	// a folder.
+	jobDir := filepath.Join(root, name)
+	jobPath := filepath.Join(jobDir, "job.yaml")
+	scriptRel := name + t.language.ext
+	scriptPath := filepath.Join(jobDir, scriptRel)
 
 	if err := refuseToClobber(jobPath); err != nil {
 		return err
@@ -183,8 +193,8 @@ func writeJobFile(env *Env, root, name string, t jobTemplate) error {
 		fmt.Fprintf(&b, "\non:\n  - cron: \"%s\"\n", t.cron)
 	}
 
-	if err := os.MkdirAll(root, 0o755); err != nil {
-		return fmt.Errorf("creating jobs directory: %w", err)
+	if err := os.MkdirAll(jobDir, 0o755); err != nil {
+		return fmt.Errorf("creating the job's directory: %w", err)
 	}
 	if err := os.WriteFile(jobPath, []byte(b.String()), 0o644); err != nil {
 		return err

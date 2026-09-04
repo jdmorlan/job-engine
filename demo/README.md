@@ -31,6 +31,9 @@ separate sources — worth having under test by the thing everybody runs first.
 | `demo-report` | runs because that event happened | no clock, no polling |
 | `demo-archive` | runs after the report succeeds | and not at all if it doesn't |
 
+Each job is a folder: `demo-counter/job.yaml` is the definition and
+`demo-counter/counter.sh` is the code it runs, sitting next to it.
+
 `chains/demo-pipeline.yaml` wires the last three into one named flow. A chain
 runs nothing itself — it is a display grouping over the routes that do.
 

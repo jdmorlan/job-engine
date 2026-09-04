@@ -71,8 +71,14 @@ func TestDemoJobsAreValid(t *testing.T) {
 }
 
 func TestDemoScriptsAreExecutableAndPresent(t *testing.T) {
-	for _, name := range []string{"counter.sh", "flaky.sh", "ingest.sh"} {
-		path := filepath.Join(demoDir, "scripts", name)
+	// Beside the job that runs them, which is the layout the examples exist to
+	// demonstrate: a job is a folder, and its code lives in it.
+	for job, name := range map[string]string{
+		"demo-counter": "counter.sh",
+		"demo-flaky":   "flaky.sh",
+		"demo-ingest":  "ingest.sh",
+	} {
+		path := filepath.Join(demoDir, job, name)
 		info, err := os.Stat(path)
 		if err != nil {
 			t.Fatalf("%s is missing: %v", name, err)

@@ -57,7 +57,7 @@ func TestNewWritesAJobThatLoadsAndRuns(t *testing.T) {
 
 	// P3: the file holds only what was asked for. Anything else in here is a
 	// default restated, which is what job files exist not to be.
-	body, err := os.ReadFile(filepath.Join(cwd(t), "weather-ingest.yaml"))
+	body, err := os.ReadFile(filepath.Join(cwd(t), "weather-ingest", "job.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,11 +85,15 @@ func TestNewScriptWritesAWorkingProtocolExample(t *testing.T) {
 
 	snap := loadJobsDir(t, env)
 	def := snap.Definitions[0]
-	if got := def.CommandLine(); !strings.Contains(got, "scripts/nightly.sh") {
+	// Relative to the job's own folder, which is where it runs.
+	if got := def.CommandLine(); !strings.Contains(got, "nightly.sh") {
 		t.Errorf("command = %q, want it pointing at the script that was written", got)
 	}
+	if strings.Contains(def.CommandLine(), "scripts/") {
+		t.Errorf("command = %q, want a path relative to the job's folder", def.CommandLine())
+	}
 
-	path := filepath.Join(cwd(t), "scripts", "nightly.sh")
+	path := filepath.Join(cwd(t), "nightly", "nightly.sh")
 	info, err := os.Stat(path)
 	if err != nil {
 		t.Fatalf("the script was not written: %v", err)

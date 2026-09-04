@@ -4,4 +4,4 @@ description: >
   Nothing knows what happens next -- that is the chain's business, not this
   job's.
 
-command: ["/bin/sh", "scripts/ingest.sh"]
+command: ["/bin/sh", "ingest.sh"]

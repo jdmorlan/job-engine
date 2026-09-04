@@ -49,7 +49,10 @@ func runInit(ctx context.Context, env *Env, args []string) error {
 		"README.md":  repoReadme(name),
 		".gitignore": gitignore(),
 	}
-	for _, sub := range []string{"chains", "scripts"} {
+	// chains/ only. A job's code lives in the job's own folder now, so a
+	// shared scripts/ directory is the layout this replaced -- and an empty
+	// one sitting in a fresh repository is an invitation to use it.
+	for _, sub := range []string{"chains"} {
 		if err := os.MkdirAll(filepath.Join(abs, sub), 0o755); err != nil {
 			return err
 		}
@@ -74,9 +77,9 @@ func runInit(ctx context.Context, env *Env, args []string) error {
 
 	fmt.Fprintf(env.Stdout, "jobs repository at %s\n\n", abs)
 	tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintf(tw, "  <name>.yaml\ta job. The file name is the job's name.\n")
+	fmt.Fprintf(tw, "  <name>/job.yaml\ta job. The folder's name is the job's name.\n")
+	fmt.Fprintf(tw, "  <name>/\tand its code, beside it\n")
 	fmt.Fprintf(tw, "  chains/<name>.yaml\tone flow, wiring jobs to each other\n")
-	fmt.Fprintf(tw, "  scripts/\tthe code your jobs run\n")
 	tw.Flush()
 
 	// Not a tabwriter: one of these lines carries a path, and a single long
@@ -113,9 +116,13 @@ func repoReadme(name string) string {
 
 Jobs for [je](https://github.com/jdmorlan/job-engine).
 
-    <name>.yaml          a job; the file name is the job's name
+    <name>/job.yaml      a job; the folder's name is the job's name
+    <name>/...           its code and whatever else it needs, beside it
     chains/<name>.yaml   one flow, wiring jobs to each other
-    scripts/             the code the jobs run
+
+A job is a folder, so it is one thing to read, move or delete. A single
+`+"`<name>.yaml`"+` at the top level is also a job, for one that has nothing to
+keep beside it.
 
 Register this repository with an engine:
 
@@ -127,7 +134,8 @@ works whenever it is unambiguous.
 
 ## Writing a job
 
-    je new my-job --script
+    je new my-job --language typescript
+    je try my-job
 
 Job files hold only what you decided; everything else is a default. To see the
 full picture, including the values this file does not set and where each one
@@ -145,7 +153,13 @@ files, which is the same in every language:
     JOB_OUTPUT_FILE      structured output
     JOB_EVENTS_FILE      append JSONL to emit events other jobs can react to
 
-`+"`je new --script`"+` writes a script with all of it in place.
+`+"`je new --language <lang>`"+` writes a script with all of it in place. For
+TypeScript and JavaScript there is also a helper to import, `+"`je`"+`, which the
+worker writes beside your dependencies. It is sugar over exactly
+those files and can never do more than they can.
+
+`+"`je try <job>`"+` runs a job here, without a control plane, and shows what the
+engine would have committed.
 `, title(name), name, name)
 }
 

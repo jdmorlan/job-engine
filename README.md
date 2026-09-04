@@ -127,7 +127,7 @@ the repository you are standing in:
 $ cd ~/repos/house-jobs
 $ je new water-plants --language python
 wrote water-plants.yaml
-wrote scripts/water-plants.py
+wrote water-plants/water-plants.py
 ```
 
 Then commit, push, and `je source sync`.
@@ -720,15 +720,41 @@ Removing a source stops its jobs running and keeps every run they did (D19).
 
 ### Writing a job
 
-`je new weather-ingest` writes the file; `je new --language <lang>` also writes
-`scripts/weather-ingest.<ext>` with the whole protocol in it, and declares the
-language so the worker prepares the tree for it:
+**A job is a folder**, and the folder's name is the job's name:
+
+```
+my-jobs/
+├── water-plants/
+│   ├── job.yaml          <- the folder names the job
+│   ├── water-plants.mjs
+│   └── zones.json        <- and whatever else it needs
+├── weather-ingest/
+│   ├── job.yaml
+│   └── ingest.ts
+├── chains/
+│   └── morning.yaml
+└── package.json          <- dependencies are the repository's
+```
+
+So a job is one thing to read, move or delete, and its command names the files
+next to it — `["node", "water-plants.mjs"]`, not a path into a shared directory
+that grows a file per job and pairs with nothing. A job runs in its own folder,
+which is why the command needs no prefix.
+
+A single `<name>.yaml` at the top level is also a job, for one that has nothing
+to keep beside it. Both forms are exactly one level deep: the thing that
+contains a job names it, and there is no nesting beyond that, because a slug
+ends up in CLI arguments and event payloads where ambiguity is expensive.
+
+`je new weather-ingest` writes the folder and the file; `je new --language <lang>`
+also writes the script with the whole protocol in it, and declares the language
+so the worker prepares the tree:
 
 ```console
-$ je new nightly --language sh          scripts/nightly.sh
-$ je new ingest --language python       scripts/ingest.py
-$ je new ingest --language javascript   scripts/ingest.mjs, using the helpers
-$ je new ingest --language typescript   scripts/ingest.ts, and a package.json
+$ je new nightly --language sh          nightly/nightly.sh
+$ je new ingest --language python       ingest/ingest.py
+$ je new ingest --language javascript   ingest/ingest.mjs, using the helpers
+$ je new ingest --language typescript   ingest/ingest.ts, and a package.json
 ```
 
 The JavaScript one runs with nothing installed. The TypeScript one needs its
@@ -739,10 +765,9 @@ from.
 A job is a YAML file naming a command. The file's name is the job's name.
 
 ```yaml
-# weather-ingest.yaml, in your jobs repository
+# weather-ingest/job.yaml, in your jobs repository
 name: Weather Ingest
-command: ["python3", "scripts/ingest_weather.py"]
-workdir: ~/code/almanac
+command: ["python3", "ingest_weather.py"]
 
 state:
   primary_cursor: since
@@ -752,7 +777,7 @@ A job in a language with dependencies declares it, and the worker installs them
 from the repository's own lockfile before running the command:
 
 ```yaml
-# ingest.yaml, beside package.json and pnpm-lock.yaml
+# ingest/job.yaml; the lockfile is the repository's, one level up
 language: typescript
 command: ["tsx", "ingest.ts"]
 ```
@@ -854,7 +879,7 @@ $ je explain weather-ingest
 weather-ingest  Weather Ingest
 Pulls readings from the local station into the almanac store.
 
-  command                 python3 scripts/ingest_weather.py  (weather-ingest.yaml:4)
+  command                 python3 ingest_weather.py          (job.yaml:3)
   runtime                 process                            (default)
   runs_on                 default                            (default)
   timeout                 30m                                (weather-ingest.yaml:5)
@@ -1019,7 +1044,7 @@ set STATION_API_KEY
 
 $ je jobs
 JOB             STATUS         COMMAND                        FILE
-weather-ingest  ok             python3 scripts/ingest.py      weather-ingest.yaml
+weather-ingest  ok             python3 ingest.py              weather-ingest/job.yaml
 ```
 
 Before the secret was set, that row read `misconfigured` and the job refused to

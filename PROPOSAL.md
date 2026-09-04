@@ -511,6 +511,41 @@ Non-interactive form for scripting and for when you know what you want:
 
 ---
 
+#### Revised (v0.9): a job is a folder
+
+The flat layout put a definition at the top level and its code in a shared
+`scripts/` directory, which reads badly the moment there is more than one job:
+the two halves of one thing sit in different places, and `scripts/` grows a file
+per job while pairing with none of them.
+
+> *"I would prefer if the yaml job definition and code for it were in the same
+> folder... versus having a floating yaml file and then having to go to scripts
+> to find the actual code for it."*
+
+So a **directory containing `job.yaml` is a job, and the directory names it.**
+Everything the job needs — its code, its fixtures, its own README — lives in
+there, and a job becomes one thing to read, move or delete.
+
+The rule that was protecting the flat layout survives intact, which is why this
+is a small change rather than a reopening. Loading was non-recursive because
+arbitrary nesting makes a slug ambiguous — is it `etl/weather` or `weather`? A
+directory whose *name is the job's name* has exactly the property a file's name
+had, and both forms are one level deep. The flat `<name>.yaml` still loads, for
+a job with nothing to keep beside it.
+
+**A job in a folder runs in that folder**, unless it declares a `workdir:`. Its
+command names files next to it — `["node", "water-plants.mjs"]` — which is the
+point of the layout, and resolving those against the repository root would make
+every command start with the job's own name. `je explain` renders it as a
+default with everything else, so where a job runs is still answerable without
+opening anything.
+
+The repository stays the unit for *dependencies*: one `package.json` and one
+lockfile at the root, prepared once for every job in the tree (D28). A folder
+per job is about what a person reads, not about what a package manager owns.
+
+---
+
 ### D3. Chaining, and your stateful-triggers idea
 
 **Status:** AGREED — **fan-in shipped (v0.8)**; `trigger.expired` still open. *(You left this block empty; I'm treating

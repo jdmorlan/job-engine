@@ -291,3 +291,86 @@ state:
 		}
 	}
 }
+
+// A job is a folder: the directory names it, and job.yaml defines it.
+//
+// The layout exists because a job is not only its definition -- its code and
+// whatever else it needs belong beside it, rather than in a shared scripts/
+// directory that grows a file per job and pairs with nothing.
+func TestAJobCanBeAFolder(t *testing.T) {
+	src := jobdef.FSSource{FS: fstest.MapFS{
+		"water-plants/job.yaml":        &fstest.MapFile{Data: []byte("command: [\"node\", \"water.mjs\"]\n")},
+		"water-plants/water.mjs":       &fstest.MapFile{Data: []byte("// code")},
+		"water-plants/zones.json":      &fstest.MapFile{Data: []byte("{}")},
+		"weather-ingest/job.yml":       &fstest.MapFile{Data: []byte("command: [\"./run\"]\n")},
+		"nightly.yaml":                 &fstest.MapFile{Data: []byte("command: [\"echo\", \"hi\"]\n")},
+		"scripts/shared.sh":            &fstest.MapFile{Data: []byte("# not a job")},
+		"node_modules/je/package.json": &fstest.MapFile{Data: []byte("{}")},
+	}}
+	snap, err := src.Load(context.Background())
+	if err != nil {
+		t.Fatalf("loading: %v", err)
+	}
+
+	got := map[string]*jobdef.Definition{}
+	for _, d := range snap.Definitions {
+		got[d.Slug] = d
+	}
+	// Both forms, and nothing else: a directory with no job file is simply not
+	// a job, which is why there is no list of directories to ignore.
+	for _, want := range []string{"water-plants", "weather-ingest", "nightly"} {
+		if got[want] == nil {
+			t.Errorf("%s did not load", want)
+		}
+	}
+	if len(snap.Definitions) != 3 {
+		t.Errorf("loaded %d jobs, want 3: %v", len(snap.Definitions), got)
+	}
+
+	// A job in a folder runs in that folder. Its command names files next to
+	// it, and resolving them against the repository root would make every
+	// command start with the job's own name.
+	if w := got["water-plants"].Workdir; w != "water-plants" {
+		t.Errorf("workdir = %q, want the job's own folder", w)
+	}
+	if w := got["nightly"].Workdir; w != "" {
+		t.Errorf("a flat job got workdir %q; it should still run at the root", w)
+	}
+}
+
+func TestAJobFolderThatSaysWhereToRunKeepsIt(t *testing.T) {
+	src := jobdef.FSSource{FS: fstest.MapFS{
+		"ingest/job.yaml": &fstest.MapFile{
+			Data: []byte("command: [\"./run\"]\nworkdir: ~/code/almanac\n")},
+	}}
+	snap, err := src.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w := snap.Definitions[0].Workdir; w != "~/code/almanac" {
+		t.Errorf("workdir = %q, want what the file said", w)
+	}
+}
+
+func TestTwoJobsWithOneNameIsRefusedAcrossBothForms(t *testing.T) {
+	src := jobdef.FSSource{FS: fstest.MapFS{
+		"ingest.yaml":     &fstest.MapFile{Data: []byte("command: [\"a\"]\n")},
+		"ingest/job.yaml": &fstest.MapFile{Data: []byte("command: [\"b\"]\n")},
+	}}
+	_, err := src.Load(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "both job") {
+		t.Errorf("error = %v, want a duplicate slug refusal", err)
+	}
+}
+
+// A folder holding a job.yaml is a job somebody wrote, so a name that cannot be
+// a slug is an error rather than a directory quietly skipped (P1).
+func TestAJobFolderWithAnUnusableNameSaysSo(t *testing.T) {
+	src := jobdef.FSSource{FS: fstest.MapFS{
+		"Water Plants/job.yaml": &fstest.MapFile{Data: []byte("command: [\"a\"]\n")},
+	}}
+	_, err := src.Load(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "lowercase") {
+		t.Errorf("error = %v, want it to explain the naming rule", err)
+	}
+}

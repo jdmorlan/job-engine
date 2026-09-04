@@ -61,7 +61,7 @@ func runTry(ctx context.Context, env *Env, args []string) error {
 		return usagef("expected exactly one job name, got %d", len(positional))
 	}
 
-	def, err := loadLocalDefinition(*dir, positional[0])
+	def, jobDir, err := loadLocalDefinition(*dir, positional[0])
 	if err != nil {
 		return err
 	}
@@ -80,12 +80,24 @@ func runTry(ctx context.Context, env *Env, args []string) error {
 	if err != nil {
 		return err
 	}
+	// The tree is the repository -- dependencies and the helpers are prepared
+	// there, once, for every job in it. The job's own folder is only where its
+	// command runs.
+	workdir, err := filepath.Abs(jobDir)
+	if err != nil {
+		return err
+	}
 	return tryJob(ctx, env, def, tree, tryOptions{
-		State: stateIn, Event: eventIn, Keep: *keep, Timeout: *timeout,
+		Workdir: workdir,
+		State:   stateIn, Event: eventIn, Keep: *keep, Timeout: *timeout,
 	})
 }
 
 type tryOptions struct {
+	// Workdir is where the command runs: the job's own folder, which for a
+	// flat job is the repository itself.
+	Workdir string
+
 	State   json.RawMessage
 	Event   json.RawMessage
 	Keep    bool
@@ -154,12 +166,14 @@ func tryJob(ctx context.Context, env *Env, def *jobdef.Definition, tree string, 
 			strings.Join(def.Secrets, ", "))
 	}
 
-	workdir := tree
-	if def.Workdir != "" {
-		if filepath.IsAbs(def.Workdir) {
-			workdir = def.Workdir
+	// What the file said wins over where the file is, the same as it does on a
+	// worker: a job declaring `workdir:` meant it.
+	workdir := opts.Workdir
+	if declared := def.Workdir; declared != "" {
+		if filepath.IsAbs(declared) {
+			workdir = declared
 		} else {
-			workdir = filepath.Join(tree, def.Workdir)
+			workdir = filepath.Join(tree, declared)
 		}
 	}
 
@@ -226,21 +240,42 @@ func reportTry(env *Env, def *jobdef.Definition, result executor.Result, stateOu
 //
 // The file rather than the control plane, deliberately: this command is for the
 // version you are editing, which by definition has not been synced anywhere.
-func loadLocalDefinition(dir, name string) (*jobdef.Definition, error) {
-	slug := name
-	path := filepath.Join(dir, name+".yaml")
+func loadLocalDefinition(dir, name string) (*jobdef.Definition, string, error) {
+	// An explicit file wins, so that `je try ./some/job.yaml` does what it
+	// says while a bare name goes looking.
 	if strings.HasSuffix(name, ".yaml") || strings.HasSuffix(name, ".yml") {
-		path = filepath.Join(dir, name)
-		slug = jobdef.SlugFromPath(name)
+		path := filepath.Join(dir, name)
+		def, err := parseLocal(path, jobdef.SlugFromPath(name))
+		return def, filepath.Dir(path), err
 	}
+
+	// Both layouts, in the order somebody would guess: the folder that is the
+	// job, then a file at the top level. The same two forms the engine loads,
+	// because a harness that could not find what the engine runs would send
+	// people to look for a bug in the wrong place.
+	candidates := []struct{ path, workdir string }{
+		{filepath.Join(dir, name, "job.yaml"), filepath.Join(dir, name)},
+		{filepath.Join(dir, name, "job.yml"), filepath.Join(dir, name)},
+		{filepath.Join(dir, name+".yaml"), dir},
+		{filepath.Join(dir, name+".yml"), dir},
+	}
+	for _, c := range candidates {
+		if _, err := os.Stat(c.path); err != nil {
+			continue
+		}
+		def, err := parseLocal(c.path, name)
+		return def, c.workdir, err
+	}
+	return nil, "", fmt.Errorf(
+		"no job called %q in %s.\n"+
+			"Looked for %s/job.yaml and %s.yaml. `je try` reads the definition from "+
+			"this directory, which is where you are editing it -- use --dir if your "+
+			"jobs are somewhere else", name, dir, name, name)
+}
+
+func parseLocal(path, slug string) (*jobdef.Definition, error) {
 	body, err := os.ReadFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, fmt.Errorf(
-				"no job file at %s.\n"+
-					"`je try` reads the definition from this directory, which is where you "+
-					"are editing it -- use --dir if your jobs are somewhere else", path)
-		}
 		return nil, err
 	}
 	return jobdef.Parse(path, slug, body)

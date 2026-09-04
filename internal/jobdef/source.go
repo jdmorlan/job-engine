@@ -102,12 +102,23 @@ func (s FSSource) Describe() string {
 // not a job would make the slug rule ("the file name is the job") a lie.
 const chainsDir = "chains"
 
-// Load reads every .yaml file in the root directory, non-recursively.
+// Load reads a source's definitions: every .yaml file at the top level, and
+// every directory holding a job.yaml.
 //
-// Non-recursive on purpose: nested directories would make a job's slug
-// ambiguous (is it "etl/weather" or "weather"?), and the slug ends up in CLI
-// arguments and event payloads where ambiguity is expensive. Chains get their
-// own directory rather than a subdirectory of this one (D17).
+// The two forms are one rule -- a job is named by the thing that contains it --
+// and both are exactly one level deep. That bound is the whole reason nesting
+// was refused before: arbitrary depth makes a slug ambiguous (is it
+// "etl/weather" or "weather"?), and the slug ends up in CLI arguments and event
+// payloads where ambiguity is expensive. A directory whose name is the job's
+// name has the same property a file's name had.
+//
+// The folder form exists because a job is not only its definition. Its code, its
+// fixtures and whatever else it needs belong beside it rather than in a shared
+// scripts/ directory that grows a file per job and pairs with nothing -- so a
+// job is a folder you can read, move or delete as one thing.
+//
+// Chains keep their own directory rather than being a subdirectory of this one
+// (D17).
 func (s FSSource) Load(ctx context.Context) (Snapshot, error) {
 	root := s.Root
 	if root == "" {
@@ -129,11 +140,15 @@ func (s FSSource) Load(ctx context.Context) (Snapshot, error) {
 		seen  = map[string]string{}
 		files []string
 	)
+	var dirs []string
 	for _, e := range entries {
-		if e.IsDir() || !isYAML(e.Name()) {
+		if e.IsDir() {
+			dirs = append(dirs, e.Name())
 			continue
 		}
-		files = append(files, e.Name())
+		if isYAML(e.Name()) {
+			files = append(files, e.Name())
+		}
 	}
 	// Sorted so that a duplicate-slug error names the same pair every time,
 	// and so load order is reproducible.
@@ -166,6 +181,10 @@ func (s FSSource) Load(ctx context.Context) (Snapshot, error) {
 		snap.Definitions = append(snap.Definitions, def)
 	}
 
+	if err := s.loadJobDirs(ctx, root, dirs, seen, &snap); err != nil {
+		return Snapshot{}, err
+	}
+
 	if err := s.loadChains(ctx, path.Join(root, chainsDir), &snap); err != nil {
 		return Snapshot{}, err
 	}
@@ -173,6 +192,83 @@ func (s FSSource) Load(ctx context.Context) (Snapshot, error) {
 		return Snapshot{}, err
 	}
 	return snap, nil
+}
+
+// jobFile is what makes a directory a job.
+//
+// One name rather than "any single yaml in there", so that a folder holding a
+// definition and a config file it reads is not an ambiguity to resolve. The
+// directory names the job; this names the definition.
+const jobFile = "job"
+
+// loadJobDirs reads every <root>/<name>/job.yaml.
+//
+// A directory with no job file is simply not a job -- scripts/, node_modules/,
+// anything somebody keeps beside their work -- which is why there is no list of
+// directories to ignore. chains/ is excluded by the same rule and not by name.
+func (s FSSource) loadJobDirs(
+	ctx context.Context, root string, dirs []string, seen map[string]string, snap *Snapshot,
+) error {
+	sort.Strings(dirs)
+
+	for _, dir := range dirs {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		full, body, ok, err := s.readJobFile(path.Join(root, dir))
+		if err != nil {
+			return err
+		}
+		if !ok {
+			continue
+		}
+
+		// The directoryname is the slug, so it has to be one. Said rather than
+		// skipped: a folder holding a job.yaml is a job somebody wrote, and
+		// quietly not loading it is the failure P1 rules out.
+		if !ValidName(dir) {
+			return fmt.Errorf(
+				"%s is a job, so its directory name must be lowercase letters, "+
+					"digits and dashes", full)
+		}
+		if prev, dup := seen[dir]; dup {
+			return fmt.Errorf("%s and %s are both job %q", prev, full, dir)
+		}
+		seen[dir] = full
+
+		def, err := Parse(full, dir, body)
+		if err != nil {
+			return err
+		}
+		// A job in a folder runs in that folder, unless it said otherwise.
+		// Its command names files next to it, which is the point of the
+		// layout, and resolving them against the repository root would make
+		// every command start with the job's own name.
+		if def.Workdir == "" {
+			def.Workdir = dir
+		}
+		snap.Definitions = append(snap.Definitions, def)
+	}
+	return nil
+}
+
+// readJobFile finds the definition inside a job directory, accepting either
+// extension the way the flat form does.
+func (s FSSource) readJobFile(dir string) (full string, body []byte, ok bool, err error) {
+	for _, ext := range []string{".yaml", ".yml"} {
+		full = path.Join(dir, jobFile+ext)
+		body, err = fs.ReadFile(s.FS, full)
+		switch {
+		case err == nil:
+			return full, body, true, nil
+		case errors.Is(err, fs.ErrNotExist):
+			continue
+		default:
+			return "", nil, false, fmt.Errorf("reading %s: %w", full, err)
+		}
+	}
+	return "", nil, false, nil
 }
 
 // loadChains reads <root>/chains/*.yaml. A missing directory is an empty set:

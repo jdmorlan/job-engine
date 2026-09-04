@@ -62,8 +62,8 @@ registered github.com/jdmorlan/job-engine/demo as "demo" at 4a360e39
 ```console
 $ je jobs
 JOB                STATUS  COMMAND                        FILE
-demo/demo-hello    ok      /bin/sh -c "echo 'Hello fro…   demo-hello.yaml
-demo/demo-counter  ok      /bin/sh scripts/counter.sh     demo-counter.yaml
+demo/demo-hello    ok      /bin/sh -c "echo 'Hello fro…   demo-hello/job.yaml
+demo/demo-counter  ok      /bin/sh counter.sh             demo-counter/job.yaml
 ```
 
 A job's name carries the source it came from. `demo/demo-hello` is the
@@ -149,16 +149,18 @@ it as comments:
 
 ```console
 $ je new water-plants --language python
-wrote water-plants.yaml
-wrote scripts/water-plants.py
+wrote water-plants/job.yaml
+wrote water-plants/water-plants.py
 ```
 
-Open `water-plants.yaml` and give it a schedule:
+A job is a folder, and the folder's name is the job's name -- so its definition,
+its code and anything else it needs sit together. Open `water-plants/job.yaml`
+and give it a schedule:
 
 ```yaml
 name: Water Plants
 language: python
-command: ["python", "scripts/water-plants.py"]
+command: ["python", "water-plants.py"]
 
 on:
   - every: 1h

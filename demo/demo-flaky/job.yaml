@@ -1,7 +1,7 @@
 name: Flaky
 description: Fails at random, about one run in three. Watch the cursor stay put.
 
-command: ["/bin/sh", "scripts/flaky.sh"]
+command: ["/bin/sh", "flaky.sh"]
 
 state:
   primary_cursor: processed
