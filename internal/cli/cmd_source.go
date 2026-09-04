@@ -96,6 +96,8 @@ func listSources(ctx context.Context, env *Env) error {
 			return err
 		}
 
+		warnAboutUnversionedJobs(env, sources)
+
 		var broken []engine.SourceStatus
 		for _, s := range sources {
 			if s.LastError != "" {
@@ -347,4 +349,37 @@ func collapseHome(path string) string {
 		return path
 	}
 	return "~" + path[len(home):]
+}
+
+// warnAboutUnversionedJobs says so when a directory source is nobody's
+// repository.
+//
+// The engine's position is that definitions belong in a repository (D22), and
+// this is the screen where somebody is looking at where theirs come from. A
+// directory of job files on one laptop cannot travel to a worker, cannot carry
+// encrypted secrets granted to named machines (D25), and cannot have a change
+// to it reviewed (D23) -- so the features arriving next are the ones it will
+// not get.
+//
+// Said once, here, rather than on every command. A nag on `je jobs` would be
+// noise; this is the listing whose subject is exactly this question.
+func warnAboutUnversionedJobs(env *Env, sources []engine.SourceStatus) {
+	for _, s := range sources {
+		if s.Kind != store.SourceKindDir || s.Path == "" || s.Jobs == 0 {
+			continue
+		}
+		state := definitionsRecoverable(s.Path)
+		if state.recoverable {
+			continue
+		}
+		fmt.Fprintf(env.Stderr,
+			"\nnote: %s is not in a repository you could restore from -- %s.\n"+
+				"      Definitions travel to workers as a tree, carry encrypted secrets,\n"+
+				"      and change by reviewed diff; none of that works from one disk.\n",
+			s.Path, state.why)
+		if state.fix != "" {
+			fmt.Fprintf(env.Stderr, "      %s\n", state.fix)
+		}
+		return // one nudge, not one per source
+	}
 }

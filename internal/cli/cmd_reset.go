@@ -21,10 +21,12 @@ func init() {
 			"web client, container or native service -- and deletes the state they\n" +
 			"accumulated: the databases, the certificate authority, this machine's\n" +
 			"identity and keys, and the docker volumes holding them.\n\n" +
-			"It does NOT delete your job definitions. Those are the thing you wrote,\n" +
-			"and the whole point of a reset is that re-running them is how you check\n" +
-			"the engine came back. --jobs removes them too, for a genuinely empty\n" +
-			"start.\n\n" +
+			"Job definitions belong in a repository (D22), and this treats them that\n" +
+			"way: a jobs directory that is committed and pushed is removed like\n" +
+			"anything else, because `je source sync` brings it back. One that is not\n" +
+			"-- no repository, uncommitted changes, nothing pushed -- is kept, and\n" +
+			"the reason is printed, because that reason is also the thing worth\n" +
+			"fixing. --jobs removes it regardless.\n\n" +
 			"It also does not touch a control plane somewhere else, and cannot: a\n" +
 			"reset is a local operation by nature. Against a cluster you would be\n" +
 			"deleting a namespace, which is not this tool's job.\n\n" +
@@ -46,9 +48,12 @@ func runReset(ctx context.Context, env *Env, args []string) error {
 		return usagef("unexpected argument %q", extra[0])
 	}
 
-	plan, skipped := planReset(ctx, env, *alsoJobs)
+	plan, skipped, kept := planReset(ctx, env, *alsoJobs)
 	if len(plan) == 0 {
 		fmt.Fprintf(env.Stdout, "nothing to remove: %s is already clean\n", env.Layout.Data)
+		if kept != "" {
+			fmt.Fprintf(env.Stdout, "\n%s\n", kept)
+		}
 		reportSkipped(env, skipped)
 		return nil
 	}
@@ -57,9 +62,8 @@ func runReset(ctx context.Context, env *Env, args []string) error {
 	for _, step := range plan {
 		fmt.Fprintf(env.Stdout, "  %s\n", step.describe)
 	}
-	if !*alsoJobs {
-		fmt.Fprintf(env.Stdout, "\nKept: %s (your job definitions; --jobs removes them too)\n",
-			env.Layout.Jobs)
+	if kept != "" {
+		fmt.Fprintf(env.Stdout, "\n%s\n", kept)
 	}
 	reportSkipped(env, skipped)
 	if *dryRun {
@@ -113,9 +117,7 @@ type resetStep struct {
 // global to the machine and a data directory is not, so a reset run in a
 // scratch directory would otherwise remove the containers and volumes of a real
 // deployment -- which is exactly what it did the first time this was run.
-func planReset(ctx context.Context, env *Env, alsoJobs bool) ([]resetStep, []string) {
-	var plan []resetStep
-	var skipped []string
+func planReset(ctx context.Context, env *Env, alsoJobs bool) (plan []resetStep, skipped []string, kept string) {
 
 	// Containers first: they hold the ports, and a native service coming back
 	// up while a container still owns :7620 fails confusingly.
@@ -197,15 +199,27 @@ func planReset(ctx context.Context, env *Env, alsoJobs bool) ([]resetStep, []str
 			do:       func(ctx context.Context, env *Env) error { return os.RemoveAll(path) },
 		})
 	}
-	if alsoJobs {
-		if _, err := os.Stat(env.Layout.Jobs); err == nil {
+	// The definitions. Removed when they can be got back, kept when they
+	// cannot -- see jobsdir.go for why that is the question rather than "are
+	// these job files".
+	if _, err := os.Stat(env.Layout.Jobs); err == nil {
+		state := definitionsRecoverable(env.Layout.Jobs)
+		switch {
+		case alsoJobs:
 			plan = append(plan, resetStep{
-				describe: env.Layout.Jobs + " (your job definitions)",
+				describe: env.Layout.Jobs + " (asked for with --jobs)",
 				do:       func(ctx context.Context, env *Env) error { return os.RemoveAll(env.Layout.Jobs) },
 			})
+		case state.recoverable:
+			plan = append(plan, resetStep{
+				describe: env.Layout.Jobs + " (in a repository; `je source sync` brings it back)",
+				do:       func(ctx context.Context, env *Env) error { return os.RemoveAll(env.Layout.Jobs) },
+			})
+		default:
+			kept = state.describe(env.Layout.Jobs) + "\n      --jobs removes it anyway."
 		}
 	}
-	return plan, skipped
+	return plan, skipped, kept
 }
 
 // sameDir compares two paths as the same directory, following symlinks where it

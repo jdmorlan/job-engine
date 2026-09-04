@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"text/tabwriter"
 )
 
@@ -15,11 +17,16 @@ func init() {
 		Usage: "set up a new jobs repository",
 		Long: "Creates the tree a source expects -- job files at the top, chains in\n" +
 			"chains/, the code they run in scripts/ -- plus a README describing the\n" +
-			"layout and a .gitignore.\n\n" +
-			"A source is a whole tree and not a pile of YAML (D22): the scripts a\n" +
-			"job runs live beside it and travel with it, which is what makes a repo\n" +
-			"portable to another machine unmodified.\n\n" +
-			"It writes files and registers nothing. Point the engine at it with\n" +
+			"layout and a .gitignore, and initialises a git repository.\n\n" +
+			"The repository is the point, not a nicety. A source is a whole tree\n" +
+			"and not a pile of YAML (D22): the scripts a job runs live beside it\n" +
+			"and travel to the worker with it, secrets are encrypted into it and\n" +
+			"granted to named machines (D25), and a change to either is a diff\n" +
+			"somebody reviews (D23). A directory of job files that exists only on\n" +
+			"one laptop gets none of that.\n\n" +
+			"--no-git skips it, for a tree you are going to put inside an existing\n" +
+			"repository.\n\n" +
+			"It registers nothing. Point the engine at it with\n" +
 			"je source add <name> <directory>.",
 		Run: runInit,
 	})
@@ -27,6 +34,7 @@ func init() {
 
 func runInit(ctx context.Context, env *Env, args []string) error {
 	fs := newFlagSet(commands["init"], env)
+	noGit := fs.Bool("no-git", false, "do not initialise a git repository")
 	rest, err := parseArgs(fs, args)
 	if err != nil {
 		return err
@@ -78,15 +86,30 @@ func runInit(ctx context.Context, env *Env, args []string) error {
 	fmt.Fprintf(tw, "  scripts/\tthe code your jobs run\n")
 	tw.Flush()
 
+	versioned := ""
+	if !*noGit {
+		// Done rather than suggested. `git init` was in the next-steps list and
+		// that was the wrong shape for it: everything this project wants a
+		// source to be -- travelling to a worker, carrying encrypted secrets,
+		// changing by reviewed diff -- assumes a repository, so a command
+		// called `init` that leaves you without one has not finished.
+		var err error
+		if versioned, err = initRepository(abs, written); err != nil {
+			fmt.Fprintf(env.Stderr, "\nthe files are written, but git did not run: %v\n", err)
+		}
+	}
+
 	// Not a tabwriter: one of these lines carries a path, and a single long
 	// path turns an aligned table into a scroll bar.
 	fmt.Fprintf(env.Stdout, `
 next
   cd %s
-  git init                     if you want it versioned, which is the point
   je new <job> --script        writes into this repository
   je source add %s .   register it with the engine
 `, dir, name)
+	if versioned != "" {
+		fmt.Fprintf(env.Stdout, "\n%s\n", versioned)
+	}
 
 	if len(skipped) > 0 {
 		fmt.Fprintf(env.Stderr, "\nleft alone (already present): %v\n", skipped)
@@ -141,4 +164,40 @@ func title(name string) string {
 		return "jobs"
 	}
 	return titleFromSlug(name)
+}
+
+// initRepository makes the tree a git repository and commits what was written.
+//
+// Committing as well as initialising, because an empty repository is not much
+// better than none: the files this command just wrote are the ones a person
+// would want as a first commit, and leaving them staged-or-not is a state
+// somebody has to resolve before doing anything else.
+//
+// An existing repository is left entirely alone -- `je init` inside one is how
+// you add a jobs tree to a repo you already have, and committing on somebody
+// else's behalf there would be a surprise.
+func initRepository(dir string, written []string) (string, error) {
+	if root, err := gitRoot(dir); err == nil {
+		return "already versioned: " + root, nil
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		return "", fmt.Errorf("git is not installed")
+	}
+	if out, err := runGit(dir, "init", "--quiet"); err != nil {
+		return "", fmt.Errorf("git init: %s", strings.TrimSpace(out))
+	}
+	if len(written) == 0 {
+		return "initialised a git repository", nil
+	}
+	if out, err := runGit(dir, "add", "-A"); err != nil {
+		return "", fmt.Errorf("git add: %s", strings.TrimSpace(out))
+	}
+	if out, err := runGit(dir, "commit", "--quiet", "-m", "Jobs repository"); err != nil {
+		// A machine with no configured git identity cannot commit, which is
+		// not this command failing -- the tree is there and versioned.
+		return "initialised a git repository; nothing committed yet (" +
+			strings.TrimSpace(lastLine(out)) + ")", nil
+	}
+	return "initialised a git repository and committed the tree.\n" +
+		"Push it somewhere when you have a remote -- until then this disk is the only copy.", nil
 }

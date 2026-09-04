@@ -69,9 +69,22 @@ does not — it removes a service *here*, and a control plane in Kubernetes
 carries on. The danger is not an error, it is a command that succeeds and
 changes something other than what you meant.
 
+**Definitions belong in a repository.** A source is a whole tree, not a pile of
+YAML (D22): the scripts a job runs live beside it and travel to the worker with
+it, secrets are encrypted into it and granted to named machines, and a change to
+either is a diff somebody reviews. None of that works for a directory of job
+files that exists on one laptop. `je init` sets up such a tree and versions it,
+and `je source` says so when yours is not in one.
+
+The built-in `local` directory is still there — registering nothing should give
+you somewhere to put a first job file. It is a starting point, not a
+destination.
+
 In development, `je reset` tears down everything on this machine — containers,
-services, volumes, databases, certificates — and leaves your job definitions
-alone, so re-running them is how you check it came back. It only removes what
+services, volumes, databases, certificates — and treats your definitions the way D22
+does: a jobs directory that is committed and pushed is removed like anything
+else, because `je source sync` brings it back, and one that is not is kept with
+the reason printed — which is also the thing worth fixing. It only removes what
 *this* data directory owns, and says what it left and why:
 
 ```console
@@ -83,7 +96,9 @@ This will remove, on this machine only:
   .je/state.db
   ...
 
-Kept: ~/.je/jobs (your job definitions; --jobs removes them too)
+Kept: ~/.je/jobs -- it is not in a git repository, so this disk is the only copy.
+      je init ~/.je/jobs   sets up the tree and versions it
+      --jobs removes it anyway.
 
 There is no undo. Type ".je" to confirm:
 ```

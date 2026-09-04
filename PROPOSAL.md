@@ -3677,6 +3677,50 @@ worker" are all reachable over a channel that already exists and is
 authenticated. Nothing about that is blocked; it simply is not built. It is the
 obvious next item, and it is what makes `je workers` more than a status board.
 
+### Definitions belong in a repository, and the tool should say so
+
+> *"Why does it need to explicitly keep job definitions intact? The goal with
+> job definitions is that they would be git repos... I think it's important that
+> we really push that design, that you don't want just one off jobs floating
+> around, you want them in repos. With secret management, and possibly other
+> features coming, having jobs in a repo is pretty important."*
+
+**Adopted, and the reset behaviour was the tell.** `je reset` kept the jobs
+directory unconditionally, which quietly asserted the opposite of D22: that
+definitions are precious *here*, so this is the one place the engine must never
+touch. If they are in a repository they are not precious here at all -- a
+checkout is a cache -- and refusing to remove one is the tool treating a
+recoverable directory as irreplaceable.
+
+So it asks a better question: **can this be got back?** Recoverable means
+committed *and* pushed, which is stricter than it first looks -- a clean
+checkout with no remote is a single copy that happens to have a `.git`
+directory, and a repository one commit ahead of its upstream is a directory
+whose newest work exists nowhere else. A check that stopped at "is it a git
+repository" would call both safe, which is the most expensive way to be wrong:
+it looks careful and loses the work anyway.
+
+**The answer doubles as the argument.** A directory that cannot be recovered is
+one that is not in a repository yet, so the sentence explaining why it was kept
+is the same sentence explaining what to fix. That is the push, and it lands at
+the two moments somebody is thinking about it: `je reset`, and `je source` --
+the listing whose whole subject is where definitions come from.
+
+**`je init` now initialises the repository rather than suggesting it.** `git
+init` was a line in its next-steps list, which was the wrong shape: everything
+this project wants a source to be -- travelling to a worker as a tree, carrying
+secrets encrypted to named machines (D25), changing by a diff somebody reviews
+(D23) -- assumes a repository. A command called `init` that leaves you without
+one has not finished. It commits the tree it just wrote, and says the remaining
+half out loud: until there is a remote, this disk is still the only copy.
+
+**What this does not do is forbid the local directory.** `local` stays the
+built-in source, because registering nothing should still give somebody
+somewhere to put a first job file, and a tool that demanded a git remote before
+it would run anything would be insufferable. The position is that one-off jobs
+are a starting point rather than a destination, and the tool should keep saying
+so rather than either enforcing it or going quiet.
+
 **The second gap is `upgrade` for a split deployment.** It now handles every
 component on the machine it runs on, which is the whole answer for one box and
 half of it for two. The other half is the same channel: a control plane that can
