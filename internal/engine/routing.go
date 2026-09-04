@@ -31,6 +31,15 @@ const maxFanOut = 10
 type compiledRoute struct {
 	route store.Route
 	match jobdef.Match
+
+	// condition is which of a fan-in's conditions this table entry is for, or
+	// -1 for an ordinary single-condition step (D3).
+	//
+	// A fan-in appears in the table once per condition, because each condition
+	// has its own event type and the table is keyed by event type. Routing
+	// stays one map lookup, which is what makes it affordable to offer every
+	// event to it.
+	condition int
 }
 
 // reloadRoutes rebuilds the in-memory route table from the database.
@@ -57,7 +66,15 @@ func (e *Engine) reloadRoutes(ctx context.Context) error {
 				"chain", r.ChainName, "step", r.StepIndex, "error", err)
 			continue
 		}
-		table[match.Event] = append(table[match.Event], compiledRoute{route: r, match: match})
+		if match.IsFanIn() {
+			for i, cond := range match.AllOf {
+				table[cond.Event] = append(table[cond.Event],
+					compiledRoute{route: r, match: match, condition: i})
+			}
+			continue
+		}
+		table[match.Event] = append(table[match.Event],
+			compiledRoute{route: r, match: match, condition: -1})
 	}
 
 	e.routesMu.Lock()
@@ -112,6 +129,10 @@ func (e *Engine) dispatchRoutes(ctx context.Context, ev model.Event) {
 
 	for _, cr := range matched {
 		route := cr.route
+		if cr.condition >= 0 {
+			e.satisfy(ctx, cr, ev)
+			continue
+		}
 		prepared, err := e.Enqueue(ctx, route.TargetSlug, RunOptions{
 			TriggeringEvent: &ev,
 			Route:           &route,
@@ -138,6 +159,15 @@ func (e *Engine) matching(ev model.Event) []compiledRoute {
 
 	var out []compiledRoute
 	for _, cr := range candidates {
+		if cr.condition >= 0 {
+			// One condition of a fan-in: match that condition alone. Whether
+			// the step fires is a separate question, asked once the
+			// satisfaction is recorded.
+			if cr.match.AllOf[cr.condition].Matches(ev.Type, ev.Payload) {
+				out = append(out, cr)
+			}
+			continue
+		}
 		if cr.match.Matches(ev.Type, ev.Payload) {
 			out = append(out, cr)
 		}
@@ -170,4 +200,52 @@ func (e *Engine) recordRouteFailure(ctx context.Context, cause model.Event, rout
 		e.log.Error("recording "+EventRouteFailed, "error", err)
 	}
 	e.log.Error("route did not fire", "event", cause.Type, "reason", reason)
+}
+
+// satisfy records that one condition of a fan-in has been met, and fires the
+// step if that completed the set (D3).
+//
+// Evaluation is on arrival: each incoming event updates the satisfaction state
+// of every trigger it could match, and a fully satisfied trigger fires. Nothing
+// polls, and nothing has to be swept.
+func (e *Engine) satisfy(ctx context.Context, cr compiledRoute, ev model.Event) {
+	route := cr.route
+	window, err := e.store.SatisfyCondition(ctx, route.ID, cr.condition,
+		ev.ID, ev.CreatedAt, cr.match.Within.D)
+	if err != nil {
+		e.recordRouteFailure(ctx, ev, &route, err.Error())
+		return
+	}
+
+	if len(window.Satisfied) < len(cr.match.AllOf) {
+		e.log.Info("fan-in still waiting",
+			"chain", route.ChainName, "step", route.StepIndex,
+			"satisfied", len(window.Satisfied), "of", len(cr.match.AllOf))
+		return
+	}
+
+	prepared, err := e.Enqueue(ctx, route.TargetSlug, RunOptions{
+		TriggeringEvent: &ev,
+		Route:           &route,
+	})
+	switch {
+	case err != nil:
+		e.recordRouteFailure(ctx, ev, &route, err.Error())
+		return
+	case prepared == nil:
+		// The overlap policy declined, which is already an event of its own.
+		// The satisfactions are still consumed below: they did fire the step,
+		// and leaving them would fire it again on the next matching event.
+	default:
+		e.log.Info("fan-in fired",
+			"chain", route.ChainName, "step", route.StepIndex,
+			"job", route.TargetSlug, "run", prepared.Run.ID,
+			"conditions", len(cr.match.AllOf))
+	}
+
+	if cr.match.Fire != jobdef.FireEveryTime {
+		if err := e.store.ClearTrigger(ctx, route.ID); err != nil {
+			e.log.Error("clearing a fired fan-in", "error", err)
+		}
+	}
 }

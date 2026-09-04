@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"slices"
 	"sort"
 	"time"
@@ -45,6 +46,44 @@ type Waiting struct {
 	// a worker would take it, and it would fail on arrival because that
 	// machine has no toolchain for it.
 	UnservedRuntimes []UnservedRuntime `json:"unserved_runtimes,omitempty"`
+
+	// Triggers is every fan-in that is partly satisfied: what it is still
+	// waiting on, and how long the events it already has stay valid (D3).
+	//
+	// This view is the feature. The mechanism underneath it is a few hundred
+	// lines; being able to answer "why hasn't the rollup run?" without reading
+	// logs is the thing that makes fan-in worth having at all.
+	Triggers []PendingTrigger `json:"triggers,omitempty"`
+}
+
+// PendingTrigger is one fan-in step, part way there.
+type PendingTrigger struct {
+	Chain string `json:"chain"`
+	Step  int    `json:"step"`
+	Job   string `json:"job"`
+
+	// Satisfied and Waiting are the conditions, described the way the file
+	// wrote them, so the view reads like the definition rather than like a
+	// row.
+	Satisfied []SatisfiedCondition `json:"satisfied"`
+	Waiting   []string             `json:"waiting"`
+
+	// Expires is when the oldest satisfying event falls out of the window,
+	// after which the trigger cannot complete on what it currently has.
+	Expires time.Time `json:"expires"`
+}
+
+// SatisfiedCondition is one met condition and what met it.
+type SatisfiedCondition struct {
+	// Condition is the condition as the file wrote it, including its `where`.
+	// The event type alone is not enough to tell two conditions apart -- a
+	// fan-in on two jobs is two conditions on run.succeeded -- and a view that
+	// showed only the type would say "waiting on run.succeeded, satisfied by
+	// run.succeeded", which answers nothing.
+	Condition string    `json:"condition"`
+	Event     string    `json:"event"`
+	EventID   int64     `json:"event_id"`
+	At        time.Time `json:"at"`
 }
 
 // UnservedRuntime is one language nothing can prepare, and what is stuck on it.
@@ -184,6 +223,10 @@ func (e *Engine) Waiting(ctx context.Context) (Waiting, error) {
 	for _, entry := range stuckRuntimes {
 		w.UnservedRuntimes = append(w.UnservedRuntimes, *entry)
 	}
+
+	if w.Triggers, err = e.pendingTriggers(ctx, now); err != nil {
+		return Waiting{}, err
+	}
 	sort.Slice(w.UnservedRuntimes, func(i, j int) bool {
 		return w.UnservedRuntimes[i].Language < w.UnservedRuntimes[j].Language
 	})
@@ -210,4 +253,68 @@ func sortScheduled(s []ScheduledWindow) {
 			s[j], s[j-1] = s[j-1], s[j]
 		}
 	}
+}
+
+// pendingTriggers describes every partly-satisfied fan-in (D3).
+func (e *Engine) pendingTriggers(ctx context.Context, now time.Time) ([]PendingTrigger, error) {
+	state, err := e.store.PendingTriggers(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(state) == 0 {
+		return nil, nil
+	}
+	routes, err := e.store.ActiveRoutes(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	var out []PendingTrigger
+	for _, r := range routes {
+		window, ok := state[r.ID]
+		if !ok {
+			continue
+		}
+		var match jobdef.Match
+		if err := json.Unmarshal(r.Match, &match); err != nil || !match.IsFanIn() {
+			continue
+		}
+
+		met := map[int]store.Satisfaction{}
+		for _, sat := range window.Satisfied {
+			// Only what is still inside the window counts, which is the same
+			// question firing asks -- so this view cannot claim a condition is
+			// met while the engine disagrees.
+			if !sat.SatisfiedAt.Before(now.Add(-match.Within.D)) {
+				met[sat.ConditionIndex] = sat
+			}
+		}
+		if len(met) == 0 || len(met) == len(match.AllOf) {
+			// Nothing left in the window, or a set that has just fired.
+			continue
+		}
+
+		pending := PendingTrigger{
+			Chain: r.ChainName, Step: r.StepIndex, Job: r.TargetSlug,
+			Expires: window.ExpiresAt,
+		}
+		for i, cond := range match.AllOf {
+			if sat, ok := met[i]; ok {
+				pending.Satisfied = append(pending.Satisfied, SatisfiedCondition{
+					Condition: cond.String(),
+					Event:     cond.Event, EventID: sat.EventID, At: sat.SatisfiedAt,
+				})
+				continue
+			}
+			pending.Waiting = append(pending.Waiting, cond.String())
+		}
+		out = append(out, pending)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Chain != out[j].Chain {
+			return out[i].Chain < out[j].Chain
+		}
+		return out[i].Step < out[j].Step
+	})
+	return out, nil
 }

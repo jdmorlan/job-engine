@@ -896,12 +896,23 @@ same rule `je upgrade` applies to itself. A worker advertises what it can
 prepare, so a job whose language nothing serves is **queued and visible** in
 `je waiting` rather than dispatched to a machine that would fail it.
 
-**Fan-in is not built.** A step waits on one condition. `all_of` with a window
-(D3) — "when both of these landed, within six hours" — parses and is refused
-with a message saying so, rather than being an unknown key. The `trigger_state`
-table it needs is already in the schema, so it is a feature and not a
-migration. The same goes for `trigger.expired`, the "the thing I was waiting
-for never came" event, which is where the alerting story starts.
+**Fan-in is built** (D3). A step can wait for several things at once:
+
+```yaml
+steps:
+  - on:
+      all_of:
+        - { event: run.succeeded, where: { job: house/extract-weather } }
+        - { event: run.succeeded, where: { job: house/extract-power } }
+      within: 6h
+    run: rollup
+```
+
+`within:` is required, because a fan-in with no window fires on events days
+apart and looks like nothing is wrong. Partial satisfaction is durable — it
+survives a restart, which matters on a laptop that sleeps between the two halves
+— and `je waiting` shows what a trigger is still waiting on and when what it
+already has expires. `trigger.expired`, the "it never came" event, is not built.
 
 **Sources are re-read on request, not on a timer.** `je source sync`, and once
 at start. A per-source `interval:` is the GitOps version and is not here: an

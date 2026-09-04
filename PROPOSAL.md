@@ -513,7 +513,7 @@ Non-interactive form for scripting and for when you know what you want:
 
 ### D3. Chaining, and your stateful-triggers idea
 
-**Status:** AGREED — v1.1, schema-ready. *(You left this block empty; I'm treating
+**Status:** AGREED — **fan-in shipped (v0.8)**; `trigger.expired` still open. *(You left this block empty; I'm treating
 silence as no objection to the v1.1 sequencing, since nothing in v1 depends on it.
 The two questions below are still worth answering when you get to them — especially
 `trigger.expired`, which is cheap now and awkward to retrofit.)*
@@ -590,8 +590,49 @@ thing that makes it worth having.
   by accident. Start with equality on event fields; extend only when a real job
   needs it.
 
-**Sequencing recommendation.** Design it now, build it in **v1.1**, but put the
-`trigger_state` table in the schema from day one so it isn't a migration later.
+**Shipped, and the schema decision paid off exactly as intended.** `all_of` with
+`within` and `fire` works; `trigger_state` needed no migration, because 0001
+created it on this argument and it was still the right shape four versions
+later. What it left open was `satisfied_conditions`, which is now a JSON set
+keyed by condition index -- one row per route rather than one per condition,
+because the question asked on every event is "is this set complete", and a set
+is one read rather than N.
+
+`correlation_key` is carried as `""` and still reserved. It anticipates fan-in
+*per key* -- "when both feeds for 2026-09-04 have landed" -- which nothing has
+needed; leaving it in the primary key means adding it later is a feature rather
+than a migration, which was the point of the column existing.
+
+**Two things the build got right by being made to state them:**
+
+- **`within:` is required.** A fan-in with no window fires on events days apart
+  and looks like nothing is wrong, which is the failure this engine exists to
+  refuse. There is no default.
+- **The window is evaluated from the arriving event**, so the answer depends on
+  stored times and this event, never on how long the process has been up. A
+  half-satisfied trigger survives a restart because it is a row -- verified by
+  restarting a control plane mid-pair and watching `je waiting` still show it.
+
+**The view is the feature, and building it proved it twice.** The first render
+showed `WAITING ON run.succeeded / SATISFIED run.succeeded` -- both conditions
+are `run.succeeded`, and the `where` is the only thing telling them apart, so
+the view answered nothing. It now renders the condition as the file wrote it.
+The same omission made `je chain` print `on ` and nothing for a fan-in step.
+
+```console
+$ je waiting
+WAITING TO FAN IN  (some conditions met, the rest not yet)
+  TRIGGER                             WAITING ON                              SATISFIED
+  house/daily/step 1 -> house/rollup  run.succeeded job=house/extract-power   run.succeeded job=house/extract-weather (12:40)
+```
+
+**Still open: `trigger.expired`**, the "the thing I was waiting for never came"
+event. It needs a sweep rather than arrival-time evaluation, which is why it did
+not come free with the rest, and it is the cheapest alerting primitive here.
+
+**Original sequencing recommendation**, kept because the reasoning held: design
+it now, build it in v1.1, but put the `trigger_state` table in the schema from
+day one so it isn't a migration later.
 The reason to defer the build: fan-in has no value until you have two jobs that
 need to fan in, and per N2 you have one real job identified. I'd rather prove the
 core loop on weather ingest and then build this against a real second and third

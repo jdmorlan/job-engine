@@ -88,9 +88,21 @@ func TestChainErrorsNameWhatToFix(t *testing.T) {
 		body: "steps:\n  - on: { event: a.b }\n    runs: rollup\n",
 		want: "field runs not found",
 	}, {
-		name: "fan-in says it is not built rather than not a field",
-		body: "steps:\n  - on:\n      all_of:\n        - { event: a.b }\n        - { event: c.d }\n      within: 6h\n    run: rollup\n",
-		want: "not implemented yet (D3)",
+		name: "a fan-in with no window is refused, because it would look fine",
+		body: "steps:\n  - on:\n      all_of:\n        - { event: a.b }\n        - { event: c.d }\n    run: rollup\n",
+		want: "needs `within:`",
+	}, {
+		name: "a fan-in with one condition is an ordinary step",
+		body: "steps:\n  - on:\n      all_of:\n        - { event: a.b }\n      within: 6h\n    run: rollup\n",
+		want: "at least two conditions",
+	}, {
+		name: "a step is either event or all_of",
+		body: "steps:\n  - on:\n      event: x.y\n      all_of:\n        - { event: a.b }\n        - { event: c.d }\n      within: 6h\n    run: rollup\n",
+		want: "not both",
+	}, {
+		name: "an unknown fire policy is named",
+		body: "steps:\n  - on:\n      all_of:\n        - { event: a.b }\n        - { event: c.d }\n      within: 6h\n      fire: sometimes\n    run: rollup\n",
+		want: "once_per_window",
 	}, {
 		name: "a step with no target",
 		body: "steps:\n  - on: { event: a.b }\n",

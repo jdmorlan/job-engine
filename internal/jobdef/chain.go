@@ -57,7 +57,44 @@ type Match struct {
 	// Values are normalised to strings on both sides, so `where: {count: 3}`
 	// matches a payload of {"count": 3}.
 	Where map[string]string `json:"where,omitempty"`
+
+	// AllOf is fan-in (D3): every condition must be satisfied, each by some
+	// event, all within Within of each other. Empty for an ordinary step.
+	//
+	// A trigger is a standing query over the event log rather than a function
+	// of one event, which is what makes this cheaper than a DAG engine: the
+	// log is already durable and already carries causation, so what is added
+	// is a note of which conditions are currently satisfied.
+	AllOf []Match `json:"all_of,omitempty"`
+
+	// Within is how close together the satisfying events must be. Required for
+	// a fan-in and meaningless without one.
+	//
+	// Deliberately not optional. A fan-in with no window fires on events days
+	// apart, which is almost never what somebody meant and is invisible when it
+	// happens -- the run just looks late.
+	Within Duration `json:"within,omitempty"`
+
+	// Fire decides what happens to the satisfying events once the step runs.
+	Fire FirePolicy `json:"fire,omitempty"`
 }
+
+// FirePolicy is what a satisfied fan-in does with the events that satisfied it.
+type FirePolicy string
+
+const (
+	// FireOncePerWindow consumes them, so the same pair cannot fire twice.
+	// The default, because "both landed, do the thing" almost always means
+	// once per pair.
+	FireOncePerWindow FirePolicy = "once_per_window"
+
+	// FireEveryTime leaves them, so any further matching event re-fires while
+	// the others are still inside the window.
+	FireEveryTime FirePolicy = "every_time"
+)
+
+// IsFanIn reports whether this is a multi-condition trigger.
+func (m Match) IsFanIn() bool { return len(m.AllOf) > 0 }
 
 // FilePath reports where this chain was read from.
 func (c *Chain) FilePath() string { return c.filePath }
@@ -114,7 +151,18 @@ func (m Match) Qualify(qualify func(string) string) Match {
 // String renders a pattern the way a file would write it: "run.succeeded
 // job=extract". On the type because two views and an API response all render
 // it, and three copies of a formatter is how they come to disagree.
+//
+// A fan-in has no single event type -- its Event is empty and its conditions
+// are in AllOf -- so without the branch below `je chain` printed "on " and
+// nothing at all.
 func (m Match) String() string {
+	if m.IsFanIn() {
+		parts := make([]string, 0, len(m.AllOf))
+		for _, c := range m.AllOf {
+			parts = append(parts, c.String())
+		}
+		return "all of [" + strings.Join(parts, "; ") + "] within " + m.Within.String()
+	}
 	if len(m.Where) == 0 {
 		return m.Event
 	}
@@ -242,17 +290,18 @@ func (rs rawStep) step() (Step, error) {
 	if rs.On == nil {
 		return Step{}, errors.New("needs an `on:` pattern")
 	}
+	if rs.Run == nil || *rs.Run == "" {
+		return Step{}, errors.New("needs `run:`, the job to start")
+	}
+	if len(rs.On.AllOf) > 0 {
+		return rs.fanIn()
+	}
 	switch {
-	case len(rs.On.AllOf) > 0:
-		return Step{}, errors.New(
-			"all_of (fan-in) is not implemented yet (D3) -- one condition per step for now")
 	case rs.On.Within != nil || rs.On.Fire != nil:
 		return Step{}, errors.New(
-			"within/fire belong to all_of (fan-in), which is not implemented yet (D3)")
+			"within/fire belong to all_of (fan-in); a step with one condition fires on it")
 	case rs.On.Event == nil || *rs.On.Event == "":
 		return Step{}, errors.New("on.event is required")
-	case rs.Run == nil || *rs.Run == "":
-		return Step{}, errors.New("needs `run:`, the job to start")
 	}
 
 	s.On.Event = *rs.On.Event
@@ -402,4 +451,56 @@ func checkCycles(chains []*Chain) error {
 		}
 	}
 	return nil
+}
+
+// fanIn builds a multi-condition step (D3).
+func (rs rawStep) fanIn() (Step, error) {
+	if len(rs.On.AllOf) < 2 {
+		return Step{}, errors.New(
+			"all_of needs at least two conditions; one condition is an ordinary `on:`")
+	}
+	if rs.On.Event != nil {
+		return Step{}, errors.New("a step has either `event:` or `all_of:`, not both")
+	}
+	if rs.On.Within == nil || rs.On.Within.D <= 0 {
+		// Required rather than defaulted. A fan-in with no window fires on
+		// events days apart and looks like nothing is wrong.
+		return Step{}, errors.New(
+			"all_of needs `within:` -- how close together the events must be, e.g. within: 6h")
+	}
+
+	s := Step{Run: *rs.Run}
+	s.On.Within = *rs.On.Within
+	s.On.Fire = FireOncePerWindow
+	if rs.On.Fire != nil {
+		switch FirePolicy(*rs.On.Fire) {
+		case FireOncePerWindow, FireEveryTime:
+			s.On.Fire = FirePolicy(*rs.On.Fire)
+		default:
+			return Step{}, fmt.Errorf("fire: %q is not %s or %s",
+				*rs.On.Fire, FireOncePerWindow, FireEveryTime)
+		}
+	}
+
+	for i, raw := range rs.On.AllOf {
+		if raw.Event == nil || *raw.Event == "" {
+			return Step{}, fmt.Errorf("all_of condition %d needs an `event:`", i+1)
+		}
+		if len(raw.AllOf) > 0 {
+			return Step{}, errors.New("all_of does not nest")
+		}
+		if raw.Within != nil || raw.Fire != nil {
+			return Step{}, fmt.Errorf(
+				"all_of condition %d: within/fire belong to the step, not a condition", i+1)
+		}
+		cond := Match{Event: *raw.Event}
+		if len(raw.Where) > 0 {
+			cond.Where = map[string]string{}
+			for k, v := range raw.Where {
+				cond.Where[k] = fmt.Sprint(v)
+			}
+		}
+		s.On.AllOf = append(s.On.AllOf, cond)
+	}
+	return s, nil
 }

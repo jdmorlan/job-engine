@@ -97,6 +97,35 @@ func runWaiting(ctx context.Context, env *Env, args []string) error {
 			fmt.Fprintln(env.Stdout)
 		}
 
+		if len(w.Triggers) > 0 {
+			// D3 calls this view the feature, and it is: the mechanism is a
+			// few hundred lines, and answering "why hasn't the rollup run?"
+			// without reading logs is what makes it worth having.
+			fmt.Fprintln(env.Stdout,
+				"WAITING TO FAN IN  (some conditions met, the rest not yet)")
+			tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
+			fmt.Fprintln(tw, "  TRIGGER\tWAITING ON\tSATISFIED\tEXPIRES")
+			for _, t := range w.Triggers {
+				satisfied := make([]string, 0, len(t.Satisfied))
+				for _, sc := range t.Satisfied {
+					satisfied = append(satisfied,
+						fmt.Sprintf("%s (%s)", sc.Condition, sc.At.Local().Format("15:04")))
+				}
+				fmt.Fprintf(tw, "  %s/step %d -> %s\t%s\t%s\t%s\n",
+					t.Chain, t.Step, t.Job,
+					strings.Join(t.Waiting, ", "),
+					strings.Join(satisfied, "; "),
+					humanUntil(t.Expires))
+			}
+			if err := tw.Flush(); err != nil {
+				return err
+			}
+			fmt.Fprintln(env.Stdout,
+				"\n  After EXPIRES the events already seen fall out of the window,\n"+
+					"  and the trigger starts again from whatever arrives next.")
+			fmt.Fprintln(env.Stdout)
+		}
+
 		if len(w.UnservedRuntimes) > 0 {
 			// A label matched and a worker would have taken this, and it would
 			// have failed on arrival for want of a toolchain. Distinct from the
