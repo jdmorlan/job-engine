@@ -190,7 +190,7 @@ architecture), **D16** (daemon lifecycle and generic event ingress).
 | D10 | Secrets | AGREED |
 | D11 | Definition versioning | AGREED |
 | D12 | Observability surface | AGREED |
-| D13 | Retention | AGREED |
+| D13 | Retention | AGREED — **revised v0.9, shape agreed, not built** |
 | D14 | Job state / cursors | AGREED (revised v0.5) — **2 questions open** |
 | D15 | Daemon + API + CLI (`je`) | AGREED |
 | D16 | Daemon lifecycle + event ingress | AGREED (renamed v0.5) |
@@ -2495,9 +2495,9 @@ Still not in v1: OpenTelemetry, metrics endpoints, distributed tracing.
 
 ---
 
-### D13. Retention — revised
+### D13. Retention — revised again
 
-**Status:** AGREED (revised)
+**Status:** AGREED (revised v0.9) — **shape agreed, not yet built**
 
 > *"I almost think the defaults can be tighter... records could be 30 days... logs
 > could be 30 days as well."*
@@ -2515,6 +2515,80 @@ Adopted, with one constraint I have to add:
   versions.
 - Vacuum runs as `system.retention`, an ordinary job (P2).
 - Per-job `keep_logs: forever` escape hatch.
+
+**Revised (v0.9), because the v0.2 write-up predates three decisions it collides
+with.** The periods above stand. Everything about *how* needed rethinking.
+
+**C1. "An ordinary job" had nowhere to run.** C11 says the control plane never
+executes; C1 says a worker gets no access to the store, the engine, or the
+database. Retention's work is `DELETE FROM logs`, which only the control plane
+can do and a worker is precisely the thing that cannot. D27 then removed the
+last place a job with no repository could live.
+
+**Resolved by making the job's command `je` itself:**
+
+```yaml
+# system/retention.yaml, built in
+command: ["je", "retention", "sweep", "--runs", "30d", "--logs", "30d"]
+on:
+  - cron: "0 4 * * *"
+```
+
+A worker runs it, `je` calls the API, the control plane deletes. Every rule
+survives: P2 (a real job, with runs, logs and a visible failure), C1 (the worker
+touches the API as a client, exactly as the CLI does), C11 (nothing executes on
+the control plane). The authentication already works — a worker's certificate
+carries a verified identity, which is what the mutating-write gate asks for
+(D25) — and even the `FROM scratch` compose worker can run it, because `/je` is
+the one binary that image has.
+
+**And it resolves D27 rather than fighting it.** D27's argument was that code
+which cannot travel is not a source. The `je` binary is on every worker by
+definition, so a built-in `system` source is the one source that genuinely
+travels everywhere. That is the test, not "we need somewhere to put it."
+
+**The strongest argument for this shape is not P2, it is configuration.**
+Retention is the first setting that belongs to a *deployment* rather than to a
+job or a machine: it is a property of this disk, it must change without a
+redeploy, and it needs a validation rule (events never shorter than runs). There
+is no config file and no config table, and inventing one for this would be the
+tail wagging the dog. As a job file the periods are arguments, `je explain
+system/retention` answers "what is my retention policy?" with machinery that
+already exists, and the validation lives where every other job-file validation
+lives.
+
+**C2. A run a live cursor points at cannot be deleted.** `job_state.set_by_run_id
+REFERENCES runs(id)` and job state is never expired, so a job that ran once forty
+days ago and has not moved its cursor since has a *current* state version
+pointing at a run retention wants to remove. Foreign keys are on, so that is a
+constraint failure rather than a silent orphan. **Rule: a run referenced by a
+live state version is kept regardless of age.** Not `ON DELETE SET NULL` — "what
+set this cursor?" is the question D14 exists to answer, and it is a handful of
+rows.
+
+**C3. Deleting rows does not give the space back.** SQLite marks freed pages for
+reuse and never shrinks the file, so retention as written would stop growth and
+reclaim nothing — which is not what the logs schema's own comment promises.
+`VACUUM` rewrites the file under an exclusive lock and wants 2x the space, which
+on a multi-gigabyte log database is a long stall. **Decision:
+`PRAGMA auto_vacuum = INCREMENTAL` on the logs database, reclaimed in bounded
+chunks by the sweep.** It has to be set before any table exists, so it needs a
+migration that rebuilds that database — which is why it is worth doing *now*,
+while it holds tens of rows, rather than when it is the problem. State stays as
+it is; it is small and it is not where the volume goes.
+
+**C4. Two unbounded tables D13 never listed.** `trigger_state` grows by one row
+per route per correlation key and fired rows are never removed, so a chain that
+fans in per day outgrows the run history. `job_state` is append-only and bounded
+only by the 100-version trim above. Both are in scope for the sweep.
+
+**C5. Deletion is the one operation that erases its own evidence (P1).** After a
+sweep, `je runs weather-ingest` for a job that has run daily for a year shows
+thirty days, which is indistinguishable from a job that started thirty days ago.
+So the sweep keeps a per-job count of what it removed, and the views carry a
+floor: *"30 days shown; 340 older runs removed by retention."* The rows that
+would have told you are gone, so the count has to be written down at the moment
+they go — there is no reconstructing it afterwards.
 
 ---
 
