@@ -100,6 +100,18 @@ func runEnroll(ctx context.Context, env *Env, args []string) error {
 		fmt.Fprintf(env.Stdout,
 			"On that machine:\n  %s --token %s \\\n    --addr %s --ca-pin %s\n\n",
 			redeem, out.Token, c.Addr(), out.CAFingerprint)
+
+		// The address is how THIS command reached the control plane, which is
+		// not always how the other machine will. Inside a container it is the
+		// container's own port and the host needs the published one; across a
+		// network it is loopback and useless. The pin travels unchanged either
+		// way, so saying which half to check beats printing a confident address
+		// somebody pastes and then has to debug.
+		fmt.Fprint(env.Stdout,
+			"--addr is how this command reached the control plane. If that machine\n"+
+				"reaches it by another name or port -- through a published container\n"+
+				"port, or over a network -- use that instead. The fingerprint is the\n"+
+				"same wherever it is reached from.\n\n")
 		fmt.Fprintln(env.Stdout,
 			"Shown once. The control plane keeps a hash, so this cannot be printed again --\n"+
 				"if it is lost, issue another one.")
