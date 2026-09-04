@@ -13,6 +13,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -51,8 +52,74 @@ func (s *Server) Handler() http.Handler {
 
 	// Identity is attached once, here, so no handler has to remember to look
 	// at r.TLS -- and so the rule that it comes only from a verified chain
-	// lives in one place (D25).
-	return withClientIdentity(mux)
+	// lives in one place (D25). The gate on writing wraps it, because it reads
+	// what that middleware put there.
+	return withClientIdentity(s.requireIdentityToWrite(mux))
+}
+
+// enrolmentExempt are the two write endpoints that cannot require an identity,
+// because they are how one is obtained.
+//
+// POST /v1/enrol is authenticated by the token in its body -- a credential that
+// exists precisely for a caller with nothing else. POST /v1/enrol/renew does
+// its own check and is stricter than this one: it requires a certificate
+// whether or not the gate is armed.
+//
+// Minting a token is deliberately NOT here. It is the most consequential write
+// in the system -- it decides what a machine may call itself -- and a
+// deployment that has armed the gate should not let an unidentified caller
+// create identities. On the control plane's own machine `je identity join`
+// needs no token, so this cannot lock anybody out of their own deployment.
+var enrolmentExempt = map[string]bool{
+	"POST /v1/enrol":       true,
+	"POST /v1/enrol/renew": true,
+}
+
+// requireIdentityToWrite refuses a mutating request that proved nothing, once
+// this deployment has issued a client identity (D25).
+//
+// Gated by HTTP method rather than by a list of routes, which is the whole
+// reason it is written this way: a list is a thing somebody forgets to add to,
+// and the endpoint they forget is by definition the one nobody thought about.
+// Every write is covered the day it is added, and an exemption has to be made
+// deliberately and named above.
+//
+// Reads stay open. A certificate answers "who is this", and D25 does not ask
+// "who may look" -- N1 keeps RBAC out, and the CLI and the web client read
+// constantly with no identity to prove.
+func (s *Server) requireIdentityToWrite(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		default:
+			next.ServeHTTP(w, r)
+			return
+		}
+		// Matched on the path rather than the routed pattern: this runs before
+		// the mux, so there is no pattern yet. Both exempt paths are literal.
+		if enrolmentExempt[r.Method+" "+r.URL.Path] {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		err := s.engine.RequireIdentity(r.Context(), IdentityOf(r.Context()))
+		switch {
+		case errors.Is(err, engine.ErrUnidentified):
+			s.writeError(w, http.StatusUnauthorized,
+				"this control plane has issued a client identity, so a request that "+
+					"changes something has to present one.\n"+
+					"This connection presented no certificate.\n\n"+
+					"Get one for this machine:\n"+
+					"  je enrol <name> --client        (on the control plane)\n"+
+					"  je identity join --token <t> --ca-pin <fp> --addr <host:port>\n\n"+
+					"Beside the control plane itself, `je identity join` needs no token.")
+			return
+		case err != nil:
+			s.writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -118,7 +185,7 @@ func (s *Server) handleEmitEvent(w http.ResponseWriter, r *http.Request) {
 		Source:    req.Source,
 		Payload:   req.Payload,
 		DedupeKey: req.DedupeKey,
-		Actor:     req.Actor,
+		Actor:     actorOf(r, req.Actor),
 	})
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, err.Error())

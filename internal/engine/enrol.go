@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 
+	"slices"
+
 	"github.com/jdmorlan/job-engine/internal/ca"
 	"github.com/jdmorlan/job-engine/internal/store"
 )
@@ -31,17 +33,26 @@ func (e *Engine) Authority() (*ca.Authority, error) {
 	return e.authority, e.authorityErr
 }
 
-// MintEnrolment issues a one-time token for a named worker with fixed labels.
+// MintEnrolment issues a one-time token for a named identity with fixed labels
+// and roles.
 //
-// Labels are decided here rather than by the machine that redeems it. That is
-// the whole change: a capability is not an identity (D25), and a worker that
+// All three are decided here rather than by the machine that redeems it. That
+// is the whole change: a capability is not an identity (D25), and a worker that
 // advertises its own `macos` can grant itself whatever a label gates. Whoever
-// runs this decides what the machine is allowed to claim to be.
-func (e *Engine) MintEnrolment(ctx context.Context, name string, labels []string) (string, error) {
+// runs this decides what the machine is allowed to claim to be -- including
+// whether it is a client, which is the role that can mint further identities.
+func (e *Engine) MintEnrolment(ctx context.Context, name string, labels, roles []string) (string, error) {
 	if name == "" {
 		return "", errors.New("an enrolment needs a worker name")
 	}
-	if len(labels) == 0 {
+	if len(roles) == 0 {
+		roles = []string{store.RoleExecute}
+	}
+	// A client is a person at a terminal. It advertises no capability, so a
+	// label would be a capability nothing can act on -- and `default` in
+	// particular would put it in the pool `je waiting` counts as able to serve
+	// work it will never claim.
+	if len(labels) == 0 && !slices.Contains(roles, store.RoleClient) {
 		labels = []string{store.DefaultLabel}
 	}
 	// Created here so that a failure to write the CA key is reported by the
@@ -49,7 +60,7 @@ func (e *Engine) MintEnrolment(ctx context.Context, name string, labels []string
 	if _, err := e.Authority(); err != nil {
 		return "", fmt.Errorf("preparing the certificate authority: %w", err)
 	}
-	return e.tokens.Issue(name, labels)
+	return e.tokens.Issue(name, labels, roles)
 }
 
 // Enrol redeems a token and issues a certificate for the public key presented.
@@ -58,13 +69,16 @@ func (e *Engine) MintEnrolment(ctx context.Context, name string, labels []string
 // ordering that matters: registration afterwards can only report liveness,
 // because name and labels are already decided and the store refuses to let a
 // registration change them.
-func (e *Engine) Enrol(ctx context.Context, token string, publicKeyPEM []byte, asName string, asLabels []string) (certPEM, caPEM []byte, err error) {
+func (e *Engine) Enrol(ctx context.Context, token string, publicKeyPEM []byte, asName string, asLabels, asRoles []string) (certPEM, caPEM []byte, err error) {
 	grant, err := e.tokens.Redeem(token)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	name, labels := grant.Worker, grant.Labels
+	name, labels, roles := grant.Worker, grant.Labels, grant.Roles
+	if len(roles) == 0 {
+		roles = []string{store.RoleExecute}
+	}
 	if grant.SelfNamed {
 		// A bootstrap token from this machine's own data directory. The holder
 		// names itself, because the person running the worker is the person
@@ -74,7 +88,13 @@ func (e *Engine) Enrol(ctx context.Context, token string, publicKeyPEM []byte, a
 		if name == "" {
 			return nil, nil, errors.New("a worker enrolling locally must say what it is called")
 		}
-		if len(labels) == 0 {
+		// Roles too, for the same reason: this is the person who runs the
+		// control plane, so `je identity join` beside it must be able to ask
+		// for a client identity without minting a token to hand to itself.
+		if len(asRoles) > 0 {
+			roles = asRoles
+		}
+		if len(labels) == 0 && !slices.Contains(roles, store.RoleClient) {
 			labels = []string{store.DefaultLabel}
 		}
 	}
@@ -104,7 +124,7 @@ func (e *Engine) Enrol(ctx context.Context, token string, publicKeyPEM []byte, a
 		ID:           WorkerID(name),
 		Name:         name,
 		Labels:       labels,
-		Roles:        []string{store.RoleExecute},
+		Roles:        roles,
 		RegisteredAt: now,
 		EnrolledAt:   &now,
 		Fingerprint:  fingerprint,
@@ -113,7 +133,8 @@ func (e *Engine) Enrol(ctx context.Context, token string, publicKeyPEM []byte, a
 	}
 
 	e.recordWorkerEvent(ctx, EventWorkerEnrolled, store.Worker{Name: name, Labels: labels}, "")
-	e.log.Info("worker enrolled", "worker", name, "labels", labels, "fingerprint", fingerprint[:12])
+	e.log.Info("identity enrolled", "name", name, "roles", roles,
+		"labels", labels, "fingerprint", fingerprint[:12])
 	return certPEM, authority.CertPEM(), nil
 }
 
@@ -198,4 +219,49 @@ func (e *Engine) BootstrapToken() (string, error) {
 		return "", err
 	}
 	return e.tokens.IssueBootstrap()
+}
+
+// ErrUnidentified is a mutating request from a caller that proved nothing, on a
+// deployment that has issued a client identity (D25).
+var ErrUnidentified = errors.New("this request changes something and presented no identity")
+
+// RequireIdentity is the gate on writing.
+//
+// Reads are ungated and stay that way: a certificate answers "who is this", and
+// "who may look" is a question D25 explicitly does not ask -- N1 keeps RBAC
+// out, and the CLI and the web client have no identity to prove.
+//
+// Writing is different, and the rule is one sentence: once a deployment has
+// issued a client identity, a request that changes something must present one.
+// Not a role check -- any verified identity passes, because a worker holding a
+// certificate this authority signed is not an anonymous caller. The role only
+// decides when the gate arms.
+//
+// Armed by the deployment's own state rather than by configuration. `je enrol
+// --client` is the deliberate act, and until somebody performs it there is no
+// identity to require and refusing writes would mean nothing worked at all.
+func (e *Engine) RequireIdentity(ctx context.Context, identity string) error {
+	if identity != "" {
+		return nil
+	}
+	armed, err := e.IdentityRequired(ctx)
+	if err != nil {
+		// A failure to read the workers table must not become an open door.
+		// This is the one place where "cannot tell" has to mean "no".
+		return err
+	}
+	if !armed {
+		return nil
+	}
+	return ErrUnidentified
+}
+
+// IdentityRequired reports whether this deployment has armed the gate, which it
+// does by having issued a client identity.
+func (e *Engine) IdentityRequired(ctx context.Context) (bool, error) {
+	armed, err := e.store.AnyClientIdentity(ctx)
+	if err != nil {
+		return false, fmt.Errorf("checking whether an identity is required: %w", err)
+	}
+	return armed, nil
 }

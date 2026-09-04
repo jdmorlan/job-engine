@@ -52,6 +52,15 @@ type Grant struct {
 	Worker string
 	Labels []string
 
+	// Roles are what this identity is for: executing work, or being a person
+	// at a terminal. Fixed here for the same reason labels are -- a machine
+	// that could decide it was a client could decide it may mint identities.
+	//
+	// Empty means the caller's default, which the engine fills in. This package
+	// deliberately knows no role names: they are the store's vocabulary, and
+	// the token store's job is only to carry what it was told.
+	Roles []string
+
 	// SelfNamed means the holder chooses its own name and labels.
 	//
 	// True only for a bootstrap token, which lives in the control plane's data
@@ -71,7 +80,7 @@ func NewTokens() *Tokens { return &Tokens{issued: map[string]pending{}} }
 // advertising its own was the hole D25 names: declaring `macos` should not be
 // something a machine can decide for itself once capabilities gate anything.
 // Whoever mints the token decides what the machine is allowed to claim to be.
-func (t *Tokens) Issue(worker string, labels []string) (string, error) {
+func (t *Tokens) Issue(worker string, labels, roles []string) (string, error) {
 	if worker == "" {
 		return "", errors.New("an enrolment token needs a worker name")
 	}
@@ -88,6 +97,7 @@ func (t *Tokens) Issue(worker string, labels []string) (string, error) {
 		grant: Grant{
 			Worker: worker,
 			Labels: append([]string(nil), labels...),
+			Roles:  append([]string(nil), roles...),
 		},
 		expires: time.Now().Add(TokenLifetime),
 	}

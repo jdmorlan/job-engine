@@ -45,15 +45,26 @@ func runEvents(ctx context.Context, env *Env, args []string) error {
 		}
 
 		tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(tw, "ID\tWHEN\tTYPE\tSOURCE\tCAUSE\tPAYLOAD")
+		// ACTOR earns a column now that it is true rather than claimed. It is
+		// the verified name from the caller's certificate (D25), so "who asked
+		// for this run" is answerable from the timeline instead of being a
+		// value the requester chose for itself.
+		fmt.Fprintln(tw, "ID\tWHEN\tTYPE\tACTOR\tSOURCE\tCAUSE\tPAYLOAD")
 		for _, e := range events {
 			payload := string(e.Payload)
 			if payload == "" {
 				payload = "-"
 			}
-			fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\n",
-				e.ID, e.CreatedAt.Local().Format(time.DateTime), e.Type, e.Source,
-				causeOf(e), truncate(payload, 40))
+			actor := e.Actor
+			if actor == "" {
+				// The engine acting on its own behalf: a schedule firing, a
+				// chain advancing. Distinct from a person, and worth looking
+				// different from one.
+				actor = "-"
+			}
+			fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\t%s\n",
+				e.ID, e.CreatedAt.Local().Format(time.DateTime), e.Type, actor,
+				e.Source, causeOf(e), truncate(payload, 40))
 		}
 		return tw.Flush()
 	})

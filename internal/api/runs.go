@@ -24,6 +24,12 @@ func (s *Server) registerRuns(mux *http.ServeMux) {
 }
 
 // TriggerRequest is the body of POST /v1/runs.
+//
+// Actor is a fallback, not the answer. D7 uses it to tell a human intervention
+// from an automatic retry, and for that to mean anything it has to be true --
+// so when the connection carries a verified certificate, the identity in it
+// wins and this field is ignored (D25). A claim is only accepted from a caller
+// that had nothing better to offer, which after the gate arms is nobody.
 type TriggerRequest struct {
 	Job   string `json:"job"`
 	Actor string `json:"actor,omitempty"`
@@ -42,7 +48,8 @@ func (s *Server) handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	run, err := s.engine.TriggerRun(r.Context(), req.Job, engine.RunOptions{Actor: req.Actor})
+	run, err := s.engine.TriggerRun(r.Context(), req.Job,
+		engine.RunOptions{Actor: actorOf(r, req.Actor)})
 	switch {
 	case errors.Is(err, engine.ErrOverlapSkipped):
 		// 409: the request was well formed and the engine declined for a

@@ -22,11 +22,11 @@ func TestAnEnrolledWorkerCannotChooseItsOwnLabels(t *testing.T) {
 	ctx := context.Background()
 	e, _ := chainFixture(t, nil, nil)
 
-	token, err := e.MintEnrolment(ctx, "laptop", []string{"macos"})
+	token, err := e.MintEnrolment(ctx, "laptop", []string{"macos"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := e.Enrol(ctx, token, publicKeyPEM(t), "", nil); err != nil {
+	if _, _, err := e.Enrol(ctx, token, publicKeyPEM(t), "", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -80,11 +80,11 @@ func TestAnIssuedCertificateNamesTheEnrolledWorker(t *testing.T) {
 	ctx := context.Background()
 	e, _ := chainFixture(t, nil, nil)
 
-	token, err := e.MintEnrolment(ctx, "buildbox", nil)
+	token, err := e.MintEnrolment(ctx, "buildbox", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	certPEM, caPEM, err := e.Enrol(ctx, token, publicKeyPEM(t), "", nil)
+	certPEM, caPEM, err := e.Enrol(ctx, token, publicKeyPEM(t), "", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,14 +115,14 @@ func TestATokenCannotBeRedeemedTwice(t *testing.T) {
 	ctx := context.Background()
 	e, _ := chainFixture(t, nil, nil)
 
-	token, err := e.MintEnrolment(ctx, "once", nil)
+	token, err := e.MintEnrolment(ctx, "once", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := e.Enrol(ctx, token, publicKeyPEM(t), "", nil); err != nil {
+	if _, _, err := e.Enrol(ctx, token, publicKeyPEM(t), "", nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	_, _, err = e.Enrol(ctx, token, publicKeyPEM(t), "", nil)
+	_, _, err = e.Enrol(ctx, token, publicKeyPEM(t), "", nil, nil)
 	if err == nil {
 		t.Fatal("a token enrolled a second machine")
 	}
@@ -137,11 +137,11 @@ func TestEnrolmentIsRecordedAsAnEvent(t *testing.T) {
 	ctx := context.Background()
 	e, _ := chainFixture(t, nil, nil)
 
-	token, err := e.MintEnrolment(ctx, "recorded", nil)
+	token, err := e.MintEnrolment(ctx, "recorded", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := e.Enrol(ctx, token, publicKeyPEM(t), "", nil); err != nil {
+	if _, _, err := e.Enrol(ctx, token, publicKeyPEM(t), "", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 

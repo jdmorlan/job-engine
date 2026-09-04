@@ -46,3 +46,22 @@ func withClientIdentity(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
+
+// actorOf decides who is responsible for a request, preferring what was proved
+// over what was claimed (D7/D25).
+//
+// `RunOptions.Actor` is described as "the person responsible", and it used to
+// arrive in the request body -- which made it exactly the kind of assertion
+// D25 removed from a worker's name. A verified certificate's common name cannot
+// be asked for on somebody else's behalf, so when there is one it is the answer
+// and the body is not consulted.
+//
+// The claimed value survives only where nothing was proved. That combination is
+// reachable only before a deployment issues its first client identity; after
+// that the write never gets this far.
+func actorOf(r *http.Request, claimed string) string {
+	if name := IdentityOf(r.Context()); name != "" {
+		return name
+	}
+	return claimed
+}

@@ -358,14 +358,21 @@ func (s *Store) LabelsCovered(ctx context.Context, now time.Time, ttl time.Durat
 	return covered, nil
 }
 
-// The roles a worker may carry (F1, D20).
+// The roles an identity may carry (F1, D20, D25).
 //
-// Only execute is used today. receive is here because the phone case in F1 is
-// the reason `worker` is a role rather than an entity, and leaving the column
-// single-valued now would make that a migration later.
+// receive is here because the phone case in F1 is the reason `worker` is a role
+// rather than an entity, and leaving the column single-valued now would make
+// that a migration later.
+//
+// client is a person at a terminal rather than a machine that runs jobs, and it
+// is the one role that changes how the control plane behaves: the first client
+// identity a deployment issues is what turns on the requirement that a mutating
+// request prove who it is (D25). Before that there is nobody to be, and
+// refusing every write would only mean nothing worked.
 const (
 	RoleExecute = "execute"
 	RoleReceive = "receive"
+	RoleClient  = "client"
 )
 
 // EnrolWorker writes an identity before the worker has ever connected.
@@ -403,6 +410,41 @@ func (s *Store) EnrolWorker(ctx context.Context, w Worker) error {
 		return fmt.Errorf("enrolling worker: %w", err)
 	}
 	return nil
+}
+
+// AnyClientIdentity reports whether this deployment has ever issued a client
+// identity, which is what arms the requirement that mutations be identified
+// (D25).
+//
+// A property of the deployment rather than a setting, deliberately. There is no
+// flag to turn this on and no file to forget: running `je enrol --client` is
+// the act, and it is one somebody does on purpose. The alternative -- a config
+// value -- is a thing that can be true while no certificate exists, which is
+// the state where nobody can do anything.
+//
+// Enrolled rows only. A row that merely registered by claiming a name is not an
+// identity, and counting one would arm the gate on the strength of a claim.
+func (s *Store) AnyClientIdentity(ctx context.Context) (bool, error) {
+	rows, err := s.state.QueryContext(ctx,
+		`SELECT roles FROM workers WHERE enrolled_at IS NOT NULL`)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return false, err
+		}
+		var roles []string
+		if err := json.Unmarshal([]byte(raw), &roles); err != nil {
+			continue // a row we cannot read is not evidence of a client
+		}
+		if slices.Contains(roles, RoleClient) {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 // RecordFingerprint updates which certificate an identity presents.

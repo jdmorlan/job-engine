@@ -9,11 +9,13 @@ import (
 	"encoding/pem"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 
 	"crypto/tls"
 	"github.com/jdmorlan/job-engine/internal/api"
 	"github.com/jdmorlan/job-engine/internal/ca"
+	"github.com/jdmorlan/job-engine/internal/store"
 	"io"
 	"net/http"
 	"time"
@@ -42,12 +44,25 @@ func runEnrol(ctx context.Context, env *Env, args []string) error {
 	cmd := commands["enrol"]
 	fs := newFlagSet(cmd, env)
 	labels := fs.String("labels", "", "comma-separated capabilities this worker may advertise")
+	client := fs.Bool("client", false, "enrol a person at a terminal rather than a worker")
 	positional, err := parseArgs(fs, args)
 	if err != nil {
 		return err
 	}
 	if len(positional) != 1 {
-		return usagef("usage: je enrol <worker-name> [--labels a,b]")
+		return usagef("usage: je enrol <name> [--labels a,b] [--client]")
+	}
+
+	// Both is a real thing and worth allowing: a laptop that runs `macos` jobs
+	// and is also where somebody types `je run` is one machine with one
+	// certificate, and making it enrol twice would give it two identities and
+	// make "who did this" depend on which command was running.
+	var roles []string
+	if *client {
+		roles = append(roles, store.RoleClient)
+	}
+	if *labels != "" || !*client {
+		roles = append(roles, store.RoleExecute)
 	}
 
 	return withClient(ctx, env, func(ctx context.Context, c *Client) error {
@@ -55,22 +70,48 @@ func runEnrol(ctx context.Context, env *Env, args []string) error {
 		defer cancel()
 
 		out, err := c.MintEnrolment(reqCtx, api.MintEnrolmentRequest{
-			Name: positional[0], Labels: splitLabels(*labels),
+			Name: positional[0], Labels: splitLabels(*labels), Roles: roles,
 		})
 		if err != nil {
 			return err
 		}
 
 		fmt.Fprintf(env.Stdout, "token    %s\n", out.Token)
-		fmt.Fprintf(env.Stdout, "worker   %s\n", out.Name)
-		fmt.Fprintf(env.Stdout, "labels   %s\n", strings.Join(out.Labels, ", "))
+		fmt.Fprintf(env.Stdout, "name     %s\n", out.Name)
+		fmt.Fprintf(env.Stdout, "roles    %s\n", strings.Join(out.Roles, ", "))
+		if len(out.Labels) > 0 {
+			fmt.Fprintf(env.Stdout, "labels   %s\n", strings.Join(out.Labels, ", "))
+		}
 		fmt.Fprintf(env.Stdout, "expires  in %s\n\n", out.Expires)
+
+		// The command to run is the one that matches what was minted. A client
+		// that was told to run `je worker run` would start a worker, which is
+		// not what it is for.
+		redeem := "je worker run"
+		if !slices.Contains(out.Roles, store.RoleExecute) {
+			redeem = "je identity join"
+		}
 		fmt.Fprintf(env.Stdout,
-			"On that machine:\n  je worker run --token %s \\\n    --addr %s --ca-pin %s\n\n",
-			out.Token, c.Addr(), out.CAFingerprint)
+			"On that machine:\n  %s --token %s \\\n    --addr %s --ca-pin %s\n\n",
+			redeem, out.Token, c.Addr(), out.CAFingerprint)
 		fmt.Fprintln(env.Stdout,
 			"Shown once. The control plane keeps a hash, so this cannot be printed again --\n"+
 				"if it is lost, issue another one.")
+
+		// The consequence, said while it can still be reconsidered. This is the
+		// moment a deployment stops accepting anonymous writes, and finding
+		// that out from a later `je run` that fails would be exactly the 3am
+		// surprise P1 exists to prevent.
+		if out.ArmsIdentity {
+			fmt.Fprintf(env.Stderr,
+				"\nThis is the first client identity on this control plane.\n"+
+					"Once it is redeemed, every request that CHANGES something must present\n"+
+					"a certificate -- `je run`, `je secret set`, `je source add`, and this\n"+
+					"command. Reading is unaffected.\n\n"+
+					"Machines that will still need to write:\n"+
+					"  beside the control plane   je identity join        (no token needed)\n"+
+					"  anywhere else              je enrol <name> --client, then redeem it\n")
+		}
 		return nil
 	})
 }
@@ -166,7 +207,7 @@ func fetchAuthority(ctx context.Context, addr, pin string) ([]byte, error) {
 // Skipped silently when there is nothing to do. No token file means the control
 // plane is somewhere else, and a worker there enrols with a token and a pin
 // instead; an identity already present means there is nothing to bootstrap.
-func autoEnrol(ctx context.Context, env *Env, target, name string, labels []string) error {
+func autoEnrol(ctx context.Context, env *Env, target, name string, labels, roles []string) error {
 	if _, err := os.Stat(env.Layout.IdentityCert()); err == nil {
 		return nil
 	}
@@ -191,14 +232,20 @@ func autoEnrol(ctx context.Context, env *Env, target, name string, labels []stri
 	if err != nil {
 		return err
 	}
-	return enrolWorkerAs(ctx, env, c, strings.TrimSpace(string(token)), name, labels)
+	return enrolWorkerAs(ctx, env, c, strings.TrimSpace(string(token)), name, labels, roles)
 }
 
 func enrolWorker(ctx context.Context, env *Env, c *Client, token string) error {
-	return enrolWorkerAs(ctx, env, c, token, "", nil)
+	return enrolWorkerAs(ctx, env, c, token, "", nil, nil)
 }
 
-func enrolWorkerAs(ctx context.Context, env *Env, c *Client, token, name string, labels []string) error {
+// enrolWorkerAs redeems a token and writes the identity it is issued.
+//
+// name, labels and roles are honoured only for a bootstrap token, where the
+// holder is on the control plane's own machine and names itself. For a minted
+// token the control plane ignores all three, because what the identity may be
+// was decided when the token was issued (D25).
+func enrolWorkerAs(ctx context.Context, env *Env, c *Client, token, name string, labels, roles []string) error {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return err
@@ -212,7 +259,8 @@ func enrolWorkerAs(ctx context.Context, env *Env, c *Client, token, name string,
 	reqCtx, cancel := withTimeout(ctx)
 	defer cancel()
 	out, err := c.Enrol(reqCtx, api.EnrolRequest{
-		Token: token, PublicKey: string(pubPEM), Name: name, Labels: labels,
+		Token: token, PublicKey: string(pubPEM),
+		Name: name, Labels: labels, Roles: roles,
 	})
 	if err != nil {
 		return err

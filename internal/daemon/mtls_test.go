@@ -431,3 +431,207 @@ func TestThereIsNoPlaintextListener(t *testing.T) {
 		t.Errorf("plaintext request answered %s: %s", resp.Status, body)
 	}
 }
+
+// Writing requires an identity once a deployment has issued a client one, and
+// reading never does (D25).
+//
+// The two halves are one test because the interesting property is the
+// difference between them: a rule that refused everything would pass half of
+// this and be useless, and one that refused nothing would pass the other half.
+func TestWritingRequiresAnIdentityOnceAClientExists(t *testing.T) {
+	base, layout := startTLSDaemon(t)
+	anonymous := insecureClient()
+
+	// Before any client identity exists there is nobody to be, so an
+	// unidentified write is allowed -- otherwise a fresh deployment could do
+	// nothing at all.
+	if code := postSync(t, anonymous, base); code == http.StatusUnauthorized {
+		t.Fatal("an unidentified write was refused before any client identity existed")
+	}
+
+	enrolClient(t, base, layout, "jays-laptop")
+
+	if code := postSync(t, anonymous, base); code != http.StatusUnauthorized {
+		t.Errorf("unidentified write = %d, want 401 once a client identity exists", code)
+	}
+	resp, err := anonymous.Get(base + "/v1/health")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("read = %d, want 200 -- arming the gate must not close reading",
+			resp.StatusCode)
+	}
+}
+
+// The gate is on the HTTP method, so an endpoint added later is covered without
+// anybody remembering to add it to a list.
+func TestEveryWriteMethodIsGated(t *testing.T) {
+	base, layout := startTLSDaemon(t)
+	enrolClient(t, base, layout, "jays-laptop")
+
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodPost, "/v1/runs"},
+		{http.MethodPost, "/v1/events"},
+		{http.MethodPost, "/v1/sources"},
+		{http.MethodDelete, "/v1/sources/anything"},
+		{http.MethodPut, "/v1/secrets/TOKEN"},
+		{http.MethodDelete, "/v1/secrets/TOKEN"},
+		// Minting is deliberately gated: it decides what a machine may call
+		// itself, and is the one write nobody unidentified should perform.
+		{http.MethodPost, "/v1/enrol/tokens"},
+	} {
+		req, err := http.NewRequest(tc.method, base+tc.path, strings.NewReader("{}"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := insecureClient().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("%s %s = %d, want 401", tc.method, tc.path, resp.StatusCode)
+		}
+	}
+
+	// And the exemption still holds: redeeming a token is how a caller with no
+	// identity obtains one, so it cannot require having one.
+	resp, err := insecureClient().Post(base+"/v1/enrol", "application/json",
+		strings.NewReader(`{"token":"not-a-real-token","public_key":""}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized {
+		t.Error("redeeming a token was gated on already having an identity")
+	}
+}
+
+// An actor is what the certificate says, not what the request body asks for.
+//
+// This is the D7 half of the item: "the person responsible" is only worth
+// recording if it cannot be chosen by whoever is being recorded.
+func TestTheActorComesFromTheCertificate(t *testing.T) {
+	base, layout := startTLSDaemon(t)
+	client := enrolClient(t, base, layout, "jays-laptop")
+
+	write(t, filepath.Join(layout.Jobs, "hello.yaml"),
+		"command: [\"/bin/sh\", \"-c\", \"true\"]\n", 0o644)
+	if code := postSync(t, client, base); code != http.StatusOK {
+		t.Fatalf("sync = %d", code)
+	}
+
+	// The body claims somebody else entirely. It must not be believed.
+	body, _ := json.Marshal(api.TriggerRequest{Job: "hello", Actor: "somebody-else"})
+	resp, err := client.Post(base+"/v1/runs", "application/json", strings.NewReader(string(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("trigger = %d, want 202", resp.StatusCode)
+	}
+
+	var events struct {
+		Events []struct {
+			Type  string `json:"type"`
+			Actor string `json:"actor"`
+		} `json:"events"`
+	}
+	getInto(t, client, base+"/v1/events?limit=50", &events)
+
+	var found bool
+	for _, e := range events.Events {
+		if e.Type != "run.requested" {
+			continue
+		}
+		found = true
+		if e.Actor != "jays-laptop" {
+			t.Errorf("actor = %q, want %q -- the body's claim was believed",
+				e.Actor, "jays-laptop")
+		}
+	}
+	if !found {
+		t.Fatal("no run.requested event was recorded")
+	}
+}
+
+// enrolClient enrols an identity carrying the client role and returns an HTTP
+// client presenting it. It writes into its own directory, so the control
+// plane's data directory is left as a control plane's.
+func enrolClient(t *testing.T, base string, layout paths.Layout, name string) *http.Client {
+	t.Helper()
+
+	body, _ := json.Marshal(api.MintEnrolmentRequest{Name: name, Roles: []string{store.RoleClient}})
+	resp, err := insecureClient().Post(base+"/v1/enrol/tokens", "application/json",
+		strings.NewReader(string(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mint api.MintEnrolmentResponse
+	if err := json.NewDecoder(resp.Body).Decode(&mint); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if !mint.ArmsIdentity {
+		t.Error("minting the first client identity did not report that it arms the gate")
+	}
+
+	key, pubPEM := keypairPEM(t)
+	body, _ = json.Marshal(api.EnrolRequest{Token: mint.Token, PublicKey: pubPEM})
+	resp, err = insecureClient().Post(base+"/v1/enrol", "application/json",
+		strings.NewReader(string(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var enrolled api.EnrolResponse
+	if err := json.NewDecoder(resp.Body).Decode(&enrolled); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if enrolled.Certificate == "" {
+		t.Fatal("client enrolment returned no certificate")
+	}
+
+	cert, err := tls.X509KeyPair([]byte(enrolled.Certificate), []byte(key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM([]byte(enrolled.CA)) {
+		t.Fatal("the returned authority is not a certificate")
+	}
+	return &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			RootCAs:      pool,
+			MinVersion:   tls.VersionTLS12,
+		}},
+	}
+}
+
+func postSync(t *testing.T, c *http.Client, base string) int {
+	t.Helper()
+	resp, err := c.Post(base+"/v1/sync", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode
+}
+
+func getInto(t *testing.T, c *http.Client, url string, into any) {
+	t.Helper()
+	resp, err := c.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if err := json.NewDecoder(resp.Body).Decode(into); err != nil {
+		t.Fatal(err)
+	}
+}

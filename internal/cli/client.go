@@ -67,10 +67,22 @@ func Connect(l paths.Layout) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	transport := &http.Transport{TLSClientConfig: &tls.Config{
-		RootCAs:    pool,
-		MinVersion: tls.VersionTLS12,
-	}}
+	tlsConfig := &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
+
+	// Present this machine's identity when it has one. The CLI used to present
+	// nothing on the grounds that reads need no identity, which is still true --
+	// but writes do now, and `je run` is a write (D25).
+	//
+	// The same files a worker uses, because a machine has one identity whatever
+	// roles it carries: a laptop enrolled as both a client and a `macos` worker
+	// is one certificate, and issuing it two would make "who did this" depend on
+	// which command was running.
+	if cert, err := identityKeyPair(l); err == nil {
+		tlsConfig.Certificates = []tls.Certificate{cert}
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
+	transport := &http.Transport{TLSClientConfig: tlsConfig}
 
 	base, err := url.Parse("https://" + dialable(addr))
 	if err != nil {
@@ -177,6 +189,25 @@ func authorityPool(l paths.Layout) (*x509.CertPool, error) {
 		return nil, fmt.Errorf("%s is not a certificate", path)
 	}
 	return pool, nil
+}
+
+// identityKeyPair loads this machine's issued certificate, if it has one.
+//
+// A missing file is not an error the caller has to distinguish by string: it
+// returns something os.IsNotExist recognises, because "this machine has no
+// identity" is an ordinary state that stays legal for reading.
+func identityKeyPair(l paths.Layout) (tls.Certificate, error) {
+	certPath, keyPath := l.IdentityCert(), l.IdentityKey()
+	for _, path := range []string{certPath, keyPath} {
+		if _, err := os.Stat(path); err != nil {
+			return tls.Certificate{}, err
+		}
+	}
+	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("reading this machine's identity: %w", err)
+	}
+	return cert, nil
 }
 
 // DialVerified connects to a control plane verified against a CA the caller

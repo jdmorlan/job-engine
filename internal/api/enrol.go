@@ -3,8 +3,10 @@ package api
 import (
 	"errors"
 	"net/http"
+	"slices"
 
 	"github.com/jdmorlan/job-engine/internal/ca"
+	"github.com/jdmorlan/job-engine/internal/store"
 )
 
 // registerEnrolment wires the identity endpoints (D25 step 5).
@@ -20,6 +22,10 @@ func (s *Server) registerEnrolment(mux *http.ServeMux) {
 type MintEnrolmentRequest struct {
 	Name   string   `json:"name"`
 	Labels []string `json:"labels,omitempty"`
+
+	// Roles is what the identity is for. Empty means a worker, which is what
+	// every enrolment was before clients existed (D25).
+	Roles []string `json:"roles,omitempty"`
 }
 
 // MintEnrolmentResponse carries the token itself, which is the only time it
@@ -28,7 +34,14 @@ type MintEnrolmentResponse struct {
 	Token   string   `json:"token"`
 	Name    string   `json:"name"`
 	Labels  []string `json:"labels"`
+	Roles   []string `json:"roles"`
 	Expires string   `json:"expires_in"`
+
+	// ArmsIdentity reports that redeeming this token will make identity
+	// mandatory for mutations on this deployment, because it is the first
+	// client identity. Said at the moment it can be acted on rather than
+	// discovered later by a command that stops working (D25/P1).
+	ArmsIdentity bool `json:"arms_identity,omitempty"`
 
 	// CAFingerprint is the SHA-256 of the authority's certificate, so the
 	// machine redeeming this token can verify the control plane *before*
@@ -45,14 +58,26 @@ func (s *Server) handleMintEnrolment(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(s, w, r, &req) {
 		return
 	}
-	token, err := s.engine.MintEnrolment(r.Context(), req.Name, req.Labels)
+	// Asked before minting, so that "this is the first one" is true of the
+	// state the caller is changing rather than of the state after it.
+	armed, err := s.engine.IdentityRequired(r.Context())
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	roles := req.Roles
+	if len(roles) == 0 {
+		roles = []string{store.RoleExecute}
+	}
+	token, err := s.engine.MintEnrolment(r.Context(), req.Name, req.Labels, roles)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	labels := req.Labels
-	if len(labels) == 0 {
-		labels = []string{"default"}
+	if len(labels) == 0 && !slices.Contains(roles, store.RoleClient) {
+		labels = []string{store.DefaultLabel}
 	}
 	authority, err := s.engine.Authority()
 	if err != nil {
@@ -60,9 +85,10 @@ func (s *Server) handleMintEnrolment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, MintEnrolmentResponse{
-		Token: token, Name: req.Name, Labels: labels,
+		Token: token, Name: req.Name, Labels: labels, Roles: roles,
 		Expires:       ca.TokenLifetime.String(),
 		CAFingerprint: ca.FingerprintPEM(authority.CertPEM()),
+		ArmsIdentity:  !armed && slices.Contains(roles, store.RoleClient),
 	})
 }
 
@@ -78,6 +104,7 @@ type EnrolRequest struct {
 	// was decided when the token was minted.
 	Name   string   `json:"name,omitempty"`
 	Labels []string `json:"labels,omitempty"`
+	Roles  []string `json:"roles,omitempty"`
 }
 
 // EnrolResponse is the issued identity and the authority to verify the control
@@ -92,7 +119,7 @@ func (s *Server) handleEnrol(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(s, w, r, &req) {
 		return
 	}
-	cert, caPEM, err := s.engine.Enrol(r.Context(), req.Token, []byte(req.PublicKey), req.Name, req.Labels)
+	cert, caPEM, err := s.engine.Enrol(r.Context(), req.Token, []byte(req.PublicKey), req.Name, req.Labels, req.Roles)
 	switch {
 	case errors.Is(err, ca.ErrBadToken):
 		// One status and one sentence for expired, used and never-issued

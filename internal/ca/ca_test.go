@@ -97,7 +97,7 @@ func TestAForeignCertificateDoesNotVerify(t *testing.T) {
 func TestATokenEnrolsExactlyOnce(t *testing.T) {
 	tokens := ca.NewTokens()
 
-	token, err := tokens.Issue("macbook", []string{"macos"})
+	token, err := tokens.Issue("macbook", []string{"macos"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +125,7 @@ func TestATokenEnrolsExactlyOnce(t *testing.T) {
 // guesses were close.
 func TestEveryBadTokenFailsIdentically(t *testing.T) {
 	tokens := ca.NewTokens()
-	used, err := tokens.Issue("w", nil)
+	used, err := tokens.Issue("w", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +148,7 @@ func TestEveryBadTokenFailsIdentically(t *testing.T) {
 // persistence bug cannot hand one out.
 func TestTokensAreNotStoredInUsableForm(t *testing.T) {
 	tokens := ca.NewTokens()
-	token, err := tokens.Issue("w", nil)
+	token, err := tokens.Issue("w", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -289,7 +289,7 @@ func TestABootstrapTokenDoesNotWeakenOtherTokens(t *testing.T) {
 	}
 
 	// And a named token minted alongside it still fixes its own identity.
-	named, err := tokens.Issue("fixed", []string{"macos"})
+	named, err := tokens.Issue("fixed", []string{"macos"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

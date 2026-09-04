@@ -92,7 +92,7 @@ func runQuickstart(ctx context.Context, env *Env, args []string) error {
 	// worker without an identity still had a plaintext socket to fall back to;
 	// with the flip there is nothing behind it, so carrying on would print
 	// "one worker attached" and then fail every claim.
-	if err := autoEnrol(ctx, env, dialable(info.Address), defaultWorkerName(), splitLabels(*labels)); err != nil {
+	if err := autoEnrol(ctx, env, dialable(info.Address), defaultWorkerName(), splitLabels(*labels), nil); err != nil {
 		cancel()
 		<-planeDone
 		return fmt.Errorf("enrolling the worker this command starts: %w", err)
