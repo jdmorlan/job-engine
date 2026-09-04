@@ -21,12 +21,9 @@ func init() {
 			"web client, container or native service -- and deletes the state they\n" +
 			"accumulated: the databases, the certificate authority, this machine's\n" +
 			"identity and keys, and the docker volumes holding them.\n\n" +
-			"Job definitions belong in a repository (D22), and this treats them that\n" +
-			"way: a jobs directory that is committed and pushed is removed like\n" +
-			"anything else, because `je source sync` brings it back. One that is not\n" +
-			"-- no repository, uncommitted changes, nothing pushed -- is kept, and\n" +
-			"the reason is printed, because that reason is also the thing worth\n" +
-			"fixing. --jobs removes it regardless.\n\n" +
+			"It leaves the jobs directory alone unless you pass --jobs. Definitions\n" +
+			"belong in a repository of yours and reach the engine as a registered\n" +
+			"source (D22), so they are not this command's business either way.\n\n" +
 			"It also does not touch a control plane somewhere else, and cannot: a\n" +
 			"reset is a local operation by nature. Against a cluster you would be\n" +
 			"deleting a namespace, which is not this tool's job.\n\n" +
@@ -199,25 +196,19 @@ func planReset(ctx context.Context, env *Env, alsoJobs bool) (plan []resetStep, 
 			do:       func(ctx context.Context, env *Env) error { return os.RemoveAll(path) },
 		})
 	}
-	// The definitions. Removed when they can be got back, kept when they
-	// cannot -- see jobsdir.go for why that is the question rather than "are
-	// these job files".
-	if _, err := os.Stat(env.Layout.Jobs); err == nil {
-		state := definitionsRecoverable(env.Layout.Jobs)
-		switch {
-		case alsoJobs:
+	// Definitions are not touched, and this does not reason about them. They
+	// belong in a repository of yours and reach the engine as a registered
+	// source (D22); a jobs directory inside the data directory is a leftover
+	// convenience, not something this command should have opinions about.
+	if alsoJobs {
+		if _, err := os.Stat(env.Layout.Jobs); err == nil {
 			plan = append(plan, resetStep{
 				describe: env.Layout.Jobs + " (asked for with --jobs)",
 				do:       func(ctx context.Context, env *Env) error { return os.RemoveAll(env.Layout.Jobs) },
 			})
-		case state.recoverable:
-			plan = append(plan, resetStep{
-				describe: env.Layout.Jobs + " (in a repository; `je source sync` brings it back)",
-				do:       func(ctx context.Context, env *Env) error { return os.RemoveAll(env.Layout.Jobs) },
-			})
-		default:
-			kept = state.describe(env.Layout.Jobs) + "\n      --jobs removes it anyway."
 		}
+	} else if entries, err := os.ReadDir(env.Layout.Jobs); err == nil && len(entries) > 0 {
+		kept = fmt.Sprintf("Kept: %s -- --jobs removes it too.", env.Layout.Jobs)
 	}
 	return plan, skipped, kept
 }

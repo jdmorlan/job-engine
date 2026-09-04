@@ -3677,49 +3677,41 @@ worker" are all reachable over a channel that already exists and is
 authenticated. Nothing about that is blocked; it simply is not built. It is the
 obvious next item, and it is what makes `je workers` more than a status board.
 
-### Definitions belong in a repository, and the tool should say so
+### Definitions belong in a repository -- and the engine does not manage one
 
-> *"Why does it need to explicitly keep job definitions intact? The goal with
-> job definitions is that they would be git repos... I think it's important that
-> we really push that design, that you don't want just one off jobs floating
-> around, you want them in repos. With secret management, and possibly other
-> features coming, having jobs in a repo is pretty important."*
+> *"Why is the core of je caring about the status of a git repo? I had said it
+> would be nice if the CLI could modify secrets or other future things on a
+> repo, but not that it was managing the repo full scale. If I have job
+> definitions, those should be outside of any file folders that je manages."*
 
-**Adopted, and the reset behaviour was the tell.** `je reset` kept the jobs
-directory unconditionally, which quietly asserted the opposite of D22: that
-definitions are precious *here*, so this is the one place the engine must never
-touch. If they are in a repository they are not precious here at all -- a
-checkout is a cache -- and refusing to remove one is the tool treating a
-recoverable directory as irreplaceable.
+**Two separate things, and the first attempt conflated them.**
 
-So it asks a better question: **can this be got back?** Recoverable means
-committed *and* pushed, which is stricter than it first looks -- a clean
-checkout with no remote is a single copy that happens to have a `.git`
-directory, and a repository one commit ahead of its upstream is a directory
-whose newest work exists nowhere else. A check that stopped at "is it a git
-repository" would call both safe, which is the most expensive way to be wrong:
-it looks careful and loses the work anyway.
+`je reset` kept the jobs directory unconditionally, which looked like a special
+case worth removing. The fix built for it asked git whether the tree was
+committed and pushed, and used the answer to decide whether the directory could
+be deleted -- plus a nudge on `je source` and a `git init` inside `je init`.
+That is the engine managing repositories, which is not what was asked for and
+is not its business. It is reverted: `internal/cli/jobsdir.go` is gone, `je
+init` writes a tree and runs no git, and `je source` says nothing about it.
 
-**The answer doubles as the argument.** A directory that cannot be recovered is
-one that is not in a repository yet, so the sentence explaining why it was kept
-is the same sentence explaining what to fix. That is the push, and it lands at
-the two moments somebody is thinking about it: `je reset`, and `je source` --
-the listing whose whole subject is where definitions come from.
+**The one place the CLI touches git stays**, because it was asked for
+specifically and is narrow: `je secret set --source` and `je secret recipients
+add` edit a secrets file inside a repository you own and offer to commit it.
+That is the CLI helping with a file, not managing a repository.
 
-**`je init` now initialises the repository rather than suggesting it.** `git
-init` was a line in its next-steps list, which was the wrong shape: everything
-this project wants a source to be -- travelling to a worker as a tree, carrying
-secrets encrypted to named machines (D25), changing by a diff somebody reviews
-(D23) -- assumes a repository. A command called `init` that leaves you without
-one has not finished. It commits the tree it just wrote, and says the remaining
-half out loud: until there is a remote, this disk is still the only copy.
+**The real point was upstream of all of it.** The question is not "is
+`<data>/jobs` a repository", it is why definitions are inside a directory the
+engine owns at all. `je demo` already shows the shape that works: the examples
+live in `demo/` in this repository and are registered as a source with a
+subpath, exactly as somebody's own jobs in their own repository would be. The
+built-in `local` source pointing at `<data>/jobs` is the leftover, and it is the
+only reason a reset ever had a question to ask about definitions.
 
-**What this does not do is forbid the local directory.** `local` stays the
-built-in source, because registering nothing should still give somebody
-somewhere to put a first job file, and a tool that demanded a git remote before
-it would run anything would be insufferable. The position is that one-off jobs
-are a starting point rather than a destination, and the tool should keep saying
-so rather than either enforcing it or going quiet.
+**Open:** whether `local` is removed outright -- every deployment registering a
+source, which is what `demo` already does -- or moved so that it points
+somewhere the engine does not otherwise manage. `quickstart`, `demo`, `je new`
+and the compose and install mounts all assume `<data>/jobs` today, so it is a
+real change rather than a rename, and it is a breaking one so soon after v0.5.0.
 
 **The second gap is `upgrade` for a split deployment.** It now handles every
 component on the machine it runs on, which is the whole answer for one box and
