@@ -17,7 +17,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           # Tags and full history, so release notes can be generated from the
-          # log rather than from a hand-maintained file that drifts.
+          # log when there is no per-tag notes file to use instead.
           fetch-depth: 0
 
       - uses: actions/setup-go@v5
@@ -142,12 +142,32 @@ jobs:
             -t "$IMAGE:latest" \
             --push .
 
+      # Notes come from docs/releases/<tag>.md when that file exists, and from
+      # the log otherwise.
+      #
+      # This is not the hand-maintained changelog the checkout step warns about.
+      # A CHANGELOG.md drifts because it describes a moving target; a file named
+      # for one tag describes a release that has already happened and is never
+      # edited again. What it buys is the thing a log cannot generate: the
+      # upgrade order for a breaking change, which is exactly the release where
+      # a list of commit subjects is least useful.
       - name: publish
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ github.ref_name }}
         run: |
-          gh release create "$VERSION" \
-            --title "$VERSION" \
-            --generate-notes \
-            dist/*.tar.gz dist/checksums.txt
+          set -eu
+          notes="docs/releases/${VERSION}.md"
+          if [ -f "$notes" ]; then
+            echo "using $notes"
+            gh release create "$VERSION" \
+              --title "$VERSION" \
+              --notes-file "$notes" \
+              dist/*.tar.gz dist/checksums.txt
+          else
+            echo "no $notes; generating notes from the log"
+            gh release create "$VERSION" \
+              --title "$VERSION" \
+              --generate-notes \
+              dist/*.tar.gz dist/checksums.txt
+          fi
