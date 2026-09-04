@@ -82,3 +82,49 @@ func TestTheAuthorityComesOutOfTheContainer(t *testing.T) {
 		t.Errorf("token = %q, want a single trimmed value", token)
 	}
 }
+
+// A reset must not remove a deployment that belongs to a different data
+// directory.
+//
+// The first run of `je reset` in a scratch directory listed the machine's real
+// containers and volume for deletion, because a container is global to the
+// machine and a data directory is not. That is the mistake worth a permanent
+// test: it is silent, it looks like the command working, and what it costs is a
+// database.
+func TestResetLeavesAnotherDataDirectorysContainerAlone(t *testing.T) {
+	requireDocker(t)
+
+	name := containerName("worker")
+	run(t, "docker", "rm", "--force", name)
+	t.Cleanup(func() { run(t, "docker", "rm", "--force", name) })
+
+	mine, theirs := t.TempDir(), t.TempDir()
+	if out, err := exec.Command("docker", "create", "--name", name,
+		"--label", ownerLabel+"="+theirs,
+		"alpine", "true").CombinedOutput(); err != nil {
+		t.Skipf("cannot create a fixture container: %s", out)
+	}
+
+	ctx := context.Background()
+	if owned, observed := containerBelongsTo(ctx, name, mine); owned {
+		t.Errorf("a container labelled for %s was claimed by %s (%s)", theirs, mine, observed)
+	}
+	if owned, _ := containerBelongsTo(ctx, name, theirs); !owned {
+		t.Errorf("a container labelled for %s was not claimed by it", theirs)
+	}
+
+	// And an unlabelled container is claimed by the data directory whose files
+	// it mounts, which is how deployments installed before the label are found.
+	run(t, "docker", "rm", "--force", name)
+	if out, err := exec.Command("docker", "create", "--name", name,
+		"--volume", theirs+":/var/lib/je/jobs:ro",
+		"alpine", "true").CombinedOutput(); err != nil {
+		t.Skipf("cannot create a fixture container: %s", out)
+	}
+	if owned, _ := containerBelongsTo(ctx, name, theirs); !owned {
+		t.Errorf("a container mounting %s was not claimed by it", theirs)
+	}
+	if owned, _ := containerBelongsTo(ctx, name, mine); owned {
+		t.Errorf("a container mounting %s was claimed by %s", theirs, mine)
+	}
+}

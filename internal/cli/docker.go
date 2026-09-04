@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -86,6 +87,9 @@ type dockerSpec struct {
 	env       []string
 	network   string
 
+	// owner is the data directory this container belongs to.
+	owner string
+
 	// cmd is the whole trailing command, when it is known exactly rather than
 	// assembled. Set only by inspectContainer, which reads what a container is
 	// actually running: an upgrade must reproduce the command that is there,
@@ -102,6 +106,14 @@ func (d dockerSpec) argv() []string {
 		// `unless-stopped` rather than `always` so that a deliberate
 		// `docker stop` stays stopped.
 		"--restart", "unless-stopped",
+	}
+	if d.owner != "" {
+		// Which data directory this container belongs to. A container is
+		// machine-global -- there is one `je-control-plane` -- while a data
+		// directory is not, so without this a command run in one data directory
+		// cannot tell whether a container is its own or somebody else's. `je
+		// reset` is the command where guessing wrong is expensive.
+		argv = append(argv, "--label", ownerLabel+"="+d.owner)
 	}
 	for _, p := range d.ports {
 		argv = append(argv, "--publish", p)
@@ -514,4 +526,82 @@ func singleFileFromTar(archive []byte) (string, error) {
 		}
 		return string(body), nil
 	}
+}
+
+// ownerLabel records which data directory a container was installed from.
+const ownerLabel = "io.github.jdmorlan.je.data-dir"
+
+// containerBelongsTo reports whether a container is this data directory's, and
+// what was observed either way.
+//
+// Two signals, because the label did not always exist. A container this version
+// installed carries it. An older one is claimed by the data directory whose
+// files it mounts -- a control plane binds <data>/jobs, so a bind source under
+// the directory in question settles it.
+//
+// Anything else is "not mine", which is the answer that keeps `je reset` from
+// removing somebody else's deployment. Being wrong in that direction leaves a
+// container running; being wrong in the other deletes a database.
+func containerBelongsTo(ctx context.Context, name, dataDir string) (bool, string) {
+	out, err := exec.CommandContext(ctx, "docker", "inspect",
+		"--format", "{{index .Config.Labels \""+ownerLabel+"\"}}", name).Output()
+	if err == nil {
+		if label := strings.TrimSpace(string(out)); label != "" && label != "<no value>" {
+			return sameDir(label, dataDir), "installed from " + label
+		}
+	}
+
+	raw, err := exec.CommandContext(ctx, "docker", "inspect",
+		"--format", "{{json .HostConfig.Binds}}", name).Output()
+	if err != nil {
+		return false, "not something this data directory installed"
+	}
+	var binds []string
+	if json.Unmarshal(raw, &binds) != nil {
+		return false, "not something this data directory installed"
+	}
+	for _, bind := range binds {
+		source, _, ok := strings.Cut(hostBind(bind), ":")
+		if !ok || !strings.HasPrefix(source, "/") {
+			continue // a named volume, which says nothing about ownership
+		}
+		if sameDir(source, dataDir) || underDir(source, dataDir) {
+			return true, "mounts " + source
+		}
+		return false, "mounts " + source
+	}
+	return false, "not something this data directory installed"
+}
+
+// underDir reports whether path is inside dir.
+func underDir(path, dir string) bool {
+	rel, err := filepath.Rel(dir, path)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// containerVolumes lists the named volumes a container mounts, which is how a
+// reset finds the ones worth deleting without a hardcoded list to drift.
+func containerVolumes(ctx context.Context, name string) []string {
+	out, err := exec.CommandContext(ctx, "docker", "inspect",
+		"--format", "{{json .Mounts}}", name).Output()
+	if err != nil {
+		return nil
+	}
+	var mounts []struct {
+		Type string `json:"Type"`
+		Name string `json:"Name"`
+	}
+	if json.Unmarshal(out, &mounts) != nil {
+		return nil
+	}
+	var names []string
+	for _, m := range mounts {
+		if m.Type == "volume" && m.Name != "" {
+			names = append(names, m.Name)
+		}
+	}
+	return names
 }

@@ -33,7 +33,8 @@ func init() {
 			"The exception is a deployment you drive with `docker compose`: that\n" +
 			"compose file is yours and owns its containers, so this reports them and\n" +
 			"changes nothing.",
-		Run: runUpgrade,
+		Local: true,
+		Run:   runUpgrade,
 	})
 }
 

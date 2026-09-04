@@ -33,7 +33,8 @@ func init() {
 			"already has the access that would let it read the CA key.\n\n" +
 			"A worker gets its identity from `je worker run` instead. A machine that\n" +
 			"is both keeps one certificate carrying both roles.",
-		Run: runIdentity,
+		Local: true,
+		Run:   runIdentity,
 	})
 }
 

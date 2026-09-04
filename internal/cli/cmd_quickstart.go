@@ -24,7 +24,8 @@ func init() {
 			"in-process shortcut, and nothing works here that would not work split\n" +
 			"across two boxes -- including the transport, which is HTTPS with the\n" +
 			"worker enrolling itself against the control plane's own authority. For anything unattended use `docker compose up -d`.",
-		Run: runQuickstart,
+		Local: true,
+		Run:   runQuickstart,
 	})
 }
 

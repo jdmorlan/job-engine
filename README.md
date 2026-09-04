@@ -62,6 +62,32 @@ skips the question and `--restart` skips the download. The exception is a
 deployment you drive with `docker compose`: that file is yours and owns its
 containers, so `je upgrade` reports them and changes nothing.
 
+**Some commands act on this machine, not on the engine.** `je help` marks them
+with a `*`, and it is a distinction worth learning once: `je runs` works
+identically against a control plane in a cluster, and `je control-plane remove`
+does not — it removes a service *here*, and a control plane in Kubernetes
+carries on. The danger is not an error, it is a command that succeeds and
+changes something other than what you meant.
+
+In development, `je reset` tears down everything on this machine — containers,
+services, volumes, databases, certificates — and leaves your job definitions
+alone, so re-running them is how you check it came back. It only removes what
+*this* data directory owns, and says what it left and why:
+
+```console
+$ je reset
+This will remove, on this machine only:
+
+  the control-plane container (je-control-plane)
+  docker volume je-data
+  .je/state.db
+  ...
+
+Kept: ~/.je/jobs (your job definitions; --jobs removes them too)
+
+There is no undo. Type ".je" to confirm:
+```
+
 `je upgrade --check` reports without installing. Building from source is
 `go build ./cmd/je`.
 
@@ -361,6 +387,7 @@ other's events.
 ```
 je demo           register a repo of example jobs, a chain, and a tour
 je upgrade        upgrade this deployment: the binary, and what runs here
+je reset          tear it all down on this machine and start from scratch
 je quickstart     a control plane and a worker, in this terminal
 je control-plane run    the control plane: schedules, history, the API
 je worker run           a worker: the thing that executes jobs

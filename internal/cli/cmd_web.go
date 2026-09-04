@@ -32,7 +32,8 @@ func init() {
 			"  stop    stop and remove that container\n\n" +
 			"Needs a control plane to talk to and nothing else. With no --control-plane\n" +
 			"it uses the one this data directory records, which is the local case.",
-		Run: runWeb,
+		Local: true,
+		Run:   runWeb,
 	})
 }
 
@@ -177,6 +178,7 @@ func startWebContainer(ctx context.Context, env *Env, addr string, base *url.URL
 
 	spec := dockerSpec{
 		component: "web",
+		owner:     env.Layout.Data,
 		image:     image,
 		args:      []string{"--addr", "0.0.0.0:" + port, "--control-plane", target},
 		ports:     []string{host + ":" + port + ":" + port},

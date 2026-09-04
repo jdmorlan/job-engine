@@ -43,7 +43,8 @@ func init() {
 			"that already exists -- with no argument it joins the one this data\n" +
 			"directory records, which is the local case.\n\n" +
 			"`je workers` lists the ones already attached.",
-		Run: runWorker,
+		Local: true,
+		Run:   runWorker,
 	})
 	register(&Command{
 		Name:  "workers",

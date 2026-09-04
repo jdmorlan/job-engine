@@ -56,6 +56,21 @@ type Command struct {
 	Args  string // argument shape, e.g. "<type>", shown in the command's own usage
 	Long  string // optional detail, shown by `je help <command>`
 
+	// Local marks a command that acts on THIS MACHINE rather than on the
+	// control plane wherever it is.
+	//
+	// The distinction is invisible until it bites, and then it bites hard: `je
+	// runs` works identically against a control plane in a cluster, and `je
+	// control-plane remove` does not -- it removes a service here, and a
+	// control plane in Kubernetes carries on. Somebody with a split deployment
+	// finds that out by watching a command succeed and change nothing.
+	//
+	// It is also a to-do list. Every command marked Local is a place where a
+	// deployment split across machines has no answer yet: D19's R2 says every
+	// command you learned locally should work against a remote engine by
+	// switching context, and these are the ones that do not.
+	Local bool
+
 	// Run does the work. Returning an error prints it and exits non-zero; the
 	// command itself never calls os.Exit, so it stays testable.
 	Run func(ctx context.Context, env *Env, args []string) error
@@ -178,6 +193,9 @@ func runHelp(env *Env, global *flag.FlagSet, args []string) int {
 	if cmd.Long != "" {
 		fmt.Fprintf(env.Stdout, "\n%s\n", cmd.Long)
 	}
+	if cmd.Local {
+		fmt.Fprint(env.Stdout, "\n"+localScopeNote)
+	}
 	return ExitOK
 }
 
@@ -191,10 +209,20 @@ func printRootUsage(w io.Writer, global *flag.FlagSet) {
 	sort.Strings(names)
 
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	local := false
 	for _, name := range names {
-		fmt.Fprintf(tw, "  %s\t%s\n", name, commands[name].Usage)
+		mark := ""
+		if commands[name].Local {
+			mark, local = " *", true
+		}
+		fmt.Fprintf(tw, "  %s\t%s%s\n", name, commands[name].Usage, mark)
 	}
 	tw.Flush()
+
+	if local {
+		fmt.Fprint(w, "\n* acts on THIS MACHINE, not on the control plane wherever it is.\n"+
+			"  Everything else works the same against a control plane in a cluster.\n")
+	}
 
 	fmt.Fprint(w, "\nglobal flags:\n")
 	global.SetOutput(w)
@@ -249,3 +277,19 @@ func truncate(s string, max int) string {
 	}
 	return s[:max-1] + "…"
 }
+
+// localScopeNote is the sentence every machine-scoped command ends with.
+//
+// One wording in one place, because the point is that somebody learns the
+// distinction once. It is deliberately specific about the failure it prevents:
+// the danger is not that these commands error on a split deployment, it is
+// that they succeed and change something other than what was meant.
+const localScopeNote = `THIS MACHINE ONLY.
+This acts on processes and files here -- not on the control plane if it is
+somewhere else. Against a split deployment (a control plane in a cluster, a
+worker on your laptop) it will do its work here and leave the rest untouched,
+which is rarely what you meant.
+
+Commands that read or change the engine itself -- jobs, runs, secrets, sources,
+enrollment -- go to the control plane wherever it is, and are unaffected.
+`

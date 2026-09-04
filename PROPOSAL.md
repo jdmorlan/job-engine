@@ -3627,6 +3627,61 @@ which is why it came after it.
 
 ---
 
+### D26. Machine-scoped commands, and the gaps they mark
+
+> *"I think right now while we are really in dev mode, an option in the CLI for
+> me to kill everything and start from scratch could be beneficial... We need to
+> be clear that this operation only really works on a dev machine... plus it's
+> good for us to know that because it could show gaps for when people have a
+> hosted control-plane on a different host and workers."*
+
+**`je reset` ships**, and so does the convention the second half of that asks
+for. Every command carries a `Local` flag; `je help` marks those commands with a
+`*` and `je help <command>` ends with the sentence saying what it means. One
+wording, one place, because the point is that somebody learns the distinction
+once.
+
+**The distinction is invisible until it bites.** `je runs` works identically
+against a control plane in a cluster. `je control-plane remove` does not: it
+removes a service *here*, and a control plane in Kubernetes carries on. The
+failure is not an error, it is a command that succeeds and changes something
+other than what was meant -- which is the P1 failure mode exactly.
+
+**Ownership had to be established before any of it was safe.** The first run of
+`je reset` in a scratch data directory listed the live deployment's containers
+and volume for deletion, because a container is global to the machine and a data
+directory is not. So a container now carries a label naming the data directory
+that installed it, an older one is claimed by the data directory whose files it
+mounts, and a service unit is read for the `--data-dir` it runs against.
+Anything that cannot be established is *not* mine: being wrong that way leaves a
+container running, and being wrong the other way deletes somebody's database.
+
+**The commands that are machine-scoped, which is the list of gaps:**
+
+| Command | What it cannot reach |
+|---|---|
+| `reset` | a control plane elsewhere; that is a namespace deletion, not this tool's job |
+| `control-plane install/remove/status` | a control plane that is a Deployment somewhere |
+| `worker join/remove/status` | a worker on another machine -- **the sharpest one** |
+| `web start/stop` | a web client running beside a remote control plane |
+| `upgrade` | any component not on this machine |
+| `quickstart` | by definition |
+| `identity join`, `worker keygen` | by definition: they write *this* machine's key material |
+
+**The sharpest gap is the worker.** D19's R2 says every command you learned
+locally should work against a remote engine by switching context, and the worker
+commands are the ones that do not. A control plane already knows every worker,
+its version and its certificate, and the worker holds an open polling
+connection -- so "restart that worker", "upgrade that worker" and "retire that
+worker" are all reachable over a channel that already exists and is
+authenticated. Nothing about that is blocked; it simply is not built. It is the
+obvious next item, and it is what makes `je workers` more than a status board.
+
+**The second gap is `upgrade` for a split deployment.** It now handles every
+component on the machine it runs on, which is the whole answer for one box and
+half of it for two. The other half is the same channel: a control plane that can
+tell a worker to replace itself.
+
 ## Part 6 — Scope
 
 ### N1. Non-goals — revised

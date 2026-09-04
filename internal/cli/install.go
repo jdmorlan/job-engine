@@ -317,6 +317,7 @@ func joinWorker(ctx context.Context, env *Env, j workerJoin) error {
 
 		spec := dockerSpec{
 			component: "worker",
+			owner:     env.Layout.Data,
 			image:     image,
 			args:      containerArgs,
 			// No volume: a worker holds nothing durable (C2). Losing this

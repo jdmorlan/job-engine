@@ -31,7 +31,8 @@ func init() {
 			"a possibly different machine, so it is `je worker join` -- and until you\n" +
 			"run one, nothing executes.\n\n" +
 			"To try both together without registering anything, use `je quickstart`.",
-		Run: runControlPlane,
+		Local: true,
+		Run:   runControlPlane,
 	})
 }
 
@@ -96,6 +97,7 @@ func installControlPlane(ctx context.Context, env *Env, addr string, mode instal
 		}
 		spec := dockerSpec{
 			component: "control-plane",
+			owner:     env.Layout.Data,
 			image:     image,
 			// 0.0.0.0 inside the container; the published port is what
 			// decides who can reach it, and that stays on loopback.
