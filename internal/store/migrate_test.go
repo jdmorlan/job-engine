@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -41,8 +42,12 @@ func TestMigrationsApplyToADatabaseThatHasRows(t *testing.T) {
 			}
 
 			assertNoDanglingReferences(t, db)
-			if got := count(t, db, "jobs"); got != 1 {
-				t.Fatalf("the seeded job did not survive: jobs = %d, want 1", got)
+			// Every seeded row, not just the job: a rebuild that dropped the
+			// history hanging off a table would otherwise pass this test.
+			for _, table := range []string{"jobs", "runs", "attempts", "events", "job_state"} {
+				if got := count(t, db, table); got != 1 {
+					t.Fatalf("%s = %d after migrating, want the 1 row seeded", table, got)
+				}
 			}
 		})
 	}
@@ -193,6 +198,40 @@ func seedJob(t *testing.T, db *sql.DB) {
 	if _, err := db.Exec(`INSERT INTO jobs (name, definition_hash, file_path, enabled, loaded_at)
 		VALUES ('weather-ingest', 'abc123', 'weather.yaml', 1, datetime('now'))`); err != nil {
 		t.Fatalf("seeding a job: %v", err)
+	}
+
+	// And a run with everything that points at one.
+	//
+	// A job on its own is not enough to exercise a migration that rebuilds a
+	// table: 0014 and 0015 recreate `runs` and `sources` to widen a CHECK, and
+	// the interesting question is whether the rows referring to them survive
+	// being copied across. A seed with no children answers it by not asking.
+	when := time.Now().UTC().Format("2006-01-02T15:04:05.000000000Z")
+	if _, err := db.Exec(`
+		INSERT INTO events (id, type, source, payload, created_at, depth)
+		VALUES (1, 'run.requested', 'cli', '{}', ?, 0)`, when); err != nil {
+		t.Fatalf("seeding an event: %v", err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO runs (id, job_id, definition_hash, triggering_event_id, status,
+		                  queued_at, started_at, ended_at, attempt_count, state_version_in)
+		VALUES (1, 1, 'abc123', 1, 'succeeded', ?, ?, ?, 1, 1)`,
+		when, when, when); err != nil {
+		t.Fatalf("seeding a run: %v", err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO attempts (run_id, attempt_number, triggering_event_id, status, started_at, ended_at)
+		VALUES (1, 1, 1, 'succeeded', ?, ?)`, when, when); err != nil {
+		t.Fatalf("seeding an attempt: %v", err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO job_state (job_id, version, value, set_by_run_id, created_at)
+		VALUES (1, 1, '{"since":"2026-01-01T00:00:00Z"}', 1, ?)`, when); err != nil {
+		t.Fatalf("seeding a cursor: %v", err)
+	}
+	if _, err := db.Exec(`
+		UPDATE events SET caused_by_run_id = 1 WHERE id = 1`); err != nil {
+		t.Fatalf("pointing the event at the run: %v", err)
 	}
 }
 
