@@ -97,6 +97,21 @@ func runWaiting(ctx context.Context, env *Env, args []string) error {
 			fmt.Fprintln(env.Stdout)
 		}
 
+		if len(w.UnservedRuntimes) > 0 {
+			// A label matched and a worker would have taken this, and it would
+			// have failed on arrival for want of a toolchain. Distinct from the
+			// label case above and worth its own heading: the fix is on a
+			// machine that already exists rather than a machine that does not.
+			fmt.Fprintln(env.Stdout,
+				"WAITING FOR A RUNTIME  (queued for a language no worker can prepare)")
+			for _, u := range w.UnservedRuntimes {
+				fmt.Fprintf(env.Stdout, "  language: %s\n    %d run(s), jobs: %s\n"+
+					"    on a worker that should run these:  je worker runtime install %s\n",
+					u.Language, len(u.Runs), strings.Join(u.Jobs, ", "), u.Language)
+			}
+			fmt.Fprintln(env.Stdout)
+		}
+
 		if len(w.Blocked) > 0 {
 			// Last, because it is the part that needs a human. Putting it at
 			// the bottom means it is what you are looking at when the command

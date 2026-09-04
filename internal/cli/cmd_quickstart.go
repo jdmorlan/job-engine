@@ -115,6 +115,7 @@ func runQuickstart(ctx context.Context, env *Env, args []string) error {
 		// `je worker keygen` wrote <data>/identity, so a secret encrypted to
 		// the key you had just created could not be read here (D25).
 		CacheDir:     env.Layout.Data,
+		ToolchainBin: env.Layout.ToolchainBin(),
 		IdentityFile: env.Layout.AgeIdentity(),
 		Version:      env.Version,
 		Client:       client,

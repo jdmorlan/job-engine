@@ -151,3 +151,27 @@ func ProjectFiles() []string {
 	sort.Strings(out)
 	return out
 }
+
+// Available reports which languages this machine can prepare, by whether each
+// row's tool is on PATH.
+//
+// Checked once at startup rather than per job: a worker advertises this the way
+// it advertises labels, and a job whose language nothing serves should be
+// visibly queued rather than dispatched and failed (D28/C8). The cost of it
+// being slightly stale -- a toolchain installed while a worker is running -- is
+// a restart, which is the same cost as changing a label.
+func Available(lookPath func(string) (string, error)) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, t := range table {
+		if seen[t.Name] {
+			continue
+		}
+		if _, err := lookPath(t.Tool); err == nil {
+			seen[t.Name] = true
+			out = append(out, t.Name)
+		}
+	}
+	sort.Strings(out)
+	return out
+}

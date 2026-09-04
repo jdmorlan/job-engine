@@ -19,7 +19,7 @@ import (
 func init() {
 	register(&Command{
 		Name:  "worker",
-		Args:  "run|join|status|remove|keygen",
+		Args:  "run|join|status|remove|keygen|runtimes",
 		Usage: "a worker: the thing that actually executes jobs",
 		Long: "A worker executes jobs. The control plane never does (D20/C11), so a\n" +
 			"deployment with no worker runs nothing at all -- `je status` says so.\n\n" +
@@ -38,7 +38,8 @@ func init() {
 			"  join      register it with launchd or systemd, attached to a control plane\n" +
 			"  status    is it registered, and is it up\n" +
 			"  remove    unregister it; nothing else on this machine is touched\n" +
-			"  keygen    create this machine's key for reading encrypted secrets\n\n" +
+			"  keygen    create this machine's key for reading encrypted secrets\n" +
+			"  runtimes  which languages this machine can prepare, and how to add one\n\n" +
 			"`join` rather than `install` because a worker attaches to a control plane\n" +
 			"that already exists -- with no argument it joins the one this data\n" +
 			"directory records, which is the local case.\n\n" +
@@ -75,6 +76,16 @@ func runWorker(ctx context.Context, env *Env, args []string) error {
 	}
 
 	switch positional[0] {
+	case "runtimes":
+		if len(positional) != 1 {
+			return usagef("unexpected argument %q", positional[1])
+		}
+		return runWorkerRuntimes(ctx, env)
+	case "runtime":
+		if len(positional) != 3 || positional[1] != "install" {
+			return usagef("usage: je worker runtime install <language>")
+		}
+		return runWorkerRuntimeInstall(ctx, env, positional[2])
 	case "keygen":
 		if len(positional) != 1 {
 			return usagef("unexpected argument %q", positional[1])
@@ -95,8 +106,8 @@ func runWorker(ctx context.Context, env *Env, args []string) error {
 		}
 		return removeComponent(ctx, env, service.Worker)
 	default:
-		return usagef("unknown subcommand %q; expected run, join, status or remove",
-			positional[0])
+		return usagef("unknown subcommand %q; expected run, join, status, remove, "+
+			"keygen, runtimes or `runtime install <language>`", positional[0])
 	}
 
 	target := *addr
@@ -172,6 +183,7 @@ func runWorker(ctx context.Context, env *Env, args []string) error {
 		Labels:       splitLabels(*labels),
 		Concurrency:  *concurrency,
 		CacheDir:     env.Layout.Data,
+		ToolchainBin: env.Layout.ToolchainBin(),
 		IdentityFile: env.Layout.AgeIdentity(),
 		Version:      env.Version,
 		Client:       client,

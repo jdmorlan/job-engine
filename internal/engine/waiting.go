@@ -39,6 +39,19 @@ type Waiting struct {
 	// busy, and nothing can ever pick it up. An offline worker must produce a
 	// visible waiting state, never a silent backlog.
 	Unservable []UnservedLabel `json:"unservable,omitempty"`
+
+	// UnservedRuntimes is work whose language no online worker can prepare
+	// (D28). The same failure as Unservable one level down: the label matched,
+	// a worker would take it, and it would fail on arrival because that
+	// machine has no toolchain for it.
+	UnservedRuntimes []UnservedRuntime `json:"unserved_runtimes,omitempty"`
+}
+
+// UnservedRuntime is one language nothing can prepare, and what is stuck on it.
+type UnservedRuntime struct {
+	Language string   `json:"language"`
+	Runs     []int64  `json:"runs"`
+	Jobs     []string `json:"jobs"`
 }
 
 // UnservedLabel is one capability nothing is serving, and what is stuck on it.
@@ -139,6 +152,41 @@ func (e *Engine) Waiting(ctx context.Context) (Waiting, error) {
 	for _, entry := range stuck {
 		w.Unservable = append(w.Unservable, *entry)
 	}
+
+	// D28: and which are waiting on a language nothing can prepare. Checked
+	// separately from the label because they are different questions -- a
+	// worker can advertise `macos` and still have no pnpm -- and a job can be
+	// stuck on either.
+	runtimes, err := e.store.RuntimesCovered(ctx, now, LeaseTTL)
+	if err != nil {
+		return Waiting{}, err
+	}
+	stuckRuntimes := map[string]*UnservedRuntime{}
+	for _, run := range w.Queued {
+		job, err := e.store.JobByID(ctx, run.JobID)
+		if err != nil {
+			continue
+		}
+		def, err := jobdef.FromSnapshot(job.Definition)
+		if err != nil || def.Language == "" || runtimes[def.Language] {
+			continue
+		}
+		entry := stuckRuntimes[def.Language]
+		if entry == nil {
+			entry = &UnservedRuntime{Language: def.Language}
+			stuckRuntimes[def.Language] = entry
+		}
+		entry.Runs = append(entry.Runs, run.ID)
+		if !slices.Contains(entry.Jobs, job.Slug) {
+			entry.Jobs = append(entry.Jobs, job.Slug)
+		}
+	}
+	for _, entry := range stuckRuntimes {
+		w.UnservedRuntimes = append(w.UnservedRuntimes, *entry)
+	}
+	sort.Slice(w.UnservedRuntimes, func(i, j int) bool {
+		return w.UnservedRuntimes[i].Language < w.UnservedRuntimes[j].Language
+	})
 	sort.Slice(w.Unservable, func(i, j int) bool {
 		return w.Unservable[i].Label < w.Unservable[j].Label
 	})
@@ -153,7 +201,7 @@ func (e *Engine) Waiting(ctx context.Context) (Waiting, error) {
 // helps. It is arguably the worse of the two, because everything about it looks
 // like ordinary queueing.
 func (w Waiting) NeedsAttention() bool {
-	return len(w.Blocked) > 0 || len(w.Unservable) > 0
+	return len(w.Blocked) > 0 || len(w.Unservable) > 0 || len(w.UnservedRuntimes) > 0
 }
 
 func sortScheduled(s []ScheduledWindow) {

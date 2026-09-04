@@ -145,6 +145,15 @@ func (l Layout) IdentityKey() string  { return filepath.Join(l.Data, "worker.key
 // you had just been told to create was never found. One definition is the fix.
 func (l Layout) AgeIdentity() string { return filepath.Join(l.Data, "identity") }
 
+// Toolchains is where `je worker runtime install` puts language toolchains
+// (D28), and Toolchainbin is the directory of theirs that goes on PATH.
+//
+// Inside the data directory because they are this worker's, disposable, and
+// re-obtainable -- and because putting them anywhere shared would mean this
+// tool deciding what belongs in /usr/local on somebody's machine.
+func (l Layout) Toolchains() string   { return filepath.Join(l.Data, "toolchains") }
+func (l Layout) ToolchainBin() string { return filepath.Join(l.Toolchains(), "bin") }
+
 // IdentityCA is the authority a worker keeps after enrolling, so it can go on
 // verifying the control plane across restarts without the bootstrap directory
 // being mounted (D25).

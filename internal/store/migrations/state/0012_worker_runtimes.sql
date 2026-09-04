@@ -1,0 +1,20 @@
+-- 0012_worker_runtimes: which languages a worker can prepare (D28).
+--
+-- A job declaring `language: typescript` needs a worker that can install its
+-- dependencies, and that is a property of the machine -- pnpm is installed
+-- there or it is not. Without recording it, the only way to find out is to
+-- dispatch the job and have it fail, which is the 3am discovery this engine
+-- exists to avoid.
+--
+-- Self-reported, unlike labels. A label is a permission: D25 fixed labels at
+-- enrolment because a worker advertising its own `macos` could grant itself
+-- whatever that label gates. A runtime is an objective, checkable fact about a
+-- machine, and the worst a wrong claim costs is a job failing on that worker
+-- rather than somebody reading a secret they should not. Facts may be
+-- self-reported; permissions may not.
+--
+-- Null for a worker that has not registered since this shipped, which reads as
+-- "nothing known" rather than "nothing available" -- the difference matters,
+-- because refusing to dispatch to a worker that simply predates the column
+-- would stop a working deployment on upgrade.
+ALTER TABLE workers ADD COLUMN runtimes TEXT;

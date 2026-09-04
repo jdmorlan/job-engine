@@ -644,3 +644,68 @@ func TestDeclaredAbsoluteWorkdirSurvivesTheWire(t *testing.T) {
 		t.Errorf("workdir = %q, want /tmp", dispatch.Workdir)
 	}
 }
+
+// A job whose language no online worker can prepare is visibly queued, not
+// dispatched to a worker that would fail it (D28/C8).
+//
+// The label and the runtime are different questions and a job can be stuck on
+// either: this worker advertises the right label and would happily take the
+// run, and the machine has no toolchain for it. Without this the failure is a
+// job that dies at 3am with "pnpm is not installed"; with it, the work is
+// waiting and says which worker to fix.
+func TestAJobWhoseLanguageNothingServesIsUnservable(t *testing.T) {
+	ctx := context.Background()
+	e, _ := jobFixture(t, "ingest", `echo hi`, "language: typescript")
+
+	// Online, right label, wrong toolchain.
+	if _, err := e.RegisterWorker(ctx, store.Worker{
+		ID: "w", Name: "w",
+		Labels:   []string{store.DefaultLabel},
+		Roles:    []string{store.RoleExecute},
+		Version:  e.Health(ctx).Version,
+		Runtimes: []string{"go"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.TriggerRun(ctx, qual("ingest"), engine.RunOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	waiting, err := e.Waiting(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(waiting.Unservable) != 0 {
+		t.Errorf("the label was served, so it should not be unservable: %v", waiting.Unservable)
+	}
+	if len(waiting.UnservedRuntimes) != 1 {
+		t.Fatalf("unserved runtimes = %v, want typescript", waiting.UnservedRuntimes)
+	}
+	if got := waiting.UnservedRuntimes[0].Language; got != "typescript" {
+		t.Errorf("language = %q, want typescript", got)
+	}
+	if !waiting.NeedsAttention() {
+		t.Error("work nobody can prepare did not need attention")
+	}
+
+	// Installing the toolchain and restarting the worker clears the state,
+	// without the job changing at all. Re-registering the same worker is
+	// exactly what a restart does, and it is why runtimes update on
+	// registration where labels do not.
+	if _, err := e.RegisterWorker(ctx, store.Worker{
+		ID: "w", Name: "w",
+		Labels:   []string{store.DefaultLabel},
+		Roles:    []string{store.RoleExecute},
+		Version:  e.Health(ctx).Version,
+		Runtimes: []string{"go", "typescript"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waiting, err = e.Waiting(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(waiting.UnservedRuntimes) != 0 {
+		t.Errorf("still unservable after a capable worker joined: %v", waiting.UnservedRuntimes)
+	}
+}

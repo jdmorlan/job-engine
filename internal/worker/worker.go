@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -26,6 +27,7 @@ import (
 	"github.com/jdmorlan/job-engine/internal/engine"
 	"github.com/jdmorlan/job-engine/internal/executor"
 	"github.com/jdmorlan/job-engine/internal/store"
+	"github.com/jdmorlan/job-engine/internal/toolchain"
 )
 
 // Options configures a worker.
@@ -51,6 +53,11 @@ type Options struct {
 	// This is the only place a worker keeps anything a job runs from. There is
 	// no jobs directory: every job arrives with the tree it belongs to.
 	CacheDir string
+
+	// ToolchainBin is where `je worker runtime install` puts the tools this
+	// worker can prepare with (D28). Searched before PATH, so installing one
+	// takes effect without anybody editing a shell profile.
+	ToolchainBin string
 
 	// IdentityFile is the age key that lets this worker read secrets encrypted
 	// into a source (D25). Defaults to <CacheDir>/identity.
@@ -185,6 +192,9 @@ func (w *Worker) register(ctx context.Context) (string, error) {
 		Labels:  w.opts.Labels,
 		Roles:   []string{store.RoleExecute},
 		Version: w.opts.Version,
+		// What this machine can prepare, so a job whose language nothing
+		// serves is visibly queued rather than dispatched and failed (D28).
+		Runtimes: toolchain.Available(w.lookPath),
 	})
 	if err != nil {
 		return "", err
@@ -328,8 +338,14 @@ func (w *Worker) execute(ctx context.Context, d engine.Dispatch) {
 		w.report(ctx, d, engine.Completion{ExecError: err.Error()})
 		return
 	}
-	if binDir != "" {
-		env = append(env, "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if d.Language != "" {
+		// The tree's own binaries first, then anything this worker installed,
+		// then the ambient PATH.
+		path := w.pathWithToolchains()
+		if binDir != "" {
+			path = binDir + string(os.PathListSeparator) + path
+		}
+		env = append(env, "PATH="+path)
 	}
 
 	// Secrets the control plane could not resolve, decrypted here (D25/C11).
@@ -578,4 +594,15 @@ func (w *Worker) renewIfExpiringSoon(ctx context.Context) {
 		return
 	}
 	w.log.Info("renewed this worker's certificate")
+}
+
+// lookPath finds a tool, preferring what this worker installed for itself.
+func (w *Worker) lookPath(tool string) (string, error) {
+	if w.opts.ToolchainBin != "" {
+		candidate := filepath.Join(w.opts.ToolchainBin, tool)
+		if info, err := os.Stat(candidate); err == nil && info.Mode()&0o111 != 0 {
+			return candidate, nil
+		}
+	}
+	return exec.LookPath(tool)
 }

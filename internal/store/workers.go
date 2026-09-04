@@ -29,6 +29,14 @@ type Worker struct {
 	Labels []string `json:"labels"`
 	Roles  []string `json:"roles"`
 
+	// Runtimes are the languages this worker can prepare a source tree for
+	// (D28): the ones whose toolchain is installed on that machine.
+	//
+	// Self-reported, and legitimately so -- see the 0012 migration for why a
+	// runtime differs from a label. Nil means a worker that has not said,
+	// which is not the same as one that can do nothing.
+	Runtimes []string `json:"runtimes,omitempty"`
+
 	// AgeRecipient is the public half of the key this identity reads encrypted
 	// secrets with, when it has registered one (D25).
 	//
@@ -81,9 +89,13 @@ func (s *Store) RegisterWorker(ctx context.Context, w Worker) (Worker, error) {
 	if err != nil {
 		return Worker{}, err
 	}
+	runtimes, err := json.Marshal(w.Runtimes)
+	if err != nil {
+		return Worker{}, err
+	}
 	_, err = s.state.ExecContext(ctx, `
-		INSERT INTO workers (id, name, labels, version, roles, registered_at, last_seen_at, gone_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+		INSERT INTO workers (id, name, labels, version, roles, registered_at, last_seen_at, gone_at, runtimes)
+		VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			-- An enrolled worker cannot rename itself or change what it can do.
 			-- Its name and labels were decided by whoever minted its enrollment
@@ -97,9 +109,14 @@ func (s *Store) RegisterWorker(ctx context.Context, w Worker) (Worker, error) {
 			labels = CASE WHEN workers.enrolled_at IS NULL
 			              THEN excluded.labels ELSE workers.labels END,
 			version = excluded.version, roles = excluded.roles,
+			-- Runtimes ARE updated on registration, where name and labels are
+			-- not. Installing pnpm on a machine should take effect when the
+			-- worker restarts, and a fact about a machine is not something
+			-- whoever minted its token has an opinion about (D28).
+			runtimes = excluded.runtimes,
 			last_seen_at = excluded.last_seen_at, gone_at = NULL`,
 		w.ID, w.Name, string(labels), w.Version, string(roles),
-		formatTime(w.RegisteredAt), formatTime(w.LastSeenAt))
+		formatTime(w.RegisteredAt), formatTime(w.LastSeenAt), string(runtimes))
 	if err != nil {
 		return Worker{}, fmt.Errorf("registering worker: %w", err)
 	}
@@ -130,7 +147,7 @@ func (s *Store) TouchWorker(ctx context.Context, id string, at time.Time) error 
 func (s *Store) Workers(ctx context.Context) ([]Worker, error) {
 	rows, err := s.state.QueryContext(ctx, `
 		SELECT id, name, labels, version, roles, registered_at, last_seen_at, gone_at,
-		       enrolled_at, cert_fingerprint, age_recipient
+		       enrolled_at, cert_fingerprint, age_recipient, runtimes
 		FROM workers ORDER BY last_seen_at DESC`)
 	if err != nil {
 		return nil, err
@@ -141,14 +158,19 @@ func (s *Store) Workers(ctx context.Context) ([]Worker, error) {
 	for rows.Next() {
 		var w Worker
 		var labels, roles string
-		var goneAt, enrolledAt, fingerprint, recipient sql.NullString
+		var goneAt, enrolledAt, fingerprint, recipient, runtimes sql.NullString
 		var registered, lastSeen string
 		if err := rows.Scan(&w.ID, &w.Name, &labels, &w.Version, &roles,
 			&registered, &lastSeen, &goneAt, &enrolledAt, &fingerprint,
-			&recipient); err != nil {
+			&recipient, &runtimes); err != nil {
 			return nil, err
 		}
 		w.AgeRecipient = recipient.String
+		if runtimes.Valid && runtimes.String != "" {
+			if err := json.Unmarshal([]byte(runtimes.String), &w.Runtimes); err != nil {
+				return nil, err
+			}
+		}
 		if enrolledAt.Valid {
 			at, err := parseTime(enrolledAt.String)
 			if err != nil {
@@ -495,4 +517,26 @@ func (s *Store) RecordFingerprint(ctx context.Context, id, fingerprint string) e
 	_, err := s.state.ExecContext(ctx,
 		`UPDATE workers SET cert_fingerprint = ? WHERE id = ?`, fingerprint, id)
 	return err
+}
+
+// RuntimesCovered is which languages some online worker can prepare (D28).
+//
+// The same shape as LabelsCovered and for the same reason: a job whose language
+// nothing can prepare should be visibly queued rather than dispatched to a
+// worker that will fail it.
+func (s *Store) RuntimesCovered(ctx context.Context, now time.Time, ttl time.Duration) (map[string]bool, error) {
+	workers, err := s.Workers(ctx)
+	if err != nil {
+		return nil, err
+	}
+	covered := map[string]bool{}
+	for _, w := range workers {
+		if !w.Online(now, ttl) || !slices.Contains(w.Roles, RoleExecute) {
+			continue
+		}
+		for _, name := range w.Runtimes {
+			covered[name] = true
+		}
+	}
+	return covered, nil
 }

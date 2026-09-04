@@ -838,14 +838,26 @@ a key still works and says plainly that nothing verified it.
 
 Retries, the container executor, and retention.
 
-**Runtimes are half built** (D28). A job declaring `language:` has its
-dependencies installed from its own lockfile before it runs, and the binaries
-that install produced are on PATH — so a TypeScript job's `command: ["tsx",
-"ingest.ts"]` works. What is missing is `je worker runtime install`, so the
-worker's toolchain (`pnpm`, `uv`) still has to be there already, and workers do
-not yet advertise which languages they can prepare — meaning a job whose
-toolchain is missing fails at run time with a clear message rather than being
-visibly unservable in `je waiting`.
+**Runtimes** (D28) install a job's dependencies before it runs:
+
+```console
+$ je worker runtimes
+LANGUAGE    TOOL  STATUS
+go          go    ready
+python      uv    not installed -- je worker runtime install python
+typescript  pnpm  ready
+
+$ je worker runtime install python
+downloading https://github.com/astral-sh/uv/releases/download/0.5.11/uv-aarch64-apple-darwin.tar.gz
+verified sha256 695f3640d5b1a4e2
+
+uv is ready for python jobs on this worker.
+```
+
+Nothing is installed that cannot be checked against a published checksum — the
+same rule `je upgrade` applies to itself. A worker advertises what it can
+prepare, so a job whose language nothing serves is **queued and visible** in
+`je waiting` rather than dispatched to a machine that would fail it.
 
 **Fan-in is not built.** A step waits on one condition. `all_of` with a window
 (D3) — "when both of these landed, within six hours" — parses and is refused

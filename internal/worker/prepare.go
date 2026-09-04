@@ -124,7 +124,7 @@ func binDir(tc toolchain.Toolchain, tree string) string {
 // toolVersion asks the tool what it is, which doubles as the check that it is
 // installed at all.
 func (w *Worker) toolVersion(ctx context.Context, tc toolchain.Toolchain) (string, error) {
-	if _, err := exec.LookPath(tc.Tool); err != nil {
+	if _, err := w.lookPath(tc.Tool); err != nil {
 		return "", fmt.Errorf(
 			"this job is written in %s, and %s is not installed on this worker "+
 				"(%s).\n"+
@@ -132,7 +132,11 @@ func (w *Worker) toolVersion(ctx context.Context, tc toolchain.Toolchain) (strin
 				"Or run the job on a worker that has it -- `je workers` says which do.",
 			tc.Name, tc.Tool, w.opts.Name, tc.Name)
 	}
-	out, err := exec.CommandContext(ctx, tc.Version[0], tc.Version[1:]...).Output()
+	tool, err := w.lookPath(tc.Version[0])
+	if err != nil {
+		return "", err
+	}
+	out, err := exec.CommandContext(ctx, tool, tc.Version[1:]...).Output()
 	if err != nil {
 		return "", fmt.Errorf("asking %s its version: %w", tc.Tool, err)
 	}
@@ -174,8 +178,15 @@ func (w *Worker) install(ctx context.Context, tc toolchain.Toolchain, tree strin
 	ctx, cancel := context.WithTimeout(ctx, installTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, tc.Install[0], tc.Install[1:]...)
+	tool, err := w.lookPath(tc.Install[0])
+	if err != nil {
+		return err
+	}
+	cmd := exec.CommandContext(ctx, tool, tc.Install[1:]...)
 	cmd.Dir = tree
+	// The installer itself may shell out to the toolchain it belongs to (pnpm
+	// invoking node), so it needs the same PATH the job will get.
+	cmd.Env = append(os.Environ(), "PATH="+w.pathWithToolchains())
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		// The installer's own output, because it is the thing that knows what
@@ -198,4 +209,12 @@ func lastLines(s string, n int) string {
 		return strings.Join(lines, "\n")
 	}
 	return strings.Join(lines[len(lines)-n:], "\n")
+}
+
+// pathWithToolchains puts this worker's installed tools first.
+func (w *Worker) pathWithToolchains() string {
+	if w.opts.ToolchainBin == "" {
+		return os.Getenv("PATH")
+	}
+	return w.opts.ToolchainBin + string(os.PathListSeparator) + os.Getenv("PATH")
 }

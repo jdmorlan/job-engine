@@ -204,7 +204,7 @@ architecture), **D16** (daemon lifecycle and generic event ingress).
 | D25 | Secrets that travel with definitions | **NEW (v0.7) — steps 1-5 shipped** |
 | D26 | Machine-scoped commands | **NEW (v0.8) — shipped** |
 | D27 | Only repositories are sources | **NEW (v0.8) — shipped** |
-| D28 | Runtimes and dependency preparation | **NEW (v0.8) — phase 1 shipped** |
+| D28 | Runtimes and dependency preparation | **NEW (v0.8) — shipped** |
 | N1 | Non-goals | AGREED |
 | N2 | v1 done | AGREED |
 | Q1 | Storage adapters | AGREED — SQLite only, no adapter |
@@ -3744,7 +3744,7 @@ tell a worker to replace itself.
 
 ### D28. Runtimes: how a job's language gets what it needs — NEW
 
-**Status:** NEW (v0.8) — **phase 1 shipped**; toolchain installation is the remaining half
+**Status:** NEW (v0.8) — **shipped**
 
 > *"Let's say we want to run typescript jobs, what's the strategy? I could run
 > things in a docker container, but the piece I don't like is that I need to go
@@ -3955,17 +3955,51 @@ lockfile, `ingest.ts` importing a real dependency, and `ingest.yaml` declaring
 the lockfile, `tsx` resolved out of the tree, and the job printed a value its
 dependency computed.
 
-#### What is still to build
+#### The rest of it, shipped
 
-**`je worker runtime install`** -- the toolchain installer, reusing
-`internal/selfupdate`'s download-verify-replace. Until it exists, a worker
-without `pnpm` gets an error naming the tool, the worker and the command, which
-is the fallback rather than the answer.
+**`je worker runtime install <language>`** fetches a toolchain, verified. The
+rule it enforces is the one `je upgrade` already applies to itself: nothing is
+installed that cannot be checked against a published checksum, because this puts
+an executable on a machine and then runs somebody's code with it. `je worker
+runtimes` lists what is ready, what is installable, and what is neither.
 
-**Advertising runtimes.** A worker should report what it can prepare, so a job
-whose language nothing serves is queued and visible in `je waiting` rather than
-dispatched and failed. That is the piece that makes a missing toolchain a
-planning problem instead of a 3am one, and it is not built yet.
+**Which meant discovering what can honestly be verified**, and the answer is not
+uniform:
+
+- **uv** publishes `<asset>.tar.gz.sha256` beside each asset. Clean.
+- **Node** publishes `SHASUMS256.txt`, which is the same format `je` publishes
+  for itself -- so `selfupdate.ParseChecksums` reads it unchanged.
+- **pnpm publishes no checksums with its releases at all.** So it is not
+  installed directly. `language: typescript` installs Node, and npm -- which
+  ships with Node and verifies package integrity itself -- installs pnpm. Every
+  link in that chain is checked, which a bare download of pnpm would not be.
+
+That is a better outcome than the alternative, which was to fetch pnpm anyway
+and call it fine.
+
+**Workers advertise what they can prepare**, and `je waiting` reports a language
+nothing serves as queued work rather than letting it be dispatched and fail:
+
+```console
+WAITING FOR A RUNTIME  (queued for a language no worker can prepare)
+  language: typescript
+    3 run(s), jobs: house/ingest
+    on a worker that should run these:  je worker runtime install typescript
+```
+
+Runtimes update on registration where name and labels do not, and the asymmetry
+is the point: installing pnpm on a machine should take effect when its worker
+restarts, and it is not something whoever minted that worker's token has an
+opinion about. Restarting a worker is how a machine's facts get re-reported,
+which is the same cost as changing a label.
+
+**Verified by installing something that was genuinely missing.** `uv` was not on
+the development machine. `je worker runtime install python` downloaded it,
+verified `sha256 695f3640...`, put it under the data directory, and `je worker
+runtimes` moved python from "not installed" to "ready". A Python job from a
+repository then ran: `uv sync --frozen` from its lockfile, `python` resolved out
+of the resulting `.venv/bin`, and the job printed a value `humanize` computed.
+The TypeScript path was verified the same way earlier.
 
 ## Part 6 — Scope
 
