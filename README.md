@@ -619,11 +619,18 @@ with it, which is what makes a repo work unmodified on another machine.
 ```console
 $ je init ~/code/weather-jobs
 $ cd ~/code/weather-jobs
-$ je new ingest --script
-$ je source add weather .
+$ je new ingest --language python
+$ git init && git add -A && git commit -m "jobs"
+$ gh repo create weather-jobs --private --source=. --push
 ```
 
-Or point it at a repository and let the engine fetch it:
+**A source is a repository**, and that is the whole of it — there is no
+directory kind and no built-in local source. A directory only ever worked while
+the control plane and the worker shared a disk, so a job whose code sat on the
+control plane's own disk could not travel to a worker anywhere else. `je source
+add ./jobs` says exactly that rather than failing on syntax.
+
+Push it, then point the engine at it:
 
 ```console
 $ je source add you/weather-jobs
@@ -635,7 +642,6 @@ registered weather-jobs -> you/weather-jobs
 
 $ je source
 NAME          KIND    WHERE                       REVISION  JOBS  SYNCED
-local         dir     ~/.je/jobs                  -         2     -
 weather-jobs  github  you/weather-jobs@main       a3f81c2   5     4m ago
 ```
 
@@ -694,10 +700,13 @@ $ je run sync
 je run: "sync" is ambiguous: home/sync and weather/sync -- name the source, e.g. home/sync
 ```
 
-Jobs from `local` keep bare names. That is a deliberate departure from treating
-every source alike: until there is a second source, a prefix on every row of
-every view carries no information, and the first job somebody writes should not
-have to know that sources are a concept.
+Every job name is qualified, with no exceptions — a job's source is part of its
+identity, not a decoration added once there are two of them. The **short form
+still works whenever it is unambiguous**, which is what keeps a one-repo
+deployment from having to type a prefix it could not get wrong. Resolution is
+deliberately not a fallback chain with a winner: two sources offering the same
+short name is an ambiguity, and picking one would mean `je run sync` quietly
+running the wrong repo's job.
 
 Two rules follow from sources being plural. **Authority is per source**: a repo
 that will not parse keeps its last good tree serving and does not stop the

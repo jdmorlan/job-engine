@@ -18,16 +18,17 @@ import (
 func init() {
 	register(&Command{
 		Name:  "source",
-		Args:  "[add [<name>] <owner/repo | path> | sync <name> | remove <name>]",
+		Args:  "[add [<name>] <owner/repo> | sync <name> | remove <name>]",
 		Usage: "register and inspect the places definitions come from",
 		Long: "Definitions and the code they run arrive from named sources, and a\n" +
 			"source is a whole tree rather than a pile of YAML: the scripts a job\n" +
 			"runs live beside it and arrive with it (D22).\n\n" +
-			"Every engine has a built-in source called `local`, which is your jobs\n" +
-			"directory. Its jobs keep bare names. Jobs from a registered source are\n" +
-			"named for it -- weather/ingest -- so two repos may both contain a\n" +
-			"sync.yaml without one shadowing the other. The short name still works\n" +
-			"whenever it is unambiguous.\n\n" +
+			"A source is a repository. There is no directory kind and no built-in\n" +
+			"local source: a directory only ever worked while the control plane and\n" +
+			"the worker shared a disk (D27).\n\n" +
+			"A job is named for its source -- weather/ingest -- so two repos may\n" +
+			"both contain a sync.yaml without one shadowing the other. The short\n" +
+			"name still works whenever it is unambiguous.\n\n" +
 			"With no arguments, lists what is registered.",
 		Run: runSource,
 	})
