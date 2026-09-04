@@ -16,11 +16,21 @@
 -- The jobs, chains and routes that came from `local` are tombstoned rather than
 -- deleted, for the reason D19 gives everywhere else: the runs happened, and
 -- `je runs` has to keep saying so a year from now.
-UPDATE jobs   SET removed_at = datetime('now')
+--
+-- Timestamps are written in the store's own format rather than with
+-- datetime('now'), which yields "2026-09-04 17:47:58" -- SQLite's shape, not
+-- this program's. The difference is invisible until something reads the column
+-- back: the first version of this migration wrote it, and the scheduler then
+-- refused to start on a real upgraded database with `cannot parse " 17:47:58"
+-- as "T"`. A migration that writes a column another query parses has to write
+-- what that query expects. Note %f is seconds-with-milliseconds, so it needs
+-- six more zeroes to reach the nanosecond precision the format specifies --
+-- which the second attempt at this got wrong in its turn.
+UPDATE jobs   SET removed_at = strftime('%Y-%m-%dT%H:%M:%f000000Z', 'now')
  WHERE removed_at IS NULL
    AND source IN (SELECT name FROM sources WHERE kind = 'dir');
 
-UPDATE chains SET removed_at = datetime('now')
+UPDATE chains SET removed_at = strftime('%Y-%m-%dT%H:%M:%f000000Z', 'now')
  WHERE removed_at IS NULL
    AND source IN (SELECT name FROM sources WHERE kind = 'dir');
 
@@ -29,5 +39,5 @@ DELETE FROM routes
 
 -- The registration goes; the row stays tombstoned so the names above still
 -- resolve to something the database can describe.
-UPDATE sources SET removed_at = datetime('now')
+UPDATE sources SET removed_at = strftime('%Y-%m-%dT%H:%M:%f000000Z', 'now')
  WHERE removed_at IS NULL AND kind = 'dir';
