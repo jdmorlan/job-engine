@@ -197,7 +197,7 @@ architecture), **D16** (daemon lifecycle and generic event ingress).
 | D18 | Embedding / Almanac | **NEW — react** |
 | D19 | Kubernetes deployment / local-to-cluster | **REVISED v0.6 — two stages, `je service install` withdrawn** |
 | D20 | Control plane + workers / universal execution | **AGREED in shape (v0.6) — 3 questions open, partly v1** |
-| D21 | Shim injection | **NEW (v0.5) — one open question** |
+| D21 | Shim injection | **NEW (v0.5) — shipped (v0.9), worker-owned** |
 | D22 | Job sources | **NEW (v0.5) — two open questions** |
 | D23 | The web client | **NEW (v0.7) — agreed, phase 1 shipped** |
 | D24 | Worker version coherence | **NEW (v0.7) — phase 1 shipped, C10 enforced** |
@@ -1035,7 +1035,7 @@ store, and the engine will say so rather than silently truncating.
 
 ### D21. Shim injection — NEW
 
-**Status:** NEW (v0.5) — one open question
+**Status:** NEW (v0.5) — **shipped (v0.9)**, and it belongs to the worker
 
 *(Numbered last, placed here by topic: it sits directly on top of D6 and makes no
 sense apart from it.)*
@@ -1173,15 +1173,61 @@ D20 refusing to build node infrastructure before a job demands it. Building a
 five-language shim framework before one job has run in one language is how the
 tail starts wagging the dog.
 
-**Open question for you:**
+**Open question, answered by shipping D28:** `language:` is the key. D28 needed
+the same field for dependency preparation and took it, so by the time the shim
+arrived the question had been settled by use rather than by argument — one fact
+about the job, two capabilities, never two fields to keep in step.
 
-1. Is `language:` the right key? It reads well but it is adjacent to D1's
-   `runtime: process | container`, and having both `runtime` and `language` in one
-   file invites confusion about which is which. Alternatives: `shim: typescript`
-   (names the mechanism, so it cannot be mistaken for the executor, but leaks an
-   implementation word into your file), or nesting it as `runtime.language`. I
-   lean `language:` and documenting the pair, but you are the one who will read
-   these files.
+#### Revised (v0.9): the worker owns this, and D28 had already built most of it
+
+**"The engine carries the shim in its binary and materialises it at run time"
+was written while the engine was one process.** Materialising means writing to
+the filesystem the job will run on, and after C11 the control plane has no such
+filesystem: it never executes, and a worker receives a plain `Dispatch` value
+with no way back. So the worker is not the convenient home for this, it is the
+only possible one — the same collision D13 had, from the same cause.
+
+**It is also the half that already knew about languages**, which is why the
+feature collapsed into machinery that existed:
+
+- `Dispatch.Language` already crossed the wire. No new field, no protocol change.
+- `internal/toolchain` was already a table of per-language facts. The shim is
+  another row's worth.
+- `w.prepare` already ran before the command and already returned a directory
+  to prepend to PATH.
+
+**The shim goes in `node_modules/je`, not `./.je/je.mjs`.** The original
+proposed a relative import because it did not want to touch a package manager's
+directory. Two things changed: the worker owns that directory (it just ran the
+install), and D27 means the tree is never anybody's working copy — it is an
+unpacked commit in the worker's own cache, which already holds `node_modules`
+and D28's marker file. So `import je from "je"` resolves from any depth, and
+there is nothing to gitignore because there is no repository to ignore it in.
+The cost is that a package manager could prune it, which is why the shim is
+re-checked on every run and written *after* any install, rather than being
+guarded by the marker file.
+
+**And it forced a decision D28 had made differently.** A missing manifest was a
+hard error: a job declaring `language: python` with no `pyproject.toml` was
+refused. That was right while the field meant only "install my dependencies",
+and wrong the moment it also meant "give me the helpers" — a one-file script
+with nothing to install would have had to invent a manifest to satisfy a check.
+So: **no manifest means nothing to install**, and a tree that *has* a manifest
+it cannot install from is still an error, which is the case D28's rule was
+actually written for.
+
+**`je try` came out of the same conversation** and is the other half of the
+ergonomics: run a job from your definitions repo, on this machine, with no
+control plane and nothing recorded, and see what the engine *would* have
+committed. It is not the daemonless path D20 removed — that was `je run`
+silently falling back to a second executor that wrote to the database. This
+writes nothing, has no run id, and exists so that "do my dependencies install
+and does my shim load?" is a question you answer in a loop while editing.
+
+Its checks are the engine's own function rather than a second implementation,
+deliberately: a harness that enforced slightly different rules would be worse
+than none, because it would send somebody to production confident about a
+contract nobody checks that way.
 
 **Your response (v0.5):**
 

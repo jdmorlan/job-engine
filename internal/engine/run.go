@@ -510,6 +510,34 @@ func unrunnable(job store.Job) error {
 	}
 }
 
+// ValidateChannels checks what a job wrote against the protocol, without
+// committing any of it.
+//
+// Exported for `je try`, which is an authoring harness rather than a second
+// executor: it runs a job on this machine and shows what would have been
+// committed. The point of sharing this function rather than reimplementing the
+// checks is that a harness which enforces slightly different rules from the
+// control plane is worse than no harness at all -- it would send people to
+// production confident about a contract nobody actually checks that way.
+//
+// D20/C11 removed the CLI's ability to execute a run, and this does not bring
+// it back: nothing here writes to a database, records a run, or moves a cursor.
+func ValidateChannels(stateOut, output, events []byte) (json.RawMessage, json.RawMessage, []model.Event, error) {
+	state, err := validateJSONObject(stateOut, jobdef.MaxStateBytes, "state")
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	out, err := validateJSONObject(output, 1<<20, "output")
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	emitted, err := parseEvents(events)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return state, out, emitted, nil
+}
+
 // validateJSONObject checks one of the single-value output channels (D6).
 //
 // Empty means "no change", unambiguously -- which is why not writing the file

@@ -13,11 +13,14 @@ import (
 // definition field called `language:` -- the CLI had an opinion the format did
 // not share, and adding a second language meant adding a second flag.
 //
-// What it deliberately does NOT do is write `language:` into the job file.
-// That field opts a job into shim injection, which is not implemented (D21):
-// jobdef marks any job declaring it as misconfigured, so writing it would
-// scaffold a job that cannot run. The flag picks an interpreter and an
-// extension, and stops there until D21 gives the field a meaning.
+// It writes `language:` into the job file for a language the engine can
+// actually prepare -- which is what that field means now: the worker installs
+// dependencies from the repository's lockfile (D28) and materialises the
+// helpers the job can import (D21). Not for `sh`, which has neither, and where
+// the field would be a declaration with nothing behind it.
+//
+// This used to write it for nothing, because `language:` opted a job into shim
+// injection before shim injection existed. Both halves are built now.
 type scriptLanguage struct {
 	name        string
 	ext         string

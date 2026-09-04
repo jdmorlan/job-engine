@@ -457,6 +457,7 @@ je workers              what is attached, and what it can run
 je sync           reload job definitions, atomically
 je waiting        what has not happened yet, and what is stuck
 je run <job>      run a job now and follow its output
+je try <job>      run a job here from its file, while you are writing it
 je retry <run>    add an attempt to an existing run
 je retention sweep  remove history past its keep period
 je init [dir]     set up a new jobs repository
@@ -747,7 +748,67 @@ command: ["tsx", "ingest.ts"]
 Installed once per tree and keyed on `(language, tool version, lockfile)`, so a
 commit that did not touch dependencies installs nothing. The job's command is
 still the job's command — the language only decides what gets installed and what
-goes on PATH (D28).
+goes on PATH (D28). A tree with no manifest has nothing to install, which is an
+ordinary job rather than a mistake.
+
+Declaring a language also gets you the **helpers**, for the languages that ship
+one:
+
+```typescript
+import je from "je";                       // written by the worker, not installed
+
+const readings = await fetchReadings(je.state.since);
+je.setState({ since: readings.at(-1).ts });
+je.emit("weather.ingested", { count: readings.length });
+je.output({ rows: readings.length });
+```
+
+There is no package to install and no version to match: the shim is materialised
+by the same binary that runs your job, so there is no version pair that can be
+wrong. That is the whole reason it is not published to npm (D21).
+
+**It is sugar and may never be more than sugar.** Every line above reads an
+environment variable the engine sets or writes one of the three output files it
+reads back. A job in a language we ship no shim for does exactly as much through
+the protocol — the shim can never grow a capability the protocol lacks, because
+then "any language participates fully" would quietly stop being true.
+
+### Trying a job while you write it
+
+```console
+$ je try ingest
+je: preparing typescript in ~/code/weather-jobs
+starting from 2026-09-01T00:00:00Z
+ingested 2 readings
+
+ok  ingest would have succeeded
+    cursor  would move to {"since":"2026-09-04T13:00:00Z"}
+    output  {"rows":2}
+    emit    weather.ingested {"count":2}
+```
+
+`je try` reads the definition out of the directory you are standing in, prepares
+the tree exactly as a worker would — your dependencies, your helpers — runs the
+command, and shows what the engine **would** have committed. Nothing is
+recorded: no run, no history, no cursor movement, no control plane. It is for
+the loop you are in while getting a job working.
+
+Give it a starting cursor with `--state '{"since":"..."}'` and a triggering
+payload with `--event '{...}'`.
+
+The checks are the engine's own code, not a second opinion, which matters most
+for the failure it exists to catch early — a job that exits zero and breaks the
+contract anyway:
+
+```console
+$ je try sloppy
+all done!
+
+x  the job exited 0 but broke the protocol:
+   job state must be a JSON object, got [
+```
+
+In a real run that is a failed run and a message you have to go and find.
 
 The engine talks to the job through the environment and three files, with no
 SDK and nothing to import — **the filesystem is the contract** (D6). Everything

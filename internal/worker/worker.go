@@ -28,6 +28,7 @@ import (
 	"github.com/jdmorlan/job-engine/internal/ca"
 	"github.com/jdmorlan/job-engine/internal/engine"
 	"github.com/jdmorlan/job-engine/internal/executor"
+	"github.com/jdmorlan/job-engine/internal/shim"
 	"github.com/jdmorlan/job-engine/internal/store"
 	"github.com/jdmorlan/job-engine/internal/toolchain"
 )
@@ -441,6 +442,18 @@ func (w *Worker) execute(ctx context.Context, d engine.Dispatch) {
 		w.report(ctx, d, engine.Completion{ExecError: err.Error()})
 		return
 	}
+
+	// And the helpers a job may import, for the languages we ship one for
+	// (D21). After the install, deliberately: node_modules is the one
+	// directory a package manager also owns, and writing the shim second is
+	// what stops an install from pruning it.
+	shimEnv, err := shim.Install(d.Language, root)
+	if err != nil {
+		w.report(ctx, d, engine.Completion{ExecError: err.Error()})
+		return
+	}
+	env = append(env, shimEnv...)
+
 	if d.Language != "" {
 		// The tree's own binaries first, then anything this worker installed,
 		// then the ambient PATH.

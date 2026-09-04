@@ -75,13 +75,24 @@ func (w *Worker) prepare(ctx context.Context, language, tree string) (string, er
 				"dependencies are declared in, and none was dispatched", language)
 	}
 
+	// A tree with no manifest at all has no dependencies, which is a perfectly
+	// ordinary job: a single Python file, a script with nothing to install.
+	//
+	// D28 made this a hard error, and that was right while `language:` meant
+	// only "install my dependencies". It means "this job is written in X" now
+	// that D21's shim keys off the same field, and refusing a one-file script
+	// because it has no pyproject.toml would be demanding a manifest whose only
+	// purpose is to satisfy this check.
+	//
+	// The protection D28 wanted is kept where it applies. A tree with a
+	// manifest is a project, and a project that cannot be installed is still an
+	// error -- the case that error was written for is a lockfile somebody
+	// forgot to commit, and that tree has a manifest.
 	if _, err := os.Stat(filepath.Join(tree, tc.Manifest)); err != nil {
-		return "", fmt.Errorf(
-			"this job declares language: %s, so its source needs a %s and there "+
-				"is none beside its definition.\n"+
-				"Dependencies are declared in the repository the job came from, "+
-				"and installed from its lockfile (D28).",
-			language, tc.Manifest)
+		if !os.IsNotExist(err) {
+			return "", err
+		}
+		return "", nil
 	}
 
 	version, err := w.toolVersion(ctx, tc)

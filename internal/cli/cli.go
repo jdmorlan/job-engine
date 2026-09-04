@@ -85,6 +85,19 @@ type attentionError struct{}
 
 func (attentionError) Error() string { return "something needs your attention" }
 
+// errReported means the command failed and has already said how.
+//
+// The dispatcher's job is to make sure a failure is never silent, and its
+// default way of doing that -- printing "je <cmd>: <err>" -- is exactly wrong
+// for a command whose whole output is a rendered report of the failure. Adding
+// a second line under `je try`'s own "x exited 1" would be noise, and dropping
+// the non-zero exit would be a lie.
+var errReported = reportedError{}
+
+type reportedError struct{}
+
+func (reportedError) Error() string { return "already reported" }
+
 // usageError signals a mistake in how the command was invoked, as opposed to a
 // failure while doing what was asked. It exits 2 so scripts can tell the two
 // apart.
@@ -166,6 +179,10 @@ func Main(ctx context.Context, args []string, env *Env) int {
 		// Ctrl-C. The user knows what happened; do not lecture them about it.
 		return ExitError
 	default:
+		var re reportedError
+		if errors.As(err, &re) {
+			return ExitError
+		}
 		var ae attentionError
 		if errors.As(err, &ae) {
 			// Not printed: the command has already rendered what needs

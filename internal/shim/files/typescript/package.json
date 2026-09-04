@@ -1,0 +1,7 @@
+{
+  "name": "je",
+  "version": "0.0.0",
+  "type": "module",
+  "main": "je.mjs",
+  "exports": { ".": "./je.mjs" }
+}

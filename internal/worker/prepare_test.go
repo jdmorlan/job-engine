@@ -113,9 +113,14 @@ func TestAMissingToolchainIsNamedNotGuessed(t *testing.T) {
 	}
 }
 
-// A job declaring a language whose project files are not there is a definition
-// problem, and says so rather than running the command and failing oddly.
-func TestAMissingManifestIsADefinitionProblem(t *testing.T) {
+// A tree with no manifest has no dependencies, which is an ordinary job: a
+// single Python file, a script with nothing to install.
+//
+// D28 made this a hard error, and that was right while `language:` meant only
+// "install my dependencies". D21's shim keys off the same field, so it now
+// means "this job is written in X" -- and demanding a package.json whose only
+// purpose is to satisfy the check would be the tail wagging the dog.
+func TestATreeWithNoManifestHasNothingToInstall(t *testing.T) {
 	if _, err := exec.LookPath("pnpm"); err != nil {
 		t.Skip("pnpm is not installed")
 	}
@@ -124,8 +129,34 @@ func TestAMissingManifestIsADefinitionProblem(t *testing.T) {
 		prepared: newPrepared(),
 		log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
-	_, err := w.prepare(context.Background(), "typescript", t.TempDir())
-	if err == nil || !strings.Contains(err.Error(), "package.json") {
-		t.Errorf("error = %v, want it to name the manifest that is missing", err)
+	binDir, err := w.prepare(context.Background(), "typescript", t.TempDir())
+	if err != nil {
+		t.Fatalf("a tree with nothing to install was refused: %v", err)
+	}
+	if binDir != "" {
+		t.Errorf("binDir = %q for a tree with no dependencies", binDir)
+	}
+}
+
+// The protection D28 wanted, kept where it applies. A tree with a manifest is a
+// project, and a project that cannot be installed from its lockfile is still an
+// error -- a lockfile somebody forgot to commit is exactly the case that error
+// was written for, and that tree has a manifest.
+func TestAProjectThatCannotBeInstalledIsStillAnError(t *testing.T) {
+	if _, err := exec.LookPath("pnpm"); err != nil {
+		t.Skip("pnpm is not installed")
+	}
+	tree := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tree, "package.json"),
+		[]byte(`{"name":"x","version":"0.0.0","dependencies":{"left-pad":"1.3.0"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	w := &Worker{
+		opts:     Options{Name: "test"},
+		prepared: newPrepared(),
+		log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	if _, err := w.prepare(context.Background(), "typescript", tree); err == nil {
+		t.Error("a project with a manifest and no lockfile was prepared anyway")
 	}
 }

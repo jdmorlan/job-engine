@@ -9,8 +9,14 @@
 //
 // What it deliberately does not do is decide how a job runs. The job's own
 // `command:` still runs the job's own file -- this only makes the dependencies
-// present and puts the right binaries on PATH first, so D6's "the filesystem is
-// the contract, there is nothing to import" survives intact.
+// present and puts the right binaries on PATH first.
+//
+// D6's "the filesystem is the contract" survives that, and survives D21's shim
+// beside it, though "there is nothing to import" no longer describes the
+// ergonomics: for a language we ship a shim for there is something to import,
+// and it is sugar over the same files. The rule that matters is R2 -- the shim
+// may never do anything the protocol cannot -- so a language with no shim is
+// less convenient and never less capable.
 package toolchain
 
 import (
@@ -29,8 +35,14 @@ type Toolchain struct {
 	Tool string
 
 	// Manifest is the file whose presence means "this tree is a project of
-	// this kind". Its absence is a definition error worth naming, not a
-	// reason to guess.
+	// this kind".
+	//
+	// Its absence used to be a definition error, on the reasoning that a job
+	// declaring a language and shipping no manifest had made a mistake. That
+	// was right while `language:` meant only "install my dependencies"; it
+	// means "this job is written in X" now that D21's shim keys off the same
+	// field, and a one-file script with nothing to install is an ordinary job
+	// rather than an incomplete project.
 	Manifest string
 
 	// Lockfile pins the dependency graph, and is therefore the cache key: two

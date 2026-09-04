@@ -10,6 +10,7 @@ import (
 
 	"github.com/jdmorlan/job-engine/internal/jobdef"
 	"github.com/jdmorlan/job-engine/internal/schedule"
+	"github.com/jdmorlan/job-engine/internal/toolchain"
 )
 
 func init() {
@@ -30,10 +31,9 @@ func init() {
 			"template is the documentation.\n\n" +
 			"  je new nightly --language sh       scripts/nightly.sh\n" +
 			"  je new ingest --language python    scripts/ingest.py\n\n" +
-			"It names the interpreter and the file extension and nothing else. It\n" +
-			"deliberately does not write `language:` into the job file: that field\n" +
-			"opts a job into shim injection, which is not implemented (D21), so a\n" +
-			"job declaring it loads as misconfigured and will not run.",
+			"For a language the engine can prepare, it also writes `language:` into\n" +
+			"the job file -- which is what makes a worker install your dependencies\n" +
+			"from your lockfile and give you the helpers to import (D28, D21).",
 		Run: runNew,
 	})
 }
@@ -148,6 +148,15 @@ func writeJobFile(env *Env, root, name string, t jobTemplate) error {
 		fmt.Fprintf(&b, "description: %s\n", t.description)
 	}
 	b.WriteString("\n")
+
+	// The declaration, for a language the worker knows how to prepare. Written
+	// above the command because it is a fact about the job rather than a
+	// detail of how it starts, and P3 wants a file to read as decisions.
+	if t.language.set() {
+		if _, ok := toolchain.Lookup(t.language.name); ok {
+			fmt.Fprintf(&b, "language: %s\n\n", t.language.name)
+		}
+	}
 
 	switch {
 	case t.language.set():
