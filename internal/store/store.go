@@ -31,6 +31,12 @@ var migrations embed.FS
 type Store struct {
 	state *sql.DB
 	logs  *sql.DB
+
+	// logsPath is kept because reclaiming space is the one operation whose
+	// result is a fact about the file rather than about the rows (D13), and a
+	// store that has to be told where its own database is has a way of being
+	// called wrong.
+	logsPath string
 }
 
 // Open connects to both databases, creating and migrating them as needed.
@@ -43,13 +49,21 @@ func Open(l paths.Layout) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening state db: %w", err)
 	}
-	logs, err := openDB(l.LogsDB())
+	// The logs database is born knowing how to give space back (D13). Set in
+	// the DSN because auto_vacuum can only be chosen before the first table
+	// exists -- after that it takes a full VACUUM to change, which is what
+	// ReclaimLogSpace does once for a database that predates this.
+	//
+	// Only the logs database. State is small, its rows are the history rather
+	// than its volume, and auto_vacuum's pointer-map pages are a cost with
+	// nothing to buy there.
+	logs, err := openDB(l.LogsDB(), "auto_vacuum(INCREMENTAL)")
 	if err != nil {
 		state.Close()
 		return nil, fmt.Errorf("opening logs db: %w", err)
 	}
 
-	s := &Store{state: state, logs: logs}
+	s := &Store{state: state, logs: logs, logsPath: l.LogsDB()}
 	if err := s.migrate(); err != nil {
 		s.Close()
 		return nil, err
@@ -69,7 +83,7 @@ func (s *Store) Close() error {
 	return joinErrs(errs)
 }
 
-func openDB(path string) (*sql.DB, error) {
+func openDB(path string, extra ...string) (*sql.DB, error) {
 	// Pragmas go in the DSN rather than in a post-open Exec, so that every
 	// connection the pool creates gets them. A pragma set on one connection
 	// does not apply to the next one, which is a classic and very quiet bug.
@@ -79,12 +93,12 @@ func openDB(path string) (*sql.DB, error) {
 	//   foreign_keys(1)    SQLite has them off by default; the schema means them
 	//   synchronous(NORMAL) the WAL-safe setting; FULL costs an fsync per commit
 	q := url.Values{}
-	for _, p := range []string{
+	for _, p := range append([]string{
 		"journal_mode(WAL)",
 		"busy_timeout(5000)",
 		"foreign_keys(1)",
 		"synchronous(NORMAL)",
-	} {
+	}, extra...) {
 		q.Add("_pragma", p)
 	}
 	db, err := sql.Open("sqlite", "file:"+path+"?"+q.Encode())
