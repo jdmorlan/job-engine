@@ -1,9 +1,13 @@
 package cli
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"sort"
 	"strings"
@@ -180,7 +184,11 @@ func ensureNetwork(ctx context.Context) error {
 
 // containerExists reports whether a component is running as a container here.
 func containerExists(ctx context.Context, component string) bool {
-	return exec.CommandContext(ctx, "docker", "inspect", containerName(component)).Run() == nil
+	return containerNamed(ctx, containerName(component))
+}
+
+func containerNamed(ctx context.Context, name string) bool {
+	return exec.CommandContext(ctx, "docker", "inspect", name).Run() == nil
 }
 
 // workerTarget is the address a containerised worker should dial.
@@ -387,4 +395,123 @@ func retag(image, version string) string {
 		return image[:i] + ":" + version
 	}
 	return image + ":" + version
+}
+
+// containerDataDir is where a component keeps its data inside the image.
+//
+// Read from the container rather than assumed, because it is the image that
+// decides: the Dockerfile sets JE_DATA_DIR, and a deployment that overrode it
+// would otherwise have its authority looked for in the wrong place.
+func containerDataDir(ctx context.Context, component string) string {
+	return containerDataDirNamed(ctx, containerName(component))
+}
+
+func containerDataDirNamed(ctx context.Context, name string) string {
+	const fallback = "/var/lib/je"
+	out, err := exec.CommandContext(ctx, "docker", "inspect",
+		"--format", "{{json .Config.Env}}", name).Output()
+	if err != nil {
+		return fallback
+	}
+	var env []string
+	if json.Unmarshal(out, &env) != nil {
+		return fallback
+	}
+	for _, e := range env {
+		if dir, ok := strings.CutPrefix(e, "JE_DATA_DIR="); ok && dir != "" {
+			return dir
+		}
+	}
+	return fallback
+}
+
+// copyAuthorityFromContainer takes the control plane's CA out of its container
+// and puts it where this machine's CLI looks for it.
+//
+// This is the whole reason a person should not have to think about containers.
+// The CLI installed this container and can address it; the certificate it needs
+// in order to speak to it is sitting inside a volume that the host cannot see.
+// Requiring somebody to `docker cp` that themselves -- or worse, to run `je`
+// *inside* the container to do ordinary work -- is the tool failing to do its
+// job, not a step to document.
+//
+// No fingerprint is involved and none is needed. Pinning exists for the case
+// where the authority arrives over a network from something not yet trusted;
+// here it is read out of a container on this machine through the same daemon
+// that started it. Anybody who can do this could replace the container instead.
+func copyAuthorityFromContainer(ctx context.Context, component, dest string) error {
+	return copyAuthorityFrom(ctx, containerName(component), dest)
+}
+
+// copyAuthorityFrom is the same for a container named directly.
+func copyAuthorityFrom(ctx context.Context, name, dest string) error {
+	dataDir := containerDataDirNamed(ctx, name)
+	// The published copy first: it exists precisely to be read by something
+	// else, and it is written 0644 for that reason. The authority's own
+	// directory is the fallback, for a control plane that has not published one.
+	sources := []string{dataDir + "/bootstrap/ca.crt", dataDir + "/ca/ca.crt"}
+
+	var last error
+	for _, src := range sources {
+		out, err := exec.CommandContext(ctx, "docker", "cp",
+			name+":"+src, dest).CombinedOutput()
+		if err == nil {
+			return nil
+		}
+		last = fmt.Errorf("copying %s out of %s: %s",
+			src, name, strings.TrimSpace(lastLine(string(out))))
+	}
+	return last
+}
+
+// copyBootstrapTokenFrom takes the local-enrolment token out of a control plane
+// container, so a worker on that host enrolls itself with nothing pasted.
+//
+// The trust argument is the one that justified the token in the first place,
+// one layer out. On a single machine the token sits beside the CA private key,
+// so anybody who can read it could sign their own certificates anyway; here,
+// anybody who can `docker cp` out of this container can equally copy that key
+// out, exec in it, or replace it with one of their own. The token grants
+// nothing that access to the container did not already grant, which is exactly
+// why requiring a person to paste one would protect nothing and cost a step
+// (D25).
+//
+// Nothing is written to the host: the token goes straight back as a string,
+// because it is short-lived, reissued on every control plane start, and there
+// is no reason for a second copy of it to exist on disk.
+func copyBootstrapTokenFrom(ctx context.Context, name string) (string, error) {
+	dataDir := containerDataDirNamed(ctx, name)
+	out, err := exec.CommandContext(ctx, "docker", "cp",
+		name+":"+dataDir+"/bootstrap/token", "-").Output()
+	if err != nil {
+		return "", fmt.Errorf("reading the enrolment token from %s: %w", name, err)
+	}
+	token, err := singleFileFromTar(out)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(token), nil
+}
+
+// singleFileFromTar pulls the one regular file out of `docker cp ... -`, which
+// streams a tar archive rather than the file itself.
+func singleFileFromTar(archive []byte) (string, error) {
+	r := tar.NewReader(bytes.NewReader(archive))
+	for {
+		header, err := r.Next()
+		if err == io.EOF {
+			return "", errors.New("the archive held no file")
+		}
+		if err != nil {
+			return "", err
+		}
+		if header.Typeflag != tar.TypeReg {
+			continue
+		}
+		body, err := io.ReadAll(io.LimitReader(r, 1<<20))
+		if err != nil {
+			return "", err
+		}
+		return string(body), nil
+	}
 }

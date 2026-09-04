@@ -19,6 +19,15 @@ type Endpoint struct {
 	// Kind is how it was set up -- "docker" or "native" -- so `remove` and
 	// `status` can say something true rather than guessing.
 	Kind string `json:"kind"`
+
+	// Container names the container, when it is one.
+	//
+	// Recorded rather than derived, so that reaching a containerised control
+	// plane does not depend on it having the name this version of the CLI
+	// happens to generate. An endpoint file written before this existed has no
+	// name in it, and the caller falls back to the generated one -- which is
+	// what that deployment is called anyway.
+	Container string `json:"container,omitempty"`
 }
 
 // WriteEndpoint records where a control plane was put.

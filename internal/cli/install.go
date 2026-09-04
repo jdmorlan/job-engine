@@ -447,6 +447,7 @@ func runDockerInstall(
 	if endpoint != "" {
 		if err := WriteEndpoint(env.Layout.Endpoint(), Endpoint{
 			Address: endpoint, Kind: "docker",
+			Container: containerName(spec.component),
 		}); err != nil {
 			return err
 		}

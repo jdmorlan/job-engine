@@ -116,6 +116,14 @@ For anything unattended, Docker — the same image that runs in a cluster:
 $ docker compose up -d      # control plane and its system worker
 ```
 
+Or `je control-plane install --docker`, which sets the same thing up and leaves
+the CLI able to manage it: **you should never have to run a docker command to
+use the engine.** A CLI on the host of a containerised control plane finds it,
+takes the certificate it needs out of the container by itself, and a worker
+started there enrolls with nothing pasted — `je upgrade` restarts it too. The
+exception is this compose file, which is yours: it owns its containers, so the
+CLI reports them and leaves them alone.
+
 Two rules in `compose.yaml` that are not optional. The data directory must be a
 **named volume, never a bind mount** — SQLite over macOS bind mounts (and over
 NFS) has silent locking pathologies that surface weeks later. And `TZ` must be

@@ -229,28 +229,55 @@ func autoEnroll(ctx context.Context, env *Env, target, name string, labels, role
 	if _, err := os.Stat(env.Layout.IdentityCert()); err == nil {
 		return nil
 	}
-	token, err := os.ReadFile(env.Layout.BootstrapToken())
-	if err != nil {
+	token, err := localBootstrapToken(ctx, env)
+	if err != nil || token == "" {
 		return nil
 	}
 
-	// Verified against the CA on disk, which this process can read for the same
-	// reason it could read the token. No pin is needed: locality is the proof,
+	// Verified against the CA this machine has, which it can get for the same
+	// reason it could get the token. No pin is needed: locality is the proof,
 	// and there is no network for anybody to sit in the middle of.
-	//
-	// A token with no authority beside it is a broken bootstrap directory
-	// rather than a reason to fall back -- there is nothing to fall back to.
-	caPEM, err := os.ReadFile(env.Layout.BootstrapCA())
+	path, err := authorityPath(env.Layout)
 	if err != nil {
 		return fmt.Errorf(
-			"there is a local enrollment token but no authority beside it at %s: %w",
-			env.Layout.BootstrapCA(), err)
+			"there is a local enrollment token but no authority to go with it: %w", err)
+	}
+	caPEM, err := os.ReadFile(path)
+	if err != nil {
+		return err
 	}
 	c, err := DialVerified(target, caPEM)
 	if err != nil {
 		return err
 	}
-	return enrollWorkerAs(ctx, env, c, strings.TrimSpace(string(token)), name, labels, roles)
+	return enrollWorkerAs(ctx, env, c, token, name, labels, roles)
+}
+
+// localBootstrapToken finds the token that lets a worker on this machine enroll
+// itself, wherever the control plane beside it keeps one.
+//
+// Two places, and the second is the point. A native control plane leaves it in
+// the data directory they share. A containerised one leaves it inside its own
+// volume, which the host cannot see -- and "the control plane is on this
+// machine" is no less true for that. Reaching into the container is what makes
+// `je worker run` beside a containerised control plane need nothing pasted,
+// which is what the two deployment shapes being one product actually requires.
+func localBootstrapToken(ctx context.Context, env *Env) (string, error) {
+	body, err := os.ReadFile(env.Layout.BootstrapToken())
+	if err == nil {
+		return strings.TrimSpace(string(body)), nil
+	}
+	if !os.IsNotExist(err) {
+		return "", err
+	}
+
+	name := controlPlaneContainer(env.Layout)
+	if dockerAvailable() != nil || !containerNamed(ctx, name) {
+		// No control plane on this machine. Not an error: this is every worker
+		// that lives somewhere else, and it enrolls with a token instead.
+		return "", nil
+	}
+	return copyBootstrapTokenFrom(ctx, name)
 }
 
 func enrollWorker(ctx context.Context, env *Env, c *Client, token string) error {

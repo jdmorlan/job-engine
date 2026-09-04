@@ -155,6 +155,15 @@ func authorityPath(l paths.Layout) (string, error) {
 			return path, nil
 		}
 	}
+
+	// Nothing on disk, but this machine may be the one running the control
+	// plane in a container it installed. The authority is then a `docker cp`
+	// away, and doing that here is the difference between a CLI that works and
+	// one that tells somebody to go and use docker (D20/D25).
+	if err := adoptContainerAuthority(l); err == nil {
+		return l.IdentityCA(), nil
+	}
+
 	return "", fmt.Errorf(
 		"no control plane authority on this machine.\n"+
 			"Looked in:\n  %s\n\n"+
@@ -167,6 +176,35 @@ func authorityPath(l paths.Layout) (string, error) {
 			"Anything else needs a copy of the control plane's ca.crt at the second\n"+
 			"path above.",
 		strings.Join(candidates, "\n  "))
+}
+
+// adoptContainerAuthority takes the CA out of a control plane container on this
+// machine, once, so that every later command finds it on disk like any other.
+//
+// Silent when there is no such container: that is the ordinary case for a CLI
+// on somebody's laptop, and it falls through to the error that explains
+// enrolling.
+func adoptContainerAuthority(l paths.Layout) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	name := controlPlaneContainer(l)
+	if dockerAvailable() != nil || !containerNamed(ctx, name) {
+		return errors.New("no control plane container on this machine")
+	}
+	if err := os.MkdirAll(l.Data, 0o700); err != nil {
+		return err
+	}
+	return copyAuthorityFrom(ctx, name, l.IdentityCA())
+}
+
+// controlPlaneContainer is what this data directory's control plane container
+// is called: what `install` recorded, or the name it would have generated.
+func controlPlaneContainer(l paths.Layout) string {
+	if e, err := ReadEndpoint(l.Endpoint()); err == nil && e.Container != "" {
+		return e.Container
+	}
+	return containerName("control-plane")
 }
 
 // authorityPool verifies the control plane against the CA it issues from.
