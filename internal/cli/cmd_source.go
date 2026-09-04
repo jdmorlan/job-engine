@@ -181,9 +181,21 @@ func addSource(ctx context.Context, env *Env, spec sourceSpec) error {
 		req.Kind = store.SourceKindGitHub
 		req.Location = repo.String()
 	default:
+		// A path is the likely mistake, and it used to work, so it gets the
+		// reason rather than a syntax complaint (D27).
+		if strings.Contains(spec.location, "/") && (strings.HasPrefix(spec.location, ".") ||
+			strings.HasPrefix(spec.location, "/") || strings.HasPrefix(spec.location, "~")) {
+			return fmt.Errorf(
+				"%s is a path, and a source is a repository.\n\n"+
+					"A directory only ever worked while the control plane and the worker\n"+
+					"shared a disk: a job whose code lives here cannot travel to a worker\n"+
+					"anywhere else. Push it and register the repository:\n"+
+					"  git init && git add -A && git commit -m \"jobs\"\n"+
+					"  gh repo create <name> --private --source=. --push\n"+
+					"  je source add %s <you>/<name>", spec.location, spec.name)
+		}
 		return fmt.Errorf(
-			"%s is neither a directory here nor a GitHub repository -- "+
-				"write a repository as owner/repo", spec.location)
+			"%s is not a GitHub repository -- write it as owner/repo", spec.location)
 	}
 
 	if req.Kind == store.SourceKindGitHub && req.TokenSecret == "" {
