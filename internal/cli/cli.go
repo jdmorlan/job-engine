@@ -135,7 +135,10 @@ func Main(ctx context.Context, args []string, env *Env) int {
 		return ExitError
 	}
 	if *dataDir != "" {
-		layout.Data = *dataDir
+		if layout, err = paths.At(*dataDir); err != nil {
+			fmt.Fprintf(env.Stderr, "je: %v\n", err)
+			return ExitError
+		}
 	}
 	env.Layout = layout
 

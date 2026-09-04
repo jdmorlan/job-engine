@@ -21,6 +21,22 @@ type Layout struct {
 	Data string
 }
 
+// At is the layout for one named data directory.
+//
+// Absolute, always, which is the whole point of it existing next to Resolve.
+// `--data-dir ./scratch` used to be stored verbatim, and a relative path is a
+// fact about the shell that typed it rather than about the deployment: the
+// moment anything runs in a different directory -- a subprocess, a service
+// started from /, a system job in its scratch dir (P2) -- it resolves to
+// somewhere else, or to nothing.
+func At(dir string) (Layout, error) {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return Layout{}, fmt.Errorf("resolving data dir %q: %w", dir, err)
+	}
+	return Layout{Data: abs}, nil
+}
+
 // Resolve picks the layout from the environment, applying the documented
 // precedence: explicit override, then XDG, then a dotdir in $HOME.
 func Resolve() (Layout, error) {
@@ -36,15 +52,10 @@ func Resolve() (Layout, error) {
 			data = filepath.Join(home, ".je")
 		}
 	}
-	abs, err := filepath.Abs(data)
-	if err != nil {
-		return Layout{}, fmt.Errorf("resolving data dir %q: %w", data, err)
-	}
-
 	// No jobs directory. Definitions are not read from anywhere the engine
 	// owns: they live in a repository and arrive as a registered source, so
 	// there is nothing here to configure and JE_JOBS_DIR is gone with it.
-	return Layout{Data: abs}, nil
+	return At(data)
 }
 
 // StateDB holds runs, events, definitions and cursors (Appendix A).

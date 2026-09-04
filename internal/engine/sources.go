@@ -198,8 +198,22 @@ func (e *Engine) SyncSource(ctx context.Context, name string) (LoadResult, error
 func (e *Engine) RemoveSource(ctx context.Context, name string) (int64, error) {
 	// Confirms it exists, so removing a name nobody registered says so rather
 	// than reporting that it tombstoned nothing.
-	if _, err := e.store.SourceByName(ctx, name); err != nil {
+	src, err := e.store.SourceByName(ctx, name)
+	if err != nil {
 		return 0, err
+	}
+	if src.Kind == store.SourceKindSystem {
+		// Refused rather than allowed and then quietly undone. The engine
+		// registers this source at every start, so removing it would report a
+		// success that the next restart reverses -- and a command whose effect
+		// expires when you reboot is worse than one that says no (P1).
+		return 0, fmt.Errorf(
+			"%s is the engine's own work and cannot be unregistered.\n"+
+				"The engine registers it at every start, so this would be undone by the "+
+				"next restart -- and a command whose effect expires when you reboot is "+
+				"worse than one that says no.\n"+
+				"There is no way to turn off a system job yet; see `je jobs --all` for "+
+				"what they are.", name)
 	}
 	// Order matters: tombstone while the rows still name the source, then drop
 	// the registration.

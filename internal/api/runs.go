@@ -20,6 +20,7 @@ import (
 // request until a job finishes would tie a run's lifetime to a connection, and
 // D8 already allows an hour-long job by default.
 func (s *Server) registerRuns(mux *http.ServeMux) {
+	mux.HandleFunc("POST /v1/retention/sweep", s.handleRetentionSweep)
 	mux.HandleFunc("POST /v1/runs", s.handleTriggerRun)
 	mux.HandleFunc("POST /v1/runs/{id}/retry", s.handleRetryRun)
 	mux.HandleFunc("GET /v1/runs/{id}/detail", s.handleRunDetail)
@@ -67,6 +68,21 @@ func (s *Server) handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, run)
+}
+
+// handleRetentionSweep runs D13's sweep.
+//
+// A write, so the identity gate covers it the moment a deployment has one
+// (D25) -- which matters more here than for most: this is the endpoint that
+// deletes history, and the caller is ordinarily a worker running the engine's
+// own job rather than a person.
+func (s *Server) handleRetentionSweep(w http.ResponseWriter, r *http.Request) {
+	result, err := s.engine.Sweep(r.Context(), actorOf(r, ""))
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 // RetryRequest is the body of POST /v1/runs/{id}/retry.

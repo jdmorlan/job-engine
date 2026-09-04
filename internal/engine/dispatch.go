@@ -92,6 +92,19 @@ type Dispatch struct {
 	// resolved by whoever will use it.
 	Workdir string `json:"workdir"`
 
+	// System marks the engine's own work (P2), and it is a grant rather than a
+	// label. A system job runs *as the worker itself*: the worker's own `je`
+	// binary rather than whatever is on PATH, and the worker's own data
+	// directory in its environment, so `je retention sweep` reaches the
+	// control plane exactly as a person's CLI on that machine would.
+	//
+	// Scoped to these jobs deliberately. D10's rule is that a job inherits no
+	// credentials by accident, and the data directory is where the secret
+	// store and this machine's certificate live -- so handing it to every job
+	// would quietly undo that. The engine's own work is the one case where the
+	// worker is not running somebody else's code.
+	System bool `json:"system,omitempty"`
+
 	// Language is the ecosystem this job's code belongs to, so the worker can
 	// install its dependencies from the tree before running it (D28).
 	//
@@ -397,6 +410,9 @@ func (e *Engine) dispatchFor(ctx context.Context, p Prepared, worker store.Worke
 		// above has somewhere to go (D25). A dir source deliberately carries
 		// neither: there is no commit, and inventing one would turn an honest
 		// refusal into a wrong answer.
+		// Only a real repository is fetchable. A system source's revision is a
+		// version, not a commit, and offering it here would have the worker
+		// ask the control plane for a tarball of a tree that does not exist.
 		if src.Kind == store.SourceKindGitHub && src.Revision != "" {
 			sourceName, sourceRevision = src.Name, src.Revision
 		}
@@ -409,6 +425,7 @@ func (e *Engine) dispatchFor(ctx context.Context, p Prepared, worker store.Worke
 		RunID:          p.Run.ID,
 		Attempt:        attempt.Number,
 		JobSlug:        p.Job.Slug,
+		System:         IsSystem(p.Job.Slug),
 		Command:        p.Def.Command,
 		Workdir:        p.Def.Workdir,
 		Language:       p.Def.Language,

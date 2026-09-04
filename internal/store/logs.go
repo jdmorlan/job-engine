@@ -130,6 +130,15 @@ const reclaimChunk = 500
 //
 // maxPages caps the work; 0 means "until the freelist is empty".
 func (s *Store) ReclaimLogSpace(ctx context.Context, maxPages int) (LogSpace, error) {
+	// Checkpointed before measuring, or the two sizes are not the same
+	// measurement: in WAL mode recent writes live outside the main file until a
+	// checkpoint folds them in, so a before-size taken now against an
+	// after-size taken later counts that fold as part of the reclaim. The
+	// first version of this reported "reclaimed -24576 B" on a database it had
+	// just tidied, which is how it was found.
+	if err := s.checkpointLogs(ctx); err != nil {
+		return LogSpace{}, err
+	}
 	out := LogSpace{BytesBefore: fileSize(s.logsPath)}
 
 	mode, err := s.pragmaInt(ctx, "auto_vacuum")
@@ -184,8 +193,8 @@ func (s *Store) ReclaimLogSpace(ctx context.Context, maxPages int) (LogSpace, er
 	// WAL mode the file itself does not shrink until a checkpoint moves the
 	// change into it. Without this the disk is unchanged and the sweep would
 	// report a reclaim nobody can see.
-	if _, err := s.logs.ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
-		return out, fmt.Errorf("checkpointing after a reclaim: %w", err)
+	if err := s.checkpointLogs(ctx); err != nil {
+		return out, err
 	}
 	out.BytesAfter = fileSize(s.logsPath)
 	return out, nil
@@ -207,8 +216,16 @@ func (s *Store) convertToIncremental(ctx context.Context) error {
 	if _, err := s.logs.ExecContext(ctx, `VACUUM`); err != nil {
 		return fmt.Errorf("rewriting the logs database: %w", err)
 	}
+	return s.checkpointLogs(ctx)
+}
+
+// checkpointLogs folds the write-ahead log into the database file.
+//
+// Both a correctness step and a measurement one: nothing about the file's size
+// on disk means anything until this has run.
+func (s *Store) checkpointLogs(ctx context.Context) error {
 	if _, err := s.logs.ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
-		return fmt.Errorf("checkpointing after the rewrite: %w", err)
+		return fmt.Errorf("checkpointing the logs database: %w", err)
 	}
 	return nil
 }

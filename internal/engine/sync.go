@@ -9,6 +9,7 @@ import (
 
 	"github.com/jdmorlan/job-engine/internal/model"
 	"github.com/jdmorlan/job-engine/internal/store"
+	"github.com/jdmorlan/job-engine/internal/system"
 )
 
 // EventDefinitionsSynced records a definition reload (P1, D11).
@@ -103,6 +104,15 @@ func (e *Engine) Sync(ctx context.Context) (LoadResult, error) {
 // loadRegistered loads whichever kind of source this is.
 func (e *Engine) loadRegistered(ctx context.Context, src store.Source) (LoadResult, error) {
 	switch src.Kind {
+	case store.SourceKindSystem:
+		// Compiled in, so there is nothing to fetch and a sync is a re-read of
+		// the binary. It goes through the same path as everything else rather
+		// than being skipped, because `je sync` reporting a source it silently
+		// did not touch is the kind of quiet exception that turns into a bug
+		// report about jobs not updating.
+		result, err := e.Load(ctx, src, system.Source())
+		result.Revision = e.opts.Version
+		return result, err
 	case store.SourceKindGitHub:
 		result, err := e.loadGitHub(ctx, src)
 		if err == nil && result.Revision != src.Revision {

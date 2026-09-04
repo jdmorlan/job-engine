@@ -22,6 +22,16 @@ import (
 // kind was already broken.
 const SourceKindGitHub = "github"
 
+// SourceKindSystem is the engine's own work, defined as jobs (P2).
+//
+// Not an exception to D27 so much as its limiting case. The rule is that code
+// which cannot travel is not a source; these definitions run `je`, which is on
+// every worker by definition because C10 requires the worker to match the
+// control plane. There is no location to fetch, no token, and no ref: the
+// revision is the engine's version, so a run still records exactly which
+// definition of its own work the engine executed (D11).
+const SourceKindSystem = "system"
+
 // Source is a named place definitions come from.
 type Source struct {
 	Name     string `json:"name"`

@@ -114,6 +114,7 @@ func runQuickstart(ctx context.Context, env *Env, args []string) error {
 		// worker's own defaults put its age key under <data>/cache while
 		// `je worker keygen` wrote <data>/identity, so a secret encrypted to
 		// the key you had just created could not be read here (D25).
+		DataDir:      env.Layout.Data,
 		CacheDir:     env.Layout.Data,
 		ToolchainBin: env.Layout.ToolchainBin(),
 		IdentityFile: env.Layout.AgeIdentity(),

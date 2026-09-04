@@ -88,6 +88,13 @@ func TestReclaimingLogSpaceGivesTheDiskBack(t *testing.T) {
 	if space.BytesAfter >= space.BytesBefore {
 		t.Fatalf("the file did not shrink: %d -> %d", space.BytesBefore, space.BytesAfter)
 	}
+	// Both sizes must be the same measurement. Taking the first before a
+	// checkpoint and the second after it counted the write-ahead log being
+	// folded in as part of the reclaim, and reported a negative number on a
+	// database it had just tidied.
+	if space.Reclaimed() <= 0 {
+		t.Fatalf("reclaimed %d bytes, which is not a reclaim", space.Reclaimed())
+	}
 	// Deleting 3 of every 4 rows should return most of the file, not a token.
 	if space.Reclaimed() < full/2 {
 		t.Errorf("reclaimed only %d of a %d byte file", space.Reclaimed(), full)
@@ -162,6 +169,9 @@ func TestADatabaseFromBeforeD13IsConvertedOnce(t *testing.T) {
 	}
 	if again.Converted {
 		t.Error("the database was converted twice, so every sweep pays for a full VACUUM")
+	}
+	if again.Reclaimed() < 0 {
+		t.Errorf("a second sweep reported reclaiming %d bytes", again.Reclaimed())
 	}
 }
 

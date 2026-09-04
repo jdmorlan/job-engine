@@ -245,6 +245,13 @@ func (e *Engine) loadDir(ctx context.Context, registered store.Source, dir strin
 // fetched once, which is what a job dispatched from an unfetched source has to
 // report rather than guess about.
 func (e *Engine) SourceDir(src store.Source) string {
+	if src.Kind == store.SourceKindSystem {
+		// The engine's own jobs have no tree (P2). Their revision is the
+		// binary's version rather than a commit, so joining it onto the cache
+		// path would name a directory that has never existed and send the
+		// worker looking for it.
+		return ""
+	}
 	if src.Revision == "" {
 		return ""
 	}

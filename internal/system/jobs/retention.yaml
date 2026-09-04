@@ -1,0 +1,8 @@
+name: Retention
+description: Removes history past its keep period and returns the space to the disk.
+
+command: ["je", "retention", "sweep"]
+timeout: 30m
+
+on:
+  - cron: "0 4 * * *"

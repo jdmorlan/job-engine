@@ -194,6 +194,13 @@ func (e *Engine) Start(ctx context.Context) error {
 		return fmt.Errorf("reading last stop event: %w", err)
 	}
 
+	// The engine's own jobs, before the routes that might wire them and before
+	// the scheduler reads the table (P2). They are compiled in, so this is not
+	// a fetch and cannot fail on a network.
+	if err := e.loadSystemSource(ctx); err != nil {
+		return err
+	}
+
 	// The route table before the first event, so a chain that starts from
 	// engine.started is wired by the time the engine says it started. Routes
 	// live in the database, so this is the table the last load left behind --

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"text/tabwriter"
 
+	"github.com/jdmorlan/job-engine/internal/engine"
 	"github.com/jdmorlan/job-engine/internal/store"
 )
 
@@ -22,7 +23,7 @@ func init() {
 func runJobs(ctx context.Context, env *Env, args []string) error {
 	cmd := commands["jobs"]
 	fs := newFlagSet(cmd, env)
-	all := fs.Bool("all", false, "include jobs whose definition file has been removed")
+	all := fs.Bool("all", false, "include removed jobs, and the engine's own")
 	if extra, err := parseArgs(fs, args); err != nil {
 		return err
 	} else if len(extra) > 0 {
@@ -40,13 +41,20 @@ func runJobs(ctx context.Context, env *Env, args []string) error {
 		// have tidied up reads as a wall of broken jobs -- the same reason P2
 		// keeps system jobs out of the default view.
 		var jobs []store.Job
-		var hidden int
+		var hidden, housekeeping int
 		for _, j := range loaded {
-			if j.Removed() && !*all {
+			switch {
+			case j.Removed() && !*all:
 				hidden++
-				continue
+			case engine.IsSystem(j.Slug) && !*all:
+				// P2's second rider, in the view it was written about: the
+				// engine's own jobs are real jobs with real runs, and putting
+				// them on the "is everything OK?" screen would make that
+				// screen mostly housekeeping. Visible on request.
+				housekeeping++
+			default:
+				jobs = append(jobs, j)
 			}
-			jobs = append(jobs, j)
 		}
 
 		if len(jobs) == 0 {
@@ -82,6 +90,10 @@ func runJobs(ctx context.Context, env *Env, args []string) error {
 		if hidden > 0 {
 			fmt.Fprintf(env.Stdout,
 				"\n%d removed job(s) hidden; their history is intact. je jobs --all\n", hidden)
+		}
+		if housekeeping > 0 {
+			fmt.Fprintf(env.Stdout,
+				"\n%d job(s) the engine runs for itself, hidden. je jobs --all\n", housekeeping)
 		}
 		return nil
 	})

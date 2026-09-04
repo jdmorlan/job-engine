@@ -318,7 +318,13 @@ func printLoaded(env *Env, name string, result engine.LoadResult) {
 }
 
 func sourceWhere(s engine.SourceStatus) string {
-	if s.Ref != "" {
+	switch {
+	case s.Kind == store.SourceKindSystem:
+		// Not a location anybody could type, and an empty cell reads like
+		// something failed to load rather than like a source with nowhere to
+		// be (P1).
+		return "built in"
+	case s.Ref != "":
 		return s.Location + "@" + s.Ref
 	}
 	return s.Location

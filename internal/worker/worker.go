@@ -48,6 +48,18 @@ type Options struct {
 	// Version must match the control plane's (C10).
 	Version string
 
+	// DataDir is this machine's `je` data directory, and it is handed to the
+	// engine's own jobs and to nothing else (P2). It is how `je retention
+	// sweep` running here finds the control plane's address and this
+	// machine's certificate -- the same way a person's `je` on this machine
+	// would.
+	//
+	// Separate from CacheDir although both are currently the same directory:
+	// one is where trees are kept and is disposable, the other is the identity
+	// and configuration of this installation. Conflating them would make the
+	// grant above accidental.
+	DataDir string
+
 	// CacheDir is where this machine keeps trees fetched from the control
 	// plane. Content-addressed by commit, so it is disposable: deleting it
 	// costs a re-download and nothing else (D25).
@@ -399,10 +411,25 @@ func (w *Worker) execute(ctx context.Context, d engine.Dispatch) {
 		w.report(ctx, d, engine.Completion{ExecError: err.Error()})
 		return
 	}
+	if root == "" && d.System {
+		// The engine's own jobs have no tree: their code is the `je` binary,
+		// which is already on this machine. They run in their own scratch
+		// directory, which is the one JOB_WORKDIR already names, rather than
+		// in a directory nobody chose.
+		root = scratch
+	}
 	workdir, err := w.resolveWorkdir(d.Workdir, root)
 	if err != nil {
 		w.report(ctx, d, engine.Completion{ExecError: err.Error()})
 		return
+	}
+
+	command := d.Command
+	if d.System {
+		if command, err = w.asItself(command, &env); err != nil {
+			w.report(ctx, d, engine.Completion{ExecError: err.Error()})
+			return
+		}
 	}
 
 	// Dependencies for this job's language, installed once per tree (D28).
@@ -440,7 +467,7 @@ func (w *Worker) execute(ctx context.Context, d engine.Dispatch) {
 	sink := newLogShipper(w.client, d.RunID, d.Attempt, w.log)
 	sink.redact(redactorFor(repoSecrets))
 	result, execErr := executor.Process{}.Run(runCtx, executor.Spec{
-		Command: d.Command,
+		Command: command,
 		Workdir: workdir,
 		Env:     env,
 		Timeout: d.Timeout,
@@ -564,6 +591,43 @@ const maxChannelBytes = 4 << 20
 
 // workerID derives a stable id from a name.
 func workerID(name string) string { return "worker-" + name }
+
+// asItself prepares a system job to run as this worker (P2).
+//
+// Two substitutions, and both are about the same thing: the engine's own work
+// must reach the engine, and only the worker knows how.
+//
+// `je` means *this* binary, not whatever the PATH happens to hold. That is not
+// a convenience -- C10 requires a worker to be the same version as the control
+// plane, and a stale `je` earlier in the PATH would put a different version's
+// CLI on the API with nothing to catch it, which is exactly the skew C10 exists
+// to refuse. The worker's own executable is the one binary guaranteed to match.
+//
+// And the data directory, so the CLI finds the control plane's address and this
+// machine's certificate the same way a person's `je` on this machine would.
+// D10 strips the environment precisely so a job cannot inherit credentials by
+// accident; this puts one back, for the one job that is the engine's own.
+func (w *Worker) asItself(command []string, env *[]string) ([]string, error) {
+	if len(command) == 0 {
+		return nil, errors.New("a system job has no command")
+	}
+	*env = append(*env, "JE_DATA_DIR="+w.opts.DataDir)
+
+	if command[0] != "je" {
+		// Not every system job has to be the CLI, and one that is not gets no
+		// special resolution -- only the environment above.
+		return command, nil
+	}
+	self, err := os.Executable()
+	if err != nil {
+		return nil, fmt.Errorf("locating this worker's own binary to run %q: %w", command[0], err)
+	}
+	// Copied rather than assigned into: the dispatch is the record of what the
+	// control plane asked for, and `je logs` should not show a run whose
+	// command is an absolute path nobody wrote.
+	out := append([]string{self}, command[1:]...)
+	return out, nil
+}
 
 // resolveWorkdir decides where a command runs, on this machine.
 //
