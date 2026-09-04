@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"encoding/pem"
 	"io"
 	"log/slog"
 	"net/http"
@@ -122,7 +123,7 @@ func workerAgainstStub(t *testing.T) (*Worker, *int) {
 	mustWrite(t, filepath.Join(tree, "scripts", "ingest.sh"), "#!/bin/sh\necho ingesting\n")
 
 	served := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		want := "/v1/sources/weather/tree/" + testRevision
 		if r.URL.Path != want {
 			t.Errorf("requested %q, want %q", r.URL.Path, want)
@@ -136,7 +137,17 @@ func workerAgainstStub(t *testing.T) (*Worker, *int) {
 	}))
 	t.Cleanup(server.Close)
 
-	client, err := Dial(strings.TrimPrefix(server.URL, "http://"))
+	// A TLS server with its own certificate written out for the client to
+	// verify against, because that is the only kind of control plane there is
+	// (D25) -- and the transport is exactly what a fake would get wrong.
+	caPath := filepath.Join(t.TempDir(), "ca.crt")
+	if err := os.WriteFile(caPath, pem.EncodeToMemory(&pem.Block{
+		Type: "CERTIFICATE", Bytes: server.Certificate().Raw,
+	}), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	client, err := DialCA(strings.TrimPrefix(server.URL, "https://"), caPath)
 	if err != nil {
 		t.Fatal(err)
 	}

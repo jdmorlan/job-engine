@@ -13,8 +13,9 @@ services:
     image: job-engine:dev
     # --tls-host names how OTHER containers reach this one. A wildcard bind has
     # no name of its own, and the service name is not something the process can
-    # discover -- so it is told (D25).
-    command: ["control-plane", "run", "--addr", "0.0.0.0:7620", "--tls", "--tls-host", "control-plane"]
+    # discover -- so it is told (D25). There is no --tls beside it any more: a
+    # control plane serves HTTPS and there is no other way to run one.
+    command: ["control-plane", "run", "--addr", "0.0.0.0:7620", "--tls-host", "control-plane"]
     ports:
       # Published on loopback only. The trust boundary moved from the process
       # to the network (D19's rider on N1), and binding 0.0.0.0 on your laptop

@@ -87,6 +87,13 @@ func runWaiting(ctx context.Context, env *Env, args []string) error {
 					"    start one:  je worker run --labels %s\n",
 					u.Label, len(u.Runs), strings.Join(u.Jobs, ", "), u.Label)
 			}
+			// The command above is the local case. A label like `macos` usually
+			// means a machine that is not this one, and that machine needs an
+			// identity before it can talk to anything (D25) -- so the line that
+			// mints one belongs here rather than in a page somebody has to know
+			// to go and read.
+			fmt.Fprintln(env.Stdout,
+				"  On another machine, enrol it first:  je enrol <name> --labels <label>")
 			fmt.Fprintln(env.Stdout)
 		}
 

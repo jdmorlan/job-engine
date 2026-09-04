@@ -33,20 +33,53 @@ import (
 // partial view assembled from two places.
 type Client struct {
 	// identity is the certificate presented on every connection, when this
-	// worker has one. Nil on a plaintext client.
+	// worker has one. Nil on a client that enrolled with nobody -- it still
+	// verifies the control plane, it just proves nothing about itself.
 	identity *identity
 
 	base *url.URL
 	http *http.Client
 }
 
-// Dial returns a client for an address like "127.0.0.1:7620".
-func Dial(addr string) (*Client, error) {
-	base, err := url.Parse("http://" + addr)
+// DialCA returns a client that verifies the control plane and presents no
+// certificate of its own.
+//
+// The shape for a worker that has not enrolled yet: the control plane verifies
+// a client certificate if one is given and does not require one, so an
+// anonymous worker can still register and claim work -- it just cannot be
+// anything but what it says it is. Which is the pre-D25 guarantee, now over a
+// transport where at least the other end is proved.
+//
+// This replaced a plaintext Dial. There is no unverified client left, because
+// there is no unverified server left to talk to (D25).
+func DialCA(addr, caPath string) (*Client, error) {
+	pool, err := authorityPool(caPath)
+	if err != nil {
+		return nil, err
+	}
+	base, err := url.Parse("https://" + addr)
 	if err != nil {
 		return nil, fmt.Errorf("bad control plane address %q: %w", addr, err)
 	}
-	return &Client{base: base, http: &http.Client{Timeout: 30 * time.Second}}, nil
+	return &Client{base: base, http: &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{
+			RootCAs: pool, MinVersion: tls.VersionTLS12,
+		}},
+	}}, nil
+}
+
+// authorityPool loads the authority a worker checks the control plane against.
+func authorityPool(caPath string) (*x509.CertPool, error) {
+	caPEM, err := os.ReadFile(caPath)
+	if err != nil {
+		return nil, fmt.Errorf("reading the control plane's authority: %w", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caPEM) {
+		return nil, fmt.Errorf("%s is not a certificate", caPath)
+	}
+	return pool, nil
 }
 
 // DialTLS connects presenting this machine's issued identity, verifying the
@@ -61,13 +94,9 @@ func DialTLS(addr, certPath, keyPath, caPath string) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("reading this worker's identity: %w", err)
 	}
-	caPEM, err := os.ReadFile(caPath)
+	pool, err := authorityPool(caPath)
 	if err != nil {
-		return nil, fmt.Errorf("reading the control plane's authority: %w", err)
-	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(caPEM) {
-		return nil, fmt.Errorf("%s is not a certificate", caPath)
+		return nil, err
 	}
 	base, err := url.Parse("https://" + addr)
 	if err != nil {

@@ -22,7 +22,8 @@ func init() {
 			"It is not a third mode. The worker here talks to the control plane over\n" +
 			"the same HTTP API a worker on another machine would use -- there is no\n" +
 			"in-process shortcut, and nothing works here that would not work split\n" +
-			"across two boxes. For anything unattended use `docker compose up -d`.",
+			"across two boxes -- including the transport, which is HTTPS with the\n" +
+			"worker enrolling itself against the control plane's own authority. For anything unattended use `docker compose up -d`.",
 		Run: runQuickstart,
 	})
 }
@@ -32,7 +33,6 @@ func runQuickstart(ctx context.Context, env *Env, args []string) error {
 	fs := newFlagSet(cmd, env)
 	addr := fs.String("addr", daemon.DefaultAddr, "address for the control plane")
 	labels := fs.String("labels", jobdef.DefaultRunsOn, "labels for the worker it starts")
-	useTLS := fs.Bool("tls", false, "serve HTTPS; the worker enrols itself and presents a certificate")
 	verbose := fs.Bool("v", false, "log at debug level")
 	if extra, err := parseArgs(fs, args); err != nil {
 		return err
@@ -57,7 +57,6 @@ func runQuickstart(ctx context.Context, env *Env, args []string) error {
 			Addr:    *addr,
 			Version: env.Version,
 			Logger:  logger,
-			TLS:     *useTLS,
 			Ready:   ready,
 		})
 	}()
@@ -87,13 +86,19 @@ func runQuickstart(ctx context.Context, env *Env, args []string) error {
 
 	// The local case, so the worker enrols itself from the token the control
 	// plane just wrote into the data directory they share -- no token to paste
-	// and no step to explain. Nothing to do when TLS is off, and nothing that
-	// fails the start if there is (D25).
-	if err := autoEnrol(ctx, env, info.Address, defaultWorkerName(), splitLabels(*labels)); err != nil {
-		logger.Warn("could not enrol this worker locally", "error", err)
+	// and no step to explain (D25).
+	//
+	// Fatal now, where it used to be a warning. It could be a warning while a
+	// worker without an identity still had a plaintext socket to fall back to;
+	// with the flip there is nothing behind it, so carrying on would print
+	// "one worker attached" and then fail every claim.
+	if err := autoEnrol(ctx, env, dialable(info.Address), defaultWorkerName(), splitLabels(*labels)); err != nil {
+		cancel()
+		<-planeDone
+		return fmt.Errorf("enrolling the worker this command starts: %w", err)
 	}
 
-	client, err := dialControlPlane(env, info.Address)
+	client, err := dialControlPlane(env, dialable(info.Address))
 	if err != nil {
 		cancel()
 		<-planeDone

@@ -3414,9 +3414,12 @@ real `sops` binary rather than on having read the spec carefully.
    the web client are clients too: requiring one would make identity a thing that
    breaks every read command.
 
-   Enrolment is additive throughout. A worker that never enrolled registers by
+   Enrolment was additive throughout: a worker that never enrolled registered by
    claiming its own name, on a plaintext listener, exactly as before -- which is
-   what every existing deployment does.
+   what every deployment did at the time this was written. Step 6 below ends
+   that. A worker that has not enrolled can still connect and claim work, but
+   over the same verified transport as everything else, and it is nobody rather
+   than whoever it says it is.
 
    What remains for the recipient list to be fully trustworthy is binding a
    worker's age public key to its enrolled identity, so `je secret recipients
@@ -3512,25 +3515,57 @@ order:
    Go's own message is true and sends people to look at the certificate, which is
    the one thing that is fine.
 
-5. ~~**The daemon test harness assumes plaintext.**~~ **Shipped.** It runs every
-   test twice, once each way. That is the point rather than thoroughness: the way
-   to find what quietly depends on plaintext is to run everything without it
-   before removing it. Eighteen tests, both transports, and the worker in the
-   end-to-end harness enrols itself over TLS exactly as a local one does.
+5. ~~**The daemon test harness assumes plaintext.**~~ **Shipped, and since
+   retired.** It ran every test twice, once each way. That was the point rather
+   than thoroughness: the way to find what quietly depends on plaintext is to
+   run everything without it before removing it. It found what it was for, and
+   with step 6 there is one transport to run against, so the double pass is gone
+   and one test now asserts the plaintext listener is absent instead.
 
-**What is left is the flip itself**: default `--tls` on, and remove the plaintext
-listener. A breaking change worth a version bump, and the point at which D19's
-*"the trust boundary is the network"* becomes *"the trust boundary is the
-certificate."*
+6. ~~**The flip itself.**~~ **Shipped.** `--tls` is gone rather than defaulted
+   to true: a flag that can only be passed one way is not a choice, it is a
+   thing to get wrong. `daemon.Config` has no TLS field, there is no `serve`
+   variable that could fall back, and a test asserts that a plaintext request is
+   refused — because every other test in that file would still pass if the flip
+   were quietly undone.
 
-Then the plaintext path can go — a breaking change worth a version bump, and one
-that rewrites D19's *"the trust boundary is the network"* into **"the trust
-boundary is the certificate."** That is a better sentence, and it closes the gap
-D20 opened the moment a worker could live on somebody else's machine.
+   **What it cost, honestly.** Three things that used to work silently now
+   require something:
 
-**Order: renewal, then local auto-enrolment, then client identity, then drop
-plaintext.** Renewal first because everything after it depends on certificates
-being something you never think about.
+   - **A worker on another machine must enrol.** It could previously register by
+     claiming a name over plaintext. There is no unverified transport left to do
+     that on, so `je enrol` is the first step rather than an optional one — and
+     `--token` without `--ca-pin` is refused, because the unpinned path only ever
+     made sense when the alternative was plaintext anyway.
+   - **Every client needs the authority.** The CLI, the web client and an
+     unenrolled worker all verify the control plane against the CA it issues
+     from, so a machine with no copy of that certificate cannot connect. It is
+     looked for at three paths and the error names all of them, rather than
+     producing a verification failure to interpret.
+   - **Upgrading the control plane means restarting its workers.** This is the
+     breaking half, and it is why this is a version bump. A `je` from after the
+     flip meeting a control plane from before it does *not* fail in the
+     handshake: the runtime file records whether TLS is served, a missing field
+     means "older than this", and the error says which of the two processes is
+     out of date. Go's own message would have been a malformed-record complaint,
+     which is true and blames nobody.
+
+   **What did not have to change**, which is the part worth noticing: the control
+   plane still accepts a client with no certificate. Requiring one would make
+   identity a thing that breaks every read command, and the CLI and the web
+   client genuinely have no identity to prove. Anonymous is not a fallback path
+   left lying around — it is the correct answer for a reader.
+
+**D19's *"the trust boundary is the network"* is now *"the trust boundary is the
+certificate."*** That is a better sentence, and it closes the gap D20 opened the
+moment a worker could live on somebody else's machine.
+
+**Order was: renewal, local auto-enrolment, compose, clock skew, the test
+harness, then the flip.** Renewal first because everything after it depends on
+certificates being something you never think about. Client identity — binding
+`RunOptions.Actor` and an age recipient to a verified certificate — turned out
+not to be a prerequisite for the flip, and is the largest thing still open in
+D25.
 
 **Your response:**
 

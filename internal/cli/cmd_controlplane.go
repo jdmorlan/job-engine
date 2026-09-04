@@ -16,6 +16,9 @@ func init() {
 		Usage: "the control plane: schedules, history, and the API",
 		Long: "The control plane owns the database and is the only process that writes\n" +
 			"to it. Every other command is a client of its API.\n\n" +
+			"It serves HTTPS from an authority it issues itself, and a client that\n" +
+			"presents a certificate from that authority is that worker (D25). There\n" +
+			"is no plaintext listener and no flag that brings one back.\n\n" +
 			"It never runs a job itself (D20/C11). That needs at least one worker,\n" +
 			"which is what `je worker run` starts -- and a control plane with none\n" +
 			"attached runs nothing at all, which `je status` says in its second line.\n\n" +
@@ -37,7 +40,6 @@ func runControlPlane(ctx context.Context, env *Env, args []string) error {
 	fs := newFlagSet(cmd, env)
 	addr := fs.String("addr", daemon.DefaultAddr, "address to listen on")
 	verbose := fs.Bool("v", false, "log at debug level")
-	useTLS := fs.Bool("tls", false, "serve HTTPS, and verify any client certificate presented")
 	tlsHosts := fs.String("tls-host", "", "comma-separated extra names this control plane is reached by")
 	useDocker := fs.Bool("docker", false, "install as a container instead of a native service")
 	native := fs.Bool("native", false, "install as a native service (launchd or systemd)")
@@ -56,7 +58,7 @@ func runControlPlane(ctx context.Context, env *Env, args []string) error {
 
 	switch positional[0] {
 	case "run":
-		return runControlPlaneForegroundTLS(ctx, env, *addr, *verbose, *useTLS, splitLabels(*tlsHosts))
+		return runControlPlaneForeground(ctx, env, *addr, *verbose, splitLabels(*tlsHosts))
 	case "install":
 		return installControlPlane(ctx, env, *addr, installMode{
 			docker: *useDocker, native: *native, printOnly: *printOnly,
@@ -134,11 +136,7 @@ func installControlPlane(ctx context.Context, env *Env, addr string, mode instal
 	})
 }
 
-func runControlPlaneForeground(ctx context.Context, env *Env, addr string, verbose bool) error {
-	return runControlPlaneForegroundTLS(ctx, env, addr, verbose, false, nil)
-}
-
-func runControlPlaneForegroundTLS(ctx context.Context, env *Env, addr string, verbose, useTLS bool, tlsHosts []string) error {
+func runControlPlaneForeground(ctx context.Context, env *Env, addr string, verbose bool, tlsHosts []string) error {
 	level := slog.LevelInfo
 	if verbose {
 		level = slog.LevelDebug
@@ -153,7 +151,6 @@ func runControlPlaneForegroundTLS(ctx context.Context, env *Env, addr string, ve
 		Addr:     addr,
 		Version:  env.Version,
 		Logger:   logger,
-		TLS:      useTLS,
 		TLSHosts: tlsHosts,
 	})
 }

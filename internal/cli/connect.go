@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 )
 
@@ -46,7 +47,16 @@ func reachable(ctx context.Context, c *Client) bool {
 //
 // P1: this sentence is worth more than the run list it replaces, because it is
 // true. The old fallback's answer looked more helpful and was misleading.
+//
+// Only for the error it is advice about. Connecting can now fail for reasons
+// that are not "there isn't one" -- no authority on this machine, or a control
+// plane too old to speak TLS (D25) -- and telling somebody to start a control
+// plane while one is running and answering is the same class of confidently
+// wrong sentence this function exists to replace.
 func adviseNoControlPlane(err error) error {
+	if !errors.Is(err, ErrNoControlPlane) {
+		return err
+	}
 	// `je control-plane run` is deliberately not the headline. It starts a
 	// control plane with no worker, which runs nothing (C11) -- suggesting it
 	// first sends somebody to a second, quieter failure, which is the opposite

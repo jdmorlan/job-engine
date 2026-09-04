@@ -96,18 +96,34 @@ func webTarget(env *Env, flag string) (*url.URL, error) {
 	return url.Parse(withScheme(addr))
 }
 
+// withScheme fills in the scheme a bare host:port implies, which since D25 is
+// the only one a control plane speaks.
+//
+// http:// is still accepted if somebody writes it, and it will fail at the
+// first request rather than here -- an explicit scheme is a statement about
+// what is at the other end, and silently rewriting it would hide the mistake
+// rather than report it.
 func withScheme(addr string) string {
 	if strings.HasPrefix(addr, "http://") || strings.HasPrefix(addr, "https://") {
 		return addr
 	}
-	return "http://" + addr
+	return "https://" + dialable(addr)
 }
 
 func serveWeb(ctx context.Context, env *Env, addr string, base *url.URL) error {
-	// Read if present, absent otherwise: a plaintext control plane needs none,
-	// and a missing file on an https target is reported by the handler rather
-	// than guessed around.
-	caPEM, _ := os.ReadFile(env.Layout.BootstrapCA())
+	// The web client presents no certificate -- it is not a worker and has no
+	// identity to prove -- but it still has to know it is talking to the right
+	// control plane, so the authority is required rather than optional.
+	var caPEM []byte
+	if base.Scheme == "https" {
+		path, err := authorityPath(env.Layout)
+		if err != nil {
+			return err
+		}
+		if caPEM, err = os.ReadFile(path); err != nil {
+			return fmt.Errorf("reading the control plane's authority: %w", err)
+		}
+	}
 
 	handler, built, err := webui.Handler(base, caPEM)
 	if err != nil {

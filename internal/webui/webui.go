@@ -56,12 +56,16 @@ func Handler(controlPlane *url.URL, caPEM []byte) (http.Handler, bool, error) {
 
 	proxy := httputil.NewSingleHostReverseProxy(controlPlane)
 
-	// A control plane serving TLS is verified against the authority it issues
-	// from, not against the system trust store -- there is no public CA here and
-	// no domain to own (D25). The web client presents no certificate of its own:
-	// it is not a worker, it has no identity to prove, and everything it reads
-	// needs none.
-	if controlPlane.Scheme == "https" && len(caPEM) > 0 {
+	// The control plane is verified against the authority it issues from, not
+	// against the system trust store -- there is no public CA here and no domain
+	// to own (D25). The web client presents no certificate of its own: it is not
+	// a worker, it has no identity to prove, and everything it reads needs none.
+	if controlPlane.Scheme == "https" {
+		if len(caPEM) == 0 {
+			return nil, false, errors.New(
+				"no authority to verify the control plane against; the web client " +
+					"needs the CA the control plane issues from")
+		}
 		pool := x509.NewCertPool()
 		if !pool.AppendCertsFromPEM(caPEM) {
 			return nil, false, errors.New("the control plane's authority is not a certificate")

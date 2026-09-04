@@ -130,7 +130,7 @@ func startTLSDaemon(t *testing.T) (base string, layout paths.Layout) {
 	done := make(chan error, 1)
 	go func() {
 		done <- daemon.Run(ctx, daemon.Config{
-			Layout: layout, Addr: "127.0.0.1:0", Version: "test", TLS: true,
+			Layout: layout, Addr: "127.0.0.1:0", Version: "test",
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 			Ready:  ready,
 		})
@@ -358,7 +358,7 @@ func TestTheBootstrapTokenDoesNotOutliveTheControlPlane(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- daemon.Run(ctx, daemon.Config{
-			Layout: layout, Addr: "127.0.0.1:0", Version: "test", TLS: true,
+			Layout: layout, Addr: "127.0.0.1:0", Version: "test",
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 			Ready:  ready,
 		})
@@ -376,14 +376,13 @@ func TestTheBootstrapTokenDoesNotOutliveTheControlPlane(t *testing.T) {
 	}
 }
 
-// A plaintext control plane offers no local enrolment, and creates no authority
-// to offer it with.
+// There is no plaintext listener, and a client that tries one gets nothing.
 //
-// Without this it wrote a token, a worker read it, and tried to enrol over
-// HTTPS against a server speaking HTTP -- surviving only because the failure
-// was non-fatal, and leaving a warning on every plaintext start. An identity is
-// meaningless without a transport that presents it (D25).
-func TestAPlaintextControlPlaneOffersNoLocalEnrolment(t *testing.T) {
+// The guard for D25's last step. The flip is easy to undo by accident -- a
+// `serve` variable that falls back, a config field that defaults to false --
+// and every other test in this file would still pass if it did, because they
+// all speak TLS. This one fails.
+func TestThereIsNoPlaintextListener(t *testing.T) {
 	dir := t.TempDir()
 	layout := paths.Layout{Data: dir, Jobs: filepath.Join(dir, "jobs")}
 
@@ -392,7 +391,7 @@ func TestAPlaintextControlPlaneOffersNoLocalEnrolment(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- daemon.Run(ctx, daemon.Config{
-			Layout: layout, Addr: "127.0.0.1:0", Version: "test", // TLS off
+			Layout: layout, Addr: "127.0.0.1:0", Version: "test",
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 			Ready:  ready,
 		})
@@ -400,10 +399,35 @@ func TestAPlaintextControlPlaneOffersNoLocalEnrolment(t *testing.T) {
 	<-ready
 	t.Cleanup(func() { cancel(); <-done })
 
-	if _, err := os.Stat(layout.BootstrapToken()); !os.IsNotExist(err) {
-		t.Error("a plaintext control plane offered a certificate a worker could not present")
+	info, err := daemon.ReadRuntime(layout.Runtime())
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err := os.Stat(layout.CAKey()); !os.IsNotExist(err) {
-		t.Error("a plaintext control plane created an authority it will never use")
+	if !info.TLS {
+		t.Fatal("the runtime file does not say this control plane serves TLS")
+	}
+
+	// An authority exists on every control plane now, because every control
+	// plane needs a certificate of its own to serve at all.
+	if _, err := os.Stat(layout.CAKey()); err != nil {
+		t.Errorf("no certificate authority: %v", err)
+	}
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get("http://" + info.Address + "/v1/health")
+	if err != nil {
+		return // refused outright, which is also a correct answer
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusOK {
+		t.Fatal("a plaintext request reached the API")
+	}
+	// Go's TLS server answers a plaintext request in plaintext, once, to say
+	// what went wrong. Worth asserting rather than tolerating: it is the
+	// difference between an upgrade that explains itself and one that produces
+	// a connection reset somebody has to guess at.
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+	if !strings.Contains(string(body), "HTTPS") {
+		t.Errorf("plaintext request answered %s: %s", resp.Status, body)
 	}
 }

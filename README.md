@@ -136,14 +136,57 @@ WAITING FOR A WORKER  (queued for a label nothing is serving)
     start one:  je worker run --labels macos
 ```
 
-To run a worker on your Mac:
+To run a worker on your Mac, enrol it first. `je enrol` on the control plane
+decides the name and the labels and prints a token and the authority's
+fingerprint; the machine becoming a worker redeems them:
 
 ```console
-$ je worker run --labels macos
+$ je enrol macbook --labels macos          # on the control plane
+token    Cg2Mq-cHkyFaXKHeUkRbtHUdJCLd5-B3jbR6qa65XkI
+worker   macbook
+labels   macos
+expires  in 15m0s
+
+On that machine:
+  je worker run --token Cg2Mq-cHkyFaXKHeUkRbtHUdJCLd5-B3jbR6qa65XkI \
+    --addr control-plane:7620 --ca-pin 62548372672...
+
+$ je worker run --token Cg2... --addr ... --ca-pin ...   # on the Mac
+enrolled as macbook; identity written to ~/.je/worker.crt
 ```
+
+The name and labels are decided where the token is minted, not by the machine
+redeeming it — a label is a capability, and a worker that advertises its own can
+grant itself whatever a label gates. The fingerprint is checked *before* the
+token is sent, because a token is a bearer credential: whoever receives it
+becomes this worker.
+
+A worker sharing a machine with the control plane skips all of it. `je worker
+run` there enrols itself from a token the control plane leaves in its own data
+directory, which is why `je quickstart` and `docker compose up -d` need nothing
+pasted.
 
 It opens no ports and dials out, so it works from a laptop behind NAT. It holds
 no state, so killing it costs its in-flight runs and nothing else.
+
+### What is on the wire
+
+**HTTPS, always, verified both ways where there is something to verify.** The
+control plane is its own certificate authority: it issues itself a server
+certificate and issues every worker one at enrolment, so there is no public CA,
+no domain to own, and nothing to renew by hand — a worker replaces its own
+certificate on the heartbeat, authenticated by the certificate it is replacing.
+
+A worker's identity is therefore *checked* rather than claimed. `je run --actor`
+and a worker's name used to arrive in the request body, which made them
+assertions; a verified certificate's common name cannot be asked for on somebody
+else's behalf. A client that presents no certificate is simply nobody, which is
+fine and ordinary: the CLI and the web client read, and reads need no identity.
+
+There is no plaintext listener and no flag that brings one back. A `je` from
+before this change cannot talk to a control plane after it, and says so rather
+than failing in the handshake — **upgrading the control plane means restarting
+its workers.**
 
 ### When a worker disappears
 

@@ -27,12 +27,15 @@ type RuntimeInfo struct {
 	Version   string    `json:"version"`
 	StartedAt time.Time `json:"started_at"`
 
-	// TLS reports that this control plane speaks HTTPS (D25 step 5).
+	// TLS reports that this control plane speaks HTTPS. Always true since the
+	// plaintext listener went away (D25), which is exactly what makes it worth
+	// keeping: a file written by a control plane from before that has no such
+	// field, so false means "old", not "plaintext by choice".
 	//
-	// Recorded rather than probed, because a client guessing the scheme gets a
-	// confusing handshake error either way round. The thing that knows is the
-	// process that bound the socket, so it writes it down -- the same reason
-	// the endpoint file exists at all.
+	// That distinction is the whole value. A new CLI meeting an old control
+	// plane would otherwise open a TLS handshake against a plaintext socket and
+	// report something about a record header -- true, and useless. Reading this
+	// instead lets it say which of the two is out of date (P1).
 	TLS bool `json:"tls,omitempty"`
 }
 

@@ -136,6 +136,15 @@ func (l Layout) BootstrapCA() string { return filepath.Join(l.BootstrapDir(), "c
 func (l Layout) IdentityCert() string { return filepath.Join(l.Data, "worker.crt") }
 func (l Layout) IdentityKey() string  { return filepath.Join(l.Data, "worker.key") }
 
+// IdentityCA is the authority a worker keeps after enrolling, so it can go on
+// verifying the control plane across restarts without the bootstrap directory
+// being mounted (D25).
+//
+// Written by enrolment beside the identity rather than into BootstrapDir,
+// because that directory belongs to the control plane and a worker on another
+// machine has never seen it.
+func (l Layout) IdentityCA() string { return filepath.Join(l.Data, "ca.crt") }
+
 // Chains is where chain files live -- one flow per file, filename is the
 // chain name (D17).
 func (l Layout) Chains() string { return filepath.Join(l.Jobs, "chains") }

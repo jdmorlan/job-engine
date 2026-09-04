@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jdmorlan/job-engine/internal/api"
@@ -56,23 +57,22 @@ func Connect(l paths.Layout) (*Client, error) {
 		return nil, err
 	}
 
-	// A control plane serving TLS says so in its runtime file, so the CLI does
-	// not have to guess a scheme -- guessing wrong gives a handshake error that
-	// explains nothing, in either direction (D25).
-	scheme, transport := "http://", http.DefaultTransport
-	if usesTLS(l) {
-		pool, err := authorityPool(l)
-		if err != nil {
-			return nil, err
-		}
-		scheme = "https://"
-		transport = &http.Transport{TLSClientConfig: &tls.Config{
-			RootCAs:    pool,
-			MinVersion: tls.VersionTLS12,
-		}}
+	// There is one transport now (D25), so there is nothing to detect -- but a
+	// control plane from before the flip is still a thing somebody can be
+	// pointed at, and it deserves a sentence rather than a handshake error.
+	if err := refusePlaintext(l); err != nil {
+		return nil, err
 	}
+	pool, err := authorityPool(l)
+	if err != nil {
+		return nil, err
+	}
+	transport := &http.Transport{TLSClientConfig: &tls.Config{
+		RootCAs:    pool,
+		MinVersion: tls.VersionTLS12,
+	}}
 
-	base, err := url.Parse(scheme + dialable(addr))
+	base, err := url.Parse("https://" + dialable(addr))
 	if err != nil {
 		return nil, fmt.Errorf("bad engine address %q: %w", addr, err)
 	}
@@ -104,12 +104,57 @@ func dialable(addr string) string {
 	return addr
 }
 
-// usesTLS reports whether the control plane this layout points at serves HTTPS.
-func usesTLS(l paths.Layout) bool {
-	if info, err := daemon.ReadRuntime(l.Runtime()); err == nil {
-		return info.TLS
+// refusePlaintext names the one incompatibility the flip introduces.
+//
+// A runtime file with no `tls` in it was written by a control plane from before
+// D25 removed the plaintext listener. Everything on this side now speaks HTTPS,
+// so talking to it would fail during the handshake and blame the wrong thing --
+// Go would report a malformed record, which is true and tells nobody which of
+// the two processes is out of date.
+//
+// Only when there IS a runtime file. An address from JE_ADDR or the endpoint
+// file says nothing about the process behind it, and guessing "old" from
+// silence would refuse to connect to a perfectly current control plane.
+func refusePlaintext(l paths.Layout) error {
+	info, err := daemon.ReadRuntime(l.Runtime())
+	if err != nil || info.TLS {
+		return nil
 	}
-	return false
+	return fmt.Errorf(
+		"the control plane at %s speaks plaintext, and this je only speaks TLS.\n"+
+			"It is running a version from before certificates became mandatory.\n"+
+			"Upgrade it and restart it -- it will issue its own authority on start,\n"+
+			"and any worker attached to it has to be restarted too.",
+		info.Address)
+}
+
+// authorityPath is the control plane's certificate, wherever this machine has a
+// copy of it.
+//
+// Three places, most authoritative first: the control plane's own directory,
+// the copy a worker kept when it enrolled, and the one published in the
+// bootstrap directory for a worker on this machine. A CLI beside a control
+// plane has the first, one beside a remote worker has the second, and one in a
+// container that mounts only the bootstrap volume has the third.
+func authorityPath(l paths.Layout) (string, error) {
+	candidates := []string{l.CACert(), l.IdentityCA(), l.BootstrapCA()}
+	for _, path := range candidates {
+		if _, err := os.Stat(path); err == nil {
+			return path, nil
+		}
+	}
+	return "", fmt.Errorf(
+		"no control plane authority on this machine.\n"+
+			"Looked in:\n  %s\n\n"+
+			"Every connection is verified against the authority the control plane\n"+
+			"issues from (D25), so a machine that has never met one has nothing to\n"+
+			"check against.\n\n"+
+			"A worker gets one by enrolling:\n"+
+			"  je enrol <name>                                            (there)\n"+
+			"  je worker run --token <t> --ca-pin <fp> --addr <host:port>  (here)\n\n"+
+			"Anything else needs a copy of the control plane's ca.crt at the second\n"+
+			"path above.",
+		strings.Join(candidates, "\n  "))
 }
 
 // authorityPool verifies the control plane against the CA it issues from.
@@ -119,37 +164,19 @@ func usesTLS(l paths.Layout) bool {
 // it is talking to the right control plane, which this gives it without any
 // public CA or system trust store being involved.
 func authorityPool(l paths.Layout) (*x509.CertPool, error) {
-	// The control plane's own copy first, then the one it publishes for
-	// workers. A CLI beside the control plane has the first; one beside a
-	// worker has only the second.
-	body, err := os.ReadFile(l.CACert())
+	path, err := authorityPath(l)
 	if err != nil {
-		body, err = os.ReadFile(l.BootstrapCA())
+		return nil, err
 	}
+	body, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf(
-			"this control plane serves TLS, and its authority is not readable at %s or %s: %w",
-			l.CACert(), l.BootstrapCA(), err)
+		return nil, fmt.Errorf("reading the control plane's authority: %w", err)
 	}
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(body) {
-		return nil, fmt.Errorf("%s is not a certificate", l.CACert())
+		return nil, fmt.Errorf("%s is not a certificate", path)
 	}
 	return pool, nil
-}
-
-// DialAddr connects to a control plane named directly, skipping the resolution
-// Connect does.
-//
-// For the one case where this machine's data directory cannot answer the
-// question: enrolling, where the whole point is that this machine is not a
-// control plane and has been told where one is.
-func DialAddr(addr string) (*Client, error) {
-	base, err := url.Parse("http://" + addr)
-	if err != nil {
-		return nil, fmt.Errorf("bad control plane address %q: %w", addr, err)
-	}
-	return &Client{base: base, http: &http.Client{}}, nil
 }
 
 // DialVerified connects to a control plane verified against a CA the caller

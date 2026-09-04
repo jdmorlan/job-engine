@@ -28,6 +28,11 @@ func init() {
 			"to Shortcuts reaches the machine that can.\n\n" +
 			"It holds no state and opens no ports: it dials the control plane and\n" +
 			"keeps asking for work, which is why it works from a laptop behind NAT.\n\n" +
+			"A worker on another machine needs an identity before it can talk to\n" +
+			"anything: `je enrol <name>` on the control plane prints a token and a\n" +
+			"fingerprint, and `je worker run --token <t> --ca-pin <fp> --addr <a>`\n" +
+			"here redeems them. A worker sharing a machine with the control plane\n" +
+			"does that by itself, with nothing to paste.\n\n" +
 			"subcommands:\n" +
 			"  run       run it in the foreground, in this terminal\n" +
 			"  join      register it with launchd or systemd, attached to a control plane\n" +
@@ -109,6 +114,10 @@ func runWorker(ctx context.Context, env *Env, args []string) error {
 			return adviseNoControlPlane(err)
 		}
 	}
+	// A recorded 0.0.0.0 is a bind address, not a destination, and nothing
+	// certifies it -- so a TLS client checking the hostname would reject a
+	// certificate that is otherwise perfectly correct (D25).
+	target = dialable(target)
 
 	// Redeeming happens once the address is resolved and before anything else:
 	// `run` and `join` both want an identity in place, and enrolling is the
@@ -142,10 +151,10 @@ func runWorker(ctx context.Context, env *Env, args []string) error {
 		})
 	}
 
-	// An enrolled worker speaks TLS and presents what it was issued; one that
-	// never enrolled speaks plaintext exactly as before. Presence of the files
-	// is the switch rather than a flag, because a machine that has an identity
-	// has no reason not to use it, and one that does not cannot (D25).
+	// An enrolled worker presents what it was issued; one that never enrolled
+	// connects anonymously over the same transport. Presence of the files is
+	// the switch rather than a flag, because a machine that has an identity has
+	// no reason not to use it, and one that does not cannot (D25).
 	client, err := dialControlPlane(env, target)
 	if err != nil {
 		return err
@@ -323,15 +332,27 @@ func runWorkerKeygen(env *Env) error {
 	return nil
 }
 
-// dialControlPlane picks the transport from whether this machine has an issued
-// identity to present.
+// dialControlPlane connects a worker to the control plane.
+//
+// The transport is settled -- HTTPS, verified against the control plane's own
+// authority (D25) -- so the only question left is whether this machine has an
+// identity to present. An enrolled worker presents one and is that worker
+// everywhere it matters; one that has not enrolled connects anonymously, which
+// the control plane still accepts and which is exactly the pre-D25 guarantee.
+//
+// Missing the authority is a hard error rather than a fallback. There is
+// nothing to fall back to, and saying so names the fix (enrol) instead of
+// producing a connection failure somebody has to interpret.
 func dialControlPlane(env *Env, target string) (*worker.Client, error) {
-	cert, key := env.Layout.IdentityCert(), env.Layout.IdentityKey()
-	caPath := filepath.Join(env.Layout.Data, "ca.crt")
+	caPath, err := authorityPath(env.Layout)
+	if err != nil {
+		return nil, err
+	}
 
-	for _, path := range []string{cert, key, caPath} {
+	cert, key := env.Layout.IdentityCert(), env.Layout.IdentityKey()
+	for _, path := range []string{cert, key} {
 		if _, err := os.Stat(path); err != nil {
-			return worker.Dial(target)
+			return worker.DialCA(target, caPath)
 		}
 	}
 	return worker.DialTLS(target, cert, key, caPath)

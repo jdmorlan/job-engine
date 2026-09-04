@@ -1,6 +1,12 @@
 // Package daemon is the thin wrapper that turns the engine library into a
-// running process: a listener, an HTTP server, signal handling, and an orderly
+// running process: a listener, an HTTPS server, signal handling, and an orderly
 // shutdown.
+//
+// The transport is not a choice. There was a `--tls` flag and a plaintext
+// listener beside it, and D25 ends with removing both: a control plane serves
+// HTTPS from an authority it owns, and the trust boundary is the certificate
+// rather than the network (D19). Nothing here is configurable about that, so
+// there is no deployment that is one flag away from being the old thing.
 //
 // Everything here is about being a process. Anything about being a job engine
 // belongs in internal/engine (D18).
@@ -27,17 +33,6 @@ type Config struct {
 	Addr    string
 	Version string
 	Logger  *slog.Logger
-
-	// TLS serves HTTPS with a certificate the control plane issues itself,
-	// from the same authority workers enrol against (D25 step 5).
-	//
-	// Off by default, and that is deliberate rather than timid: every existing
-	// deployment speaks plaintext on a trusted network (D19), and flipping the
-	// transport underneath one would be a breaking change dressed as a security
-	// improvement. On, a presented client certificate becomes an identity; an
-	// absent one is simply nobody, because the CLI and the web client are
-	// clients too and read endpoints need no identity.
-	TLS bool
 
 	// TLSHosts are additional names the control plane will be reached by, for
 	// its own certificate.
@@ -127,7 +122,7 @@ func Run(ctx context.Context, cfg Config) error {
 		PID:       os.Getpid(),
 		Version:   cfg.Version,
 		StartedAt: time.Now(),
-		TLS:       cfg.TLS,
+		TLS:       true,
 	}); err != nil {
 		ln.Close()
 		return err
@@ -138,64 +133,60 @@ func Run(ctx context.Context, cfg Config) error {
 	// read the CA key (D25). Removed on the way out so a stale file cannot
 	// outlive the process that honoured it.
 	//
-	// Only when serving TLS. A plaintext control plane has no transport on
-	// which an identity means anything, so offering one would hand a worker a
-	// certificate it cannot present -- and creating an authority it will never
-	// use to do it.
-	if cfg.TLS {
-		if err := publishBootstrap(eng, cfg); err != nil {
-			cfg.Logger.Warn("could not prepare local enrolment", "error", err)
-		} else {
-			// Only the token goes; the authority stays, because a worker that
-			// enrolled needs it to keep verifying this control plane after it
-			// restarts.
-			defer os.Remove(cfg.Layout.BootstrapToken())
-		}
+	// A failure here is fatal rather than logged, which it was not while the
+	// transport was optional. There is no longer a plaintext path to fall back
+	// to: a control plane that cannot publish this is one that no local worker
+	// can attach to, and starting anyway would produce a system that looks up
+	// and runs nothing (C11).
+	if err := publishBootstrap(eng, cfg); err != nil {
+		ln.Close()
+		return fmt.Errorf("preparing local enrolment: %w", err)
 	}
+	// Only the token goes; the authority stays, because a worker that enrolled
+	// needs it to keep verifying this control plane after it restarts.
+	defer os.Remove(cfg.Layout.BootstrapToken())
 
 	srv := &http.Server{
 		Handler:           api.New(eng, cfg.Logger).Handler(),
 		ReadHeaderTimeout: 10 * time.Second, // cheap protection against a stuck client
 	}
 
-	serve := srv.Serve
-	if cfg.TLS {
-		authority, err := eng.Authority()
-		if err != nil {
-			ln.Close()
-			return fmt.Errorf("preparing the certificate authority: %w", err)
-		}
-		hosts := append([]string(nil), cfg.TLSHosts...)
-		if host, _, splitErr := net.SplitHostPort(cfg.Addr); splitErr == nil &&
-			host != "" && host != "0.0.0.0" && host != "::" {
-			hosts = append(hosts, host)
-		}
-		// The machine's own name, which in a container is usually the name
-		// other containers reach it by. Cheap, and it covers the common case
-		// without anybody having to know to pass a flag.
-		if name, err := os.Hostname(); err == nil && name != "" {
-			hosts = append(hosts, name)
-		}
-		tlsConfig, err := authority.ServerTLS(hosts)
-		if err != nil {
-			ln.Close()
-			return err
-		}
-		srv.TLSConfig = tlsConfig
-		serve = func(l net.Listener) error { return srv.ServeTLS(l, "", "") }
-		cfg.Logger.Info("serving TLS", "client_certs", "verified if presented")
+	authority, err := eng.Authority()
+	if err != nil {
+		ln.Close()
+		return fmt.Errorf("preparing the certificate authority: %w", err)
 	}
+	hosts := append([]string(nil), cfg.TLSHosts...)
+	if host, _, splitErr := net.SplitHostPort(cfg.Addr); splitErr == nil &&
+		host != "" && host != "0.0.0.0" && host != "::" {
+		hosts = append(hosts, host)
+	}
+	// The machine's own name, which in a container is usually the name other
+	// containers reach it by. Cheap, and it covers the common case without
+	// anybody having to know to pass a flag.
+	if name, err := os.Hostname(); err == nil && name != "" {
+		hosts = append(hosts, name)
+	}
+	tlsConfig, err := authority.ServerTLS(hosts)
+	if err != nil {
+		ln.Close()
+		return err
+	}
+	srv.TLSConfig = tlsConfig
 
 	serveErr := make(chan error, 1) // buffered: the goroutine must not block if we already returned
 	go func() {
-		err := serve(ln)
+		// Empty paths: the certificate is in TLSConfig, issued by this process
+		// from its own authority, and never touches the filesystem.
+		err := srv.ServeTLS(ln, "", "")
 		if errors.Is(err, http.ErrServerClosed) {
 			err = nil // an expected shutdown is not a failure
 		}
 		serveErr <- err
 	}()
 
-	cfg.Logger.Info("listening", "addr", ln.Addr().String())
+	cfg.Logger.Info("listening", "addr", ln.Addr().String(),
+		"transport", "https", "client_certs", "verified if presented")
 	if cfg.Ready != nil {
 		close(cfg.Ready)
 	}

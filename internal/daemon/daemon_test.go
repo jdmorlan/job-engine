@@ -27,28 +27,14 @@ import (
 	"github.com/jdmorlan/job-engine/internal/worker"
 )
 
-// harnessTLS decides whether this pass runs the daemon over TLS.
-//
-// Every test in this file runs twice, once each way -- see TestMain. That is
-// the point rather than thoroughness for its own sake: the plaintext path is
-// meant to go away (D25), and the way to find out what quietly depends on it is
-// to run everything without it before removing it.
-var harnessTLS bool
-
-// client talks to the daemon this pass started. Set by startDaemonIn, because
-// over TLS it has to verify against an authority that did not exist until then.
+// client talks to the daemon the current test started. Set by startDaemonIn,
+// because it has to verify against an authority that did not exist until then.
 // Tests in a package run sequentially, so one is enough.
+//
+// This file used to run every test twice, once over plaintext and once over
+// TLS, so that anything quietly depending on the plaintext listener would show
+// up before it was removed. It has been removed (D25), so there is one pass.
 var client = http.DefaultClient
-
-func TestMain(m *testing.M) {
-	for _, useTLS := range []bool{false, true} {
-		harnessTLS = useTLS
-		if code := m.Run(); code != 0 {
-			os.Exit(code)
-		}
-	}
-	os.Exit(0)
-}
 
 // startDaemon runs a daemon on an ephemeral port and returns its base URL.
 // It blocks until the daemon is listening, so tests never poll.
@@ -89,7 +75,6 @@ func startDaemonIn(t *testing.T, jobs ...string) (string, paths.Layout) {
 			// this discoverable, which is the same mechanism the CLI uses.
 			Addr:    "127.0.0.1:0",
 			Version: "test",
-			TLS:     harnessTLS,
 			Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 			Ready:   ready,
 		})
@@ -119,23 +104,17 @@ func startDaemonIn(t *testing.T, jobs ...string) (string, paths.Layout) {
 	if err != nil {
 		t.Fatalf("reading runtime file: %v", err)
 	}
-	if info.TLS != harnessTLS {
-		t.Fatalf("runtime file says TLS=%v, want %v", info.TLS, harnessTLS)
+	if !info.TLS {
+		t.Fatal("the runtime file does not say this control plane serves TLS")
 	}
 	client = httpClient(t, layout)
-	if harnessTLS {
-		return "https://" + info.Address, layout
-	}
-	return "http://" + info.Address, layout
+	return "https://" + info.Address, layout
 }
 
-// httpClient talks to whichever transport this pass is using, verifying against
-// the control plane's own authority when there is one.
+// httpClient verifies the control plane against its own authority, which is the
+// only way to talk to one (D25).
 func httpClient(t *testing.T, layout paths.Layout) *http.Client {
 	t.Helper()
-	if !harnessTLS {
-		return http.DefaultClient
-	}
 	body, err := os.ReadFile(layout.CACert())
 	if err != nil {
 		t.Fatalf("reading the control plane's authority: %v", err)
@@ -160,12 +139,12 @@ func startDaemonWithWorker(t *testing.T, jobs ...string) string {
 	t.Helper()
 
 	base, layout := startDaemonIn(t, jobs...)
-	addr := strings.TrimPrefix(strings.TrimPrefix(base, "https://"), "http://")
+	addr := strings.TrimPrefix(base, "https://")
 
-	// Over TLS the worker enrols itself the way a local one does, from the
-	// token the control plane published (D25). Over plaintext it dials as it
-	// always did. Both paths are real here -- this test is the only one that
-	// exercises the whole shape D20 describes.
+	// The worker enrols itself the way a local one does, from the token the
+	// control plane published (D25), and then presents the certificate it was
+	// issued -- this test is the only one that exercises the whole shape D20
+	// describes, transport included.
 	wc, err := dialWorker(t, addr, layout)
 	if err != nil {
 		t.Fatal(err)
@@ -555,13 +534,10 @@ func TestTriggerUnknownJobIs404(t *testing.T) {
 	}
 }
 
-// dialWorker gives a worker a connection appropriate to this pass, enrolling it
-// first when there are certificates to be had.
+// dialWorker enrols a worker against the running control plane and returns a
+// client presenting the certificate it was issued.
 func dialWorker(t *testing.T, addr string, layout paths.Layout) (*worker.Client, error) {
 	t.Helper()
-	if !harnessTLS {
-		return worker.Dial(addr)
-	}
 
 	token, err := os.ReadFile(layout.BootstrapToken())
 	if err != nil {
@@ -595,10 +571,10 @@ func dialWorker(t *testing.T, addr string, layout paths.Layout) (*worker.Client,
 
 	writeFile(t, layout.IdentityKey(), key)
 	writeFile(t, layout.IdentityCert(), out.Certificate)
-	writeFile(t, filepath.Join(layout.Data, "ca.crt"), string(caPEM))
+	writeFile(t, layout.IdentityCA(), string(caPEM))
 
 	return worker.DialTLS(addr, layout.IdentityCert(), layout.IdentityKey(),
-		filepath.Join(layout.Data, "ca.crt"))
+		layout.IdentityCA())
 }
 
 func workerKeypair(t *testing.T) (keyPEM, pubPEM string) {

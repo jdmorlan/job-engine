@@ -9,7 +9,6 @@ import (
 	"encoding/pem"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"crypto/tls"
@@ -83,13 +82,14 @@ func runEnrol(ctx context.Context, env *Env, args []string) error {
 // whole situation enrolment exists for.
 func enrolAt(ctx context.Context, env *Env, addr, token, pin string) error {
 	if pin == "" {
-		// No pin means a plaintext control plane, which is the pre-TLS shape
-		// and still valid on a trusted network (D19).
-		c, err := DialAddr(addr)
-		if err != nil {
-			return err
-		}
-		return enrolWorker(ctx, env, c, token)
+		// There is no unpinned path left. A token is a bearer credential, and
+		// handing it to whatever answers an address was tolerable only while a
+		// plaintext control plane was a thing that existed (D25).
+		return fmt.Errorf(
+			"--ca-pin is required with --token.\n" +
+				"It is the fingerprint printed beside the token by `je enrol`, and it is\n" +
+				"what proves the control plane answering this address is the one that\n" +
+				"issued the token -- checked before the token is sent.")
 	}
 
 	// The control plane is verified BEFORE the token is sent. A token is a
@@ -163,10 +163,9 @@ func fetchAuthority(ctx context.Context, addr, pin string) ([]byte, error) {
 // autoEnrol gives a worker on the control plane's own machine an identity,
 // with nobody asked for anything (D25).
 //
-// Skipped silently when there is nothing to do: no token file means either a
-// remote control plane or an older one, and both are cases where the worker
-// carries on exactly as it did before. An identity already present means there
-// is nothing to bootstrap.
+// Skipped silently when there is nothing to do. No token file means the control
+// plane is somewhere else, and a worker there enrols with a token and a pin
+// instead; an identity already present means there is nothing to bootstrap.
 func autoEnrol(ctx context.Context, env *Env, target, name string, labels []string) error {
 	if _, err := os.Stat(env.Layout.IdentityCert()); err == nil {
 		return nil
@@ -179,13 +178,16 @@ func autoEnrol(ctx context.Context, env *Env, target, name string, labels []stri
 	// Verified against the CA on disk, which this process can read for the same
 	// reason it could read the token. No pin is needed: locality is the proof,
 	// and there is no network for anybody to sit in the middle of.
-	caPEM, caErr := os.ReadFile(env.Layout.BootstrapCA())
-	var c *Client
-	if caErr == nil {
-		c, err = DialVerified(target, caPEM)
-	} else {
-		c, err = DialAddr(target)
+	//
+	// A token with no authority beside it is a broken bootstrap directory
+	// rather than a reason to fall back -- there is nothing to fall back to.
+	caPEM, err := os.ReadFile(env.Layout.BootstrapCA())
+	if err != nil {
+		return fmt.Errorf(
+			"there is a local enrolment token but no authority beside it at %s: %w",
+			env.Layout.BootstrapCA(), err)
 	}
+	c, err := DialVerified(target, caPEM)
 	if err != nil {
 		return err
 	}
@@ -230,7 +232,7 @@ func enrolWorkerAs(ctx context.Context, env *Env, c *Client, token, name string,
 	}{
 		{env.Layout.IdentityKey(), pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600},
 		{env.Layout.IdentityCert(), []byte(out.Certificate), 0o644},
-		{filepath.Join(env.Layout.Data, "ca.crt"), []byte(out.CA), 0o644},
+		{env.Layout.IdentityCA(), []byte(out.CA), 0o644},
 	}
 	for _, f := range files {
 		if err := os.WriteFile(f.path, f.body, f.mode); err != nil {
