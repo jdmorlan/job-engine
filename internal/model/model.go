@@ -21,8 +21,18 @@ import (
 type Status string
 
 const (
-	StatusQueued      Status = "queued"
-	StatusRunning     Status = "running"
+	StatusQueued  Status = "queued"
+	StatusRunning Status = "running"
+
+	// StatusRetrying is D7's gap between two attempts: the last one failed,
+	// another is due, and the run has not finished. Non-terminal, because the
+	// question "did the 3am sync succeed?" does not have an answer yet.
+	//
+	// Its own status rather than a return to `queued` because a reader has to
+	// be able to tell "waiting for a worker" from "waiting out a backoff after
+	// a failure", and because a run that has already executed twice is not
+	// queued in any sense a person means by the word.
+	StatusRetrying    Status = "retrying"
 	StatusSucceeded   Status = "succeeded"
 	StatusFailed      Status = "failed"
 	StatusInterrupted Status = "interrupted" // D5: we were killed, not the job

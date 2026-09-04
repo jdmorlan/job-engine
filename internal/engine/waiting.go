@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jdmorlan/job-engine/internal/jobdef"
+	"github.com/jdmorlan/job-engine/internal/model"
 	"github.com/jdmorlan/job-engine/internal/schedule"
 	"github.com/jdmorlan/job-engine/internal/store"
 )
@@ -31,6 +32,15 @@ type Waiting struct {
 
 	// Running is what is executing right now, for context.
 	Running []store.Run `json:"running"`
+
+	// Retrying is work that failed and will be attempted again, with the
+	// clock it is waiting on (D7).
+	//
+	// It belongs in this view for the reason the view exists: between two
+	// attempts a job is neither running nor finished, and a person asking "is
+	// anything stuck?" about a job that failed ten minutes ago deserves to see
+	// "attempt 2 of 3, next at 14:22" rather than nothing at all.
+	Retrying []store.Run `json:"retrying,omitempty"`
 
 	// Unservable is work queued for a capability label no online worker
 	// advertises (D20/C8).
@@ -163,6 +173,10 @@ func (e *Engine) Waiting(ctx context.Context) (Waiting, error) {
 		return Waiting{}, err
 	}
 	if w.Running, err = e.store.RecentRunsWithStatus(ctx, "running", 50); err != nil {
+		return Waiting{}, err
+	}
+	if w.Retrying, err = e.store.RecentRunsWithStatus(ctx,
+		string(model.StatusRetrying), 50); err != nil {
 		return Waiting{}, err
 	}
 

@@ -93,6 +93,32 @@ func (s *Store) EventsCausedByRun(ctx context.Context, runID int64) ([]model.Eve
 	return out, rows.Err()
 }
 
+// LatestEventCausedByRun returns the newest event of the given types that this
+// run caused, or sql.ErrNoRows when there is none.
+//
+// It is how an attempt after the first finds its cause (D7). Derived rather
+// than stored: the attempt.failed and retry.requested events already say
+// everything a column would -- when, and whose idea it was -- and a column
+// duplicating them could disagree with the timeline, which is the one thing
+// the timeline may never do.
+func (s *Store) LatestEventCausedByRun(ctx context.Context, runID int64, types ...string) (model.Event, error) {
+	if len(types) == 0 {
+		return model.Event{}, sql.ErrNoRows
+	}
+	args := []any{runID}
+	placeholders := ""
+	for i, t := range types {
+		if i > 0 {
+			placeholders += ","
+		}
+		placeholders += "?"
+		args = append(args, t)
+	}
+	return s.scanEvent(s.state.QueryRowContext(ctx,
+		selectEvent+` WHERE caused_by_run_id = ? AND type IN (`+placeholders+`)
+		ORDER BY id DESC LIMIT 1`, args...))
+}
+
 // EventByID returns one event.
 func (s *Store) EventByID(ctx context.Context, id int64) (model.Event, error) {
 	return s.scanEvent(s.state.QueryRowContext(ctx, selectEvent+` WHERE id = ?`, id))

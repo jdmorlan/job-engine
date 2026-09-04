@@ -21,6 +21,24 @@ const (
 	EventRunSucceeded = "run.succeeded"
 	EventRunFailed    = "run.failed"
 
+	// EventAttemptFailed is D7's causation for an automatic retry: the next
+	// attempt is caused by this, so the attempt list can say who or what asked
+	// for each execution.
+	//
+	// Emitted only when another attempt follows. An attempt that ends the run
+	// is reported as run.failed, so between the two every failure is on the
+	// timeline exactly once -- and `attempt.failed` keeps a single meaning
+	// worth matching a chain rule on: "this job failed, and the engine is
+	// going to try again".
+	EventAttemptFailed = "attempt.failed"
+
+	// EventRetryRequested is a person asking for another attempt on an
+	// existing run (D7). Distinct from run.requested, which is a new run, and
+	// distinct from attempt.failed, which is the engine deciding for itself --
+	// "did a human have to intervene?" is answerable because these are three
+	// different events rather than one.
+	EventRetryRequested = "retry.requested"
+
 	// EventRunSkipped records the overlap policy declining to start a run, and
 	// EventScheduleMissed records windows a gap swallowed. Both exist because
 	// D9 insists gaps are explained rather than silent.
@@ -203,6 +221,80 @@ func (e *Engine) Enqueue(ctx context.Context, slug string, opts RunOptions) (*Pr
 	return &Prepared{
 		Run: run, Job: job, Def: def, StateIn: stateIn, Cause: cause, Actor: opts.Actor,
 	}, nil
+}
+
+// ErrNotRetryable means the run cannot take another attempt, and says which of
+// the two reasons applies in its message.
+var ErrNotRetryable = errors.New("this run cannot be retried")
+
+// RetryRun adds an attempt to an existing run (D7).
+//
+// The distinction from TriggerRun is the whole point and it is the author's,
+// not an implementation detail: `je run` is a new unit of intent with a fresh
+// cursor read, and `je retry` is another go at the *same* intent -- same run,
+// same input state, one more attempt, attributed to the person who asked.
+// Collapsing them would lose exactly the thing he wanted the history to answer:
+// "did a human have to intervene, or did this just work?"
+//
+// A manual retry ignores max_attempts. Somebody typing the command has already
+// made the judgement the limit exists to protect.
+func (e *Engine) RetryRun(ctx context.Context, runID int64, actor string) (store.Run, error) {
+	run, err := e.store.RunByID(ctx, runID)
+	if err != nil {
+		return store.Run{}, err
+	}
+	job, err := e.store.JobByID(ctx, run.JobID)
+	if err != nil {
+		return store.Run{}, err
+	}
+
+	switch {
+	case run.Status == model.StatusSucceeded:
+		// Refused rather than obliged. Re-running successful work is a
+		// legitimate thing to want and it is a *new* run: doing it on this one
+		// would rewrite the record of something that already happened.
+		return store.Run{}, fmt.Errorf(
+			"%w: run %d succeeded -- to run %s again, use `je run %s`",
+			ErrNotRetryable, run.ID, job.Slug, job.Slug)
+	case !run.Status.Terminal():
+		when := ""
+		if run.NextAttemptAt != nil {
+			when = fmt.Sprintf(", next attempt at %s",
+				run.NextAttemptAt.Local().Format(time.TimeOnly))
+		}
+		return store.Run{}, fmt.Errorf("%w: run %d is %s%s",
+			ErrNotRetryable, run.ID, run.Status, when)
+	}
+	if !job.Runnable() {
+		return store.Run{}, unrunnable(job)
+	}
+
+	at := e.now()
+	payload, _ := json.Marshal(map[string]any{
+		"job": job.Slug, "run": run.ID, "attempt": run.AttemptCount + 1,
+		"after": string(run.Status),
+	})
+	// The cause of the attempt that follows, carrying the actor -- which is how
+	// attempt 3 comes to say "jay" while 1 and 2 say the engine did it.
+	if _, _, err := e.publish(ctx, model.Event{
+		Type:          EventRetryRequested,
+		Source:        model.SourceCLI,
+		Payload:       payload,
+		Actor:         actor,
+		CausedByRunID: &run.ID,
+		CreatedAt:     at,
+	}); err != nil {
+		return store.Run{}, fmt.Errorf("recording %s: %w", EventRetryRequested, err)
+	}
+
+	// No delay: the wait between automatic attempts is a courtesy to whatever
+	// the job depends on, and a person who just typed the command has decided
+	// now is the time.
+	if err := e.store.ScheduleRetry(ctx, run.ID, at); err != nil {
+		return store.Run{}, err
+	}
+	e.log.Info("retry requested", "job", job.Slug, "run", run.ID, "actor", actor)
+	return e.store.RunByID(ctx, run.ID)
 }
 
 // recordSkipped notes that the overlap policy declined to start a run.

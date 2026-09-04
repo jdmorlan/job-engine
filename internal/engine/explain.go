@@ -118,9 +118,9 @@ func (e *Engine) Explain(ctx context.Context, slug string) (Explanation, error) 
 	add("runs_on", def.RunsOn, at("runs_on"))
 	add("timeout", def.Timeout.String(), at("timeout"))
 	add("overlap", string(def.Overlap), at("overlap"))
-	// Retry has no field to declare yet, and saying so is the point: a reader
-	// asking "does this retry?" gets an answer here rather than an absence.
-	add("retry", "none", 0)
+	// A reader asking "does this retry?" gets an answer here rather than an
+	// absence -- including when the answer is no, which is the default.
+	add("retry", retryText(def.Retry), at("retry"))
 	add("on_interrupt", string(def.OnInterrupt), at("on_interrupt"))
 	add("state.commit", string(def.State.Commit), at("state.commit"))
 	add("state.primary_cursor", def.State.PrimaryCursor, at("state.primary_cursor"))
@@ -165,6 +165,23 @@ func (e *Engine) Explain(ctx context.Context, slug string) (Explanation, error) 
 		})
 	}
 	return x, nil
+}
+
+// retryText renders the retry policy as a sentence rather than four fields.
+//
+// The backoff numbers are omitted when there is no retry, because a default
+// initial_delay on a job that will never wait is noise dressed as
+// configuration (P3: the tool renders truth, and the truth is "it does not
+// retry").
+func retryText(r jobdef.RetrySpec) string {
+	if r.MaxAttempts <= 1 {
+		return "none (1 attempt)"
+	}
+	if r.Backoff == jobdef.BackoffFixed {
+		return fmt.Sprintf("%d attempts, %s apart", r.MaxAttempts, r.InitialDelay)
+	}
+	return fmt.Sprintf("%d attempts, exponential from %s up to %s",
+		r.MaxAttempts, r.InitialDelay, r.MaxDelay)
 }
 
 // scheduleText renders a schedule the way its file wrote it.

@@ -45,6 +45,10 @@ type Run struct {
 	// Both are nil for a queued run.
 	WorkerID       *string    `json:"worker_id,omitempty"`
 	LeaseExpiresAt *time.Time `json:"lease_expires_at,omitempty"`
+
+	// NextAttemptAt is when a retrying run becomes claimable again (D7). Nil
+	// on every run that is not waiting out a backoff.
+	NextAttemptAt *time.Time `json:"next_attempt_at,omitempty"`
 }
 
 // Attempt is one execution of a run. It carries its own causation so the
@@ -103,8 +107,13 @@ func (s *Store) FinishRun(ctx context.Context, runID int64, status model.Status,
 	if len(output) > 0 {
 		out = string(output)
 	}
+	// next_attempt_at is cleared here, not left behind: a finished run has no
+	// next attempt, and a stale timestamp on one is a fact that is no longer
+	// true sitting in the history.
 	_, err := s.state.ExecContext(ctx, `
-		UPDATE runs SET status = ?, ended_at = ?, output = ?, error = ? WHERE id = ?`,
+		UPDATE runs SET status = ?, ended_at = ?, output = ?, error = ?,
+		                next_attempt_at = NULL
+		WHERE id = ?`,
 		string(status), formatTime(at), out, nullString(runErr), runID)
 	return err
 }
@@ -151,6 +160,31 @@ func (s *Store) FinishAttempt(ctx context.Context, id int64, status model.Status
 	_, err := s.state.ExecContext(ctx, `
 		UPDATE attempts SET status = ?, ended_at = ?, exit_code = ?, error = ? WHERE id = ?`,
 		string(status), formatTime(at), exitCode, nullString(attemptErr), id)
+	return err
+}
+
+// ScheduleRetry puts a failed run back in the queue for another attempt (D7).
+//
+// It is the opposite of FinishRun and deliberately shaped like it: one
+// statement that moves the run to a non-terminal status and releases the
+// lease, so the run a worker just gave back is claimable by any worker that
+// serves its label -- including a different one, which is what makes a retry
+// useful when the failure was the machine rather than the job.
+//
+// The lease is cleared rather than held. A run waiting out a five minute
+// backoff is held by nobody, and leaving the old worker's id on it would make
+// ExpireLeases declare it lost while it is doing exactly what it should.
+func (s *Store) ScheduleRetry(ctx context.Context, runID int64, nextAttemptAt time.Time) error {
+	// ended_at and error are cleared with it. They belong to a run that had
+	// finished, and this one has not: leaving them would make `je runs` report
+	// a duration for a run that is still going, and leave the previous
+	// failure's message sitting on a row that is about to try again.
+	_, err := s.state.ExecContext(ctx, `
+		UPDATE runs
+		SET status = ?, next_attempt_at = ?, worker_id = NULL, lease_expires_at = NULL,
+		    ended_at = NULL, error = NULL
+		WHERE id = ?`,
+		string(model.StatusRetrying), formatTime(nextAttemptAt), runID)
 	return err
 }
 
@@ -274,11 +308,18 @@ func (s *Store) LastSuccessAt(ctx context.Context, jobID int64) (time.Time, erro
 	return parseTime(ended.String)
 }
 
-// InterruptRunning marks every non-terminal run interrupted.
+// InterruptRunning marks every run we were in the middle of interrupted.
 //
 // D5: on startup, anything still "running" is a run we were killed in the
 // middle of. It becomes `interrupted`, a distinct state from `failed`, because
 // the job did not fail -- we did, and those want different responses.
+//
+// A `retrying` run is deliberately left alone, and that is not an oversight
+// (D7). D5's rule is about work that was in flight when we died; a run waiting
+// out a backoff has no process anywhere and carries the time it comes back in
+// its own row. Sweeping it up with the rest would mean an upgrade or a reboot
+// silently swallowed every pending retry -- the job would simply never be
+// tried again, which is the failure P1 exists to rule out.
 func (s *Store) InterruptRunning(ctx context.Context, at time.Time) (int64, error) {
 	res, err := s.state.ExecContext(ctx, `
 		UPDATE runs SET status = ?, ended_at = ?, error = 'engine stopped while this run was in flight'
@@ -321,7 +362,7 @@ func (s *Store) RunTriggeredBy(ctx context.Context, causeRunID, routeID int64) (
 		       r.triggering_route_id, r.route_hash, r.source_revision, r.status,
 		       r.queued_at, r.started_at, r.ended_at, r.attempt_count,
 		       r.state_version_in, r.output, r.error, r.overlap, r.runs_on,
-		       r.worker_id, r.lease_expires_at
+		       r.worker_id, r.lease_expires_at, r.next_attempt_at
 		FROM runs r
 		JOIN events e ON e.id = r.triggering_event_id
 		WHERE e.caused_by_run_id = ? AND r.triggering_route_id = ?
@@ -332,7 +373,7 @@ const selectRun = `
 	SELECT id, job_id, definition_hash, triggering_event_id, triggering_route_id,
 	       route_hash, source_revision, status, queued_at, started_at, ended_at,
 	       attempt_count, state_version_in, output, error, overlap, runs_on,
-	       worker_id, lease_expires_at
+	       worker_id, lease_expires_at, next_attempt_at
 	FROM runs`
 
 func scanRun(sc scanner) (Run, error) {
@@ -348,11 +389,12 @@ func scanRun(sc scanner) (Run, error) {
 		runErr    sql.NullString
 		workerID  sql.NullString
 		leaseEnds sql.NullString
+		nextAt    sql.NullString
 	)
 	if err := sc.Scan(&r.ID, &r.JobID, &r.DefinitionHash, &r.TriggeringEventID,
 		&r.TriggeringRouteID, &routeHash, &revision, &status, &queuedAt, &startedAt,
 		&endedAt, &r.AttemptCount, &r.StateVersionIn, &output, &runErr, &r.Overlap,
-		&r.RunsOn, &workerID, &leaseEnds); err != nil {
+		&r.RunsOn, &workerID, &leaseEnds, &nextAt); err != nil {
 		return Run{}, err
 	}
 	r.SourceRevision = revision.String
@@ -377,6 +419,9 @@ func scanRun(sc scanner) (Run, error) {
 		return Run{}, fmt.Errorf("run %d: %w", r.ID, err)
 	}
 	if r.LeaseExpiresAt, err = parseNullTime(leaseEnds); err != nil {
+		return Run{}, fmt.Errorf("run %d: %w", r.ID, err)
+	}
+	if r.NextAttemptAt, err = parseNullTime(nextAt); err != nil {
 		return Run{}, fmt.Errorf("run %d: %w", r.ID, err)
 	}
 	return r, nil

@@ -184,7 +184,7 @@ architecture), **D16** (daemon lifecycle and generic event ingress).
 | D4 | SQLite | AGREED |
 | D5 | Crash recovery | AGREED |
 | D6 | Job protocol | AGREED (revised v0.5, cap settled) |
-| D7 | Retries and re-runs | AGREED |
+| D7 | Retries and re-runs | AGREED — **shipped** |
 | D8 | Timeouts / concurrency | AGREED |
 | D9 | Schedules | AGREED |
 | D10 | Secrets | AGREED |
@@ -1195,7 +1195,7 @@ tail starts wagging the dog.
 
 ### D7. Retries and re-runs — revised
 
-**Status:** AGREED (revised)
+**Status:** AGREED (revised) — **shipped**
 
 **Your answer.**
 
@@ -1230,6 +1230,35 @@ Schema consequence, now in Appendix A: `attempts` gains `triggering_event_id` an
 Config unchanged: `retry: { max_attempts, backoff, initial_delay, max_delay }`,
 default `max_attempts: 1`. Manual retries don't count against `max_attempts` — if
 you're doing it by hand, you've made the decision the limit exists to protect.
+
+**As built**, and three things the write-up did not settle:
+
+1. **A run between attempts needed its own status.** `retrying` is non-terminal
+   and sits beside `next_attempt_at` on the run. Neither `queued` (nothing has
+   been queued — this run has already executed) nor `failed` (nothing has failed
+   but one attempt) is true for the length of a backoff, and the status column
+   is the one thing every view reads. Same reasoning that made `lost`,
+   `interrupted` and `timed_out` their own statuses rather than shades of
+   `failed`.
+2. **What retries is a shorter list than "not succeeded".** Failed and timed out,
+   both of which this engine watched end. Not `interrupted` — `on_interrupt`
+   already decides that one — and not `lost`, because C6's whole point is that a
+   worker that stopped answering may still be running the job, so an automatic
+   retry could double-fire work in flight. Not a protocol violation either: a job
+   that exits zero and writes malformed state did its work and then broke D6, so
+   repeating it reproduces the same bad output at the cost of doing the work
+   twice.
+3. **Nothing wakes a retrying run up.** `next_attempt_at` is a column, workers
+   poll, and the claim query has one more clause. The wait therefore survives a
+   control plane restart for free, and there is no timer to lose — which is the
+   same reason D14 puts the cursor in the database rather than in memory.
+
+The causation model is D7's as written: the attempt that follows a failure is
+caused by `attempt.failed` (engine, no actor), and the one that follows
+`je retry` is caused by `retry.requested` (carrying the person's name). Neither
+is stored on the run — the attempt's cause is *found* by asking the timeline for
+the newest of those two events, because a column duplicating them could
+disagree with the timeline, and the timeline is the record.
 
 ---
 

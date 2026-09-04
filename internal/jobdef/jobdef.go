@@ -67,6 +67,7 @@ type Definition struct {
 	Timeout     Duration    `json:"timeout"`
 	Overlap     Overlap     `json:"overlap"`
 	OnInterrupt OnInterrupt `json:"on_interrupt"`
+	Retry       RetrySpec   `json:"retry"`
 	Enabled     bool        `json:"enabled"`
 
 	Schedules []Schedule `json:"on,omitempty"`
@@ -107,6 +108,71 @@ const (
 	OnInterruptRetry  OnInterrupt = "retry"
 	OnInterruptIgnore OnInterrupt = "ignore"
 )
+
+// RetrySpec is D7's automatic half: how many times the engine will try on its
+// own before the run is failed, and how long it waits between attempts.
+//
+// The default is one attempt, which is to say no retrying at all. That is the
+// honest default for a scheduler that cannot know whether a job is safe to
+// repeat -- the same reasoning as OnInterrupt above. A job that is idempotent
+// says so by asking for more attempts.
+//
+// What retries and what does not is a deliberate line. A failed or timed-out
+// attempt is one this engine watched end, so trying again is a decision it can
+// make. An interrupted run (D5) and a lost one (D20/C6) are not: `on_interrupt`
+// already governs the first, and the second is the case where "it died" and
+// "it is still running your job on a machine we cannot reach" are
+// indistinguishable, so retrying could double-fire the work.
+type RetrySpec struct {
+	// MaxAttempts counts every automatic attempt, including the first, so 1
+	// means no retry and 3 means "try, then try twice more".
+	//
+	// A manual `je retry` is not counted against it: a person who is doing it
+	// by hand has already made the judgement the limit exists to protect (D7).
+	MaxAttempts int `json:"max_attempts"`
+
+	Backoff      Backoff  `json:"backoff"`
+	InitialDelay Duration `json:"initial_delay"`
+	MaxDelay     Duration `json:"max_delay"`
+}
+
+// Backoff is how the wait between attempts grows (D7).
+type Backoff string
+
+const (
+	// BackoffExponential doubles the wait each time, which is what a job
+	// failing because something downstream is overloaded needs.
+	BackoffExponential Backoff = "exponential"
+	BackoffFixed       Backoff = "fixed"
+)
+
+// Wants reports whether the engine should try again after the given attempt
+// number failed.
+func (r RetrySpec) Wants(attemptNumber int) bool { return attemptNumber < r.MaxAttempts }
+
+// Delay is how long to wait before the attempt that follows attemptNumber.
+//
+// Computed from the attempt number rather than accumulated, so it is a pure
+// function of the definition and the run's own history: the same failure
+// always produces the same wait, and there is no counter to lose across a
+// control plane restart.
+func (r RetrySpec) Delay(attemptNumber int) time.Duration {
+	d := r.InitialDelay.D
+	if r.Backoff == BackoffExponential {
+		for i := 1; i < attemptNumber; i++ {
+			d *= 2
+			// Doubling past the cap is both pointless and how you overflow a
+			// duration on a job somebody gave a large max_attempts.
+			if d >= r.MaxDelay.D {
+				break
+			}
+		}
+	}
+	if d > r.MaxDelay.D {
+		return r.MaxDelay.D
+	}
+	return d
+}
 
 // CatchUp decides what to do about windows missed while the engine was down (D9).
 type CatchUp string
@@ -151,6 +217,10 @@ const (
 	DefaultRuntime       = RuntimeProcess
 	DefaultOverlap       = OverlapSkip
 	DefaultOnInterrupt   = OnInterruptFail
+	DefaultMaxAttempts   = 1
+	DefaultBackoff       = BackoffExponential
+	DefaultInitialDelay  = 10 * time.Second
+	DefaultMaxDelay      = 5 * time.Minute
 	DefaultCatchUp       = CatchUpSkip
 	DefaultStateCommit   = CommitOnSuccess
 	DefaultPrimaryCursor = "since"
@@ -266,6 +336,9 @@ func (d *Definition) Validate() error {
 	default:
 		return fmt.Errorf("on_interrupt must be fail, retry or ignore, got %q", d.OnInterrupt)
 	}
+	if err := d.Retry.validate(); err != nil {
+		return fmt.Errorf("retry: %w", err)
+	}
 	switch d.State.Commit {
 	case CommitOnSuccess:
 	case CommitAlways:
@@ -296,6 +369,28 @@ func (d *Definition) Validate() error {
 				"on[%d]: catch_up: all needs overlap: queue -- with overlap: skip "+
 					"(the default) only the first missed window would run", i)
 		}
+	}
+	return nil
+}
+
+func (r RetrySpec) validate() error {
+	if r.MaxAttempts < 1 {
+		return fmt.Errorf("max_attempts must be at least 1, got %d", r.MaxAttempts)
+	}
+	switch r.Backoff {
+	case BackoffExponential, BackoffFixed:
+	default:
+		return fmt.Errorf("backoff must be exponential or fixed, got %q", r.Backoff)
+	}
+	if r.InitialDelay.D <= 0 {
+		return fmt.Errorf("initial_delay must be positive, got %s", r.InitialDelay)
+	}
+	if r.MaxDelay.D < r.InitialDelay.D {
+		// Said out loud because the silent reading -- cap wins, first wait is
+		// shorter than the one that was asked for -- is the opposite of what
+		// anybody writing these two numbers means (P1).
+		return fmt.Errorf("max_delay (%s) is shorter than initial_delay (%s)",
+			r.MaxDelay, r.InitialDelay)
 	}
 	return nil
 }

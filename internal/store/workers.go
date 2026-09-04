@@ -269,7 +269,10 @@ func (s *Store) ClaimNextRunForWorker(
 	// running beside it. Without it two workers would happily claim both, and
 	// a queued backlog would execute concurrently -- which is the one thing
 	// the author ruled out by not choosing `allow`.
-	args := []any{string(model.StatusQueued), string(jobdef.OverlapAllow), string(model.StatusRunning)}
+	args := []any{
+		string(model.StatusQueued), string(model.StatusRetrying), formatTime(at),
+		string(jobdef.OverlapAllow), string(model.StatusRunning), string(model.StatusRetrying),
+	}
 	placeholders := ""
 	for i, label := range labels {
 		if i > 0 {
@@ -279,20 +282,43 @@ func (s *Store) ClaimNextRunForWorker(
 		args = append(args, label)
 	}
 
+	// A retrying run is claimable in exactly the same way a queued one is, once
+	// its backoff has passed (D7). Nothing wakes it up: the clock passing
+	// next_attempt_at is the whole mechanism, which is why a retry survives a
+	// control plane restart without anything having to be rebuilt in memory.
+	//
+	// The `o.status IN (running, retrying)` half is why the overlap check
+	// counts a backoff as active. A run of this job that is mid-retry has not
+	// finished, and letting the next queued run of the same job start beside it
+	// would give `overlap: queue` two concurrent executions -- the one thing an
+	// author who did not write `allow` ruled out.
 	var id int64
 	err = tx.QueryRowContext(ctx, `
 		SELECT r.id FROM runs r
-		WHERE r.status = ?
+		WHERE r.status IN (?, ?)
+		  AND (r.next_attempt_at IS NULL OR r.next_attempt_at <= ?)
 		  AND (r.overlap = ? OR NOT EXISTS (
-		        SELECT 1 FROM runs o WHERE o.job_id = r.job_id AND o.status = ?))
+		        SELECT 1 FROM runs o
+		        WHERE o.job_id = r.job_id AND o.id <> r.id AND o.status IN (?, ?)))
 		  AND r.runs_on IN (`+placeholders+`)
 		ORDER BY r.queued_at, r.id LIMIT 1`, args...).Scan(&id)
 	if err != nil {
 		return Run{}, err
 	}
 
+	// next_attempt_at is cleared as the run is claimed: it described an attempt
+	// that is now happening, and a claimed run must not carry a timestamp that
+	// reads as "another attempt is still due".
+	//
+	// started_at is COALESCEd rather than assigned, and that is a retry bug
+	// found by watching one: a run reclaimed for its second attempt would
+	// otherwise restart its own clock, and `je run` would report a job that
+	// took seventeen seconds and two failures as "succeeded in 27ms". The run
+	// started when its first attempt did; per-attempt durations are on the
+	// attempts, where they belong.
 	if _, err := tx.ExecContext(ctx, `
-		UPDATE runs SET status = ?, started_at = ?, worker_id = ?, lease_expires_at = ?
+		UPDATE runs SET status = ?, started_at = COALESCE(started_at, ?),
+		                worker_id = ?, lease_expires_at = ?, next_attempt_at = NULL
 		WHERE id = ?`,
 		string(model.StatusRunning), formatTime(at), workerID,
 		formatTime(at.Add(lease)), id); err != nil {

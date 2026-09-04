@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jdmorlan/job-engine/internal/executor"
+	"github.com/jdmorlan/job-engine/internal/jobdef"
 	"github.com/jdmorlan/job-engine/internal/model"
 	"github.com/jdmorlan/job-engine/internal/store"
 )
@@ -337,10 +338,15 @@ func (e *Engine) dispatchFor(ctx context.Context, p Prepared, worker store.Worke
 		Kind: StreamStatus, Status: model.StatusRunning, TS: startedAt,
 	})
 
+	// Which event asked for *this attempt*, which is not always the event that
+	// asked for the run (D7). The run's cause still reaches the job in its
+	// environment below: what the job processes is the event it was triggered
+	// by, on every attempt, and a retry must not hand it a different one.
+	cause, actor := e.attemptCause(ctx, p)
 	attempt, err := e.store.CreateAttempt(ctx, store.Attempt{
 		RunID:             p.Run.ID,
-		TriggeringEventID: &p.Cause.ID,
-		Actor:             p.Actor,
+		TriggeringEventID: cause,
+		Actor:             actor,
 		Executor:          string(p.Def.Runtime),
 	})
 	if err != nil {
@@ -415,6 +421,34 @@ func (e *Engine) dispatchFor(ctx context.Context, p Prepared, worker store.Worke
 		Grace:          executor.DefaultGrace,
 		Lease:          LeaseTTL,
 	}, nil
+}
+
+// attemptCause names what asked for the attempt about to be created, and who.
+//
+// The first attempt is caused by whatever caused the run. Every one after it is
+// caused by the retry -- automatic (attempt.failed, no actor) or manual
+// (retry.requested, carrying the person's identity). That is what makes the
+// attempt list answer "did a human have to intervene?" rather than repeating
+// the run's cause N times.
+//
+// Best effort by design: a cause that cannot be read is not a reason to refuse
+// to run the job, so this falls back to the run's own cause.
+func (e *Engine) attemptCause(ctx context.Context, p Prepared) (*int64, string) {
+	if p.Run.AttemptCount > 0 {
+		ev, err := e.store.LatestEventCausedByRun(
+			ctx, p.Run.ID, EventAttemptFailed, EventRetryRequested)
+		if err == nil {
+			return &ev.ID, ev.Actor
+		}
+	}
+	if p.Cause.ID == 0 {
+		return nil, p.Actor
+	}
+	actor := p.Actor
+	if actor == "" {
+		actor = p.Cause.Actor
+	}
+	return &p.Cause.ID, actor
 }
 
 // AppendLogs stores lines a worker captured and republishes them to watchers.
@@ -496,16 +530,21 @@ func (e *Engine) Complete(ctx context.Context, runID int64, workerID string, c C
 	}
 
 	if c.ExecError != "" {
-		return e.finish(ctx, result, model.StatusFailed, c.Result, c.ExecError)
+		return e.finishOrRetry(ctx, result, model.StatusFailed, prepared.Def, c.Result, c.ExecError)
 	}
 	if !c.Result.Succeeded() {
 		status := statusForCompletion(c)
 		// D14, the whole point: failure, timeout or interruption and the cursor
 		// does not move. The channel contents are simply discarded.
-		return e.finish(ctx, result, status, c.Result, interruptMessage(status, c.Result))
+		return e.finishOrRetry(ctx, result, status, prepared.Def, c.Result,
+			interruptMessage(status, c.Result))
 	}
 
 	if err := e.promote(ctx, result, prepared.Def, c); err != nil {
+		// Deliberately not retried. The job exited zero -- it did its work --
+		// and then wrote something the protocol does not allow (D6). Running it
+		// again would repeat the work to reproduce the same bad output, so this
+		// failure wants an author, not another attempt.
 		return e.finish(ctx, result, model.StatusFailed, c.Result, err.Error())
 	}
 	return e.finish(ctx, result, model.StatusSucceeded, c.Result, "")
@@ -523,6 +562,105 @@ func (e *Engine) attemptNumber(ctx context.Context, runID int64, number int) (st
 		}
 	}
 	return store.Attempt{}, fmt.Errorf("run %d has no attempt %d", runID, number)
+}
+
+// finishOrRetry ends the run, or schedules another attempt (D7).
+//
+// The decision lives here rather than in finish() because finish() is the
+// terminal path and should stay one: everything that ends a run goes through
+// it, and this is the one place that can decide a run is not over yet.
+func (e *Engine) finishOrRetry(
+	ctx context.Context, result *RunResult, status model.Status,
+	def *jobdef.Definition, exec executor.Result, errMsg string,
+) error {
+	if !retryable(status) || !def.Retry.Wants(result.Attempt.Number) {
+		return e.finish(ctx, result, status, exec, errMsg)
+	}
+	return e.retryLater(ctx, result, status, def, exec, errMsg)
+}
+
+// retryable reports whether the engine may try this outcome again on its own.
+//
+// Only outcomes this engine watched end. `interrupted` is D5's, and
+// `on_interrupt` already decides it; `lost` is C6's, where "the worker died"
+// and "the worker is partitioned and still running your job" are
+// indistinguishable -- retrying that could double-fire work that is still in
+// flight, which is a worse failure than the one it would be fixing.
+func retryable(status model.Status) bool {
+	return status == model.StatusFailed || status == model.StatusTimedOut
+}
+
+// retryLater finishes the attempt, records why, and puts the run back.
+//
+// The order is the same discipline as finish(): the attempt becomes terminal
+// and the cause is durable *before* the run becomes claimable, so a worker
+// that picks it up a millisecond later cannot find a run whose previous
+// attempt is still marked running.
+func (e *Engine) retryLater(
+	ctx context.Context, result *RunResult, status model.Status,
+	def *jobdef.Definition, exec executor.Result, errMsg string,
+) error {
+	at := e.now()
+	delay := def.Retry.Delay(result.Attempt.Number)
+	nextAt := at.Add(delay)
+
+	if err := e.store.FinishAttempt(
+		ctx, result.Attempt.ID, status, at, exec.ExitCode, errMsg); err != nil {
+		return err
+	}
+
+	remaining := def.Retry.MaxAttempts - result.Attempt.Number
+	payload, _ := json.Marshal(map[string]any{
+		"job":          result.Job.Slug,
+		"run":          result.Run.ID,
+		"attempt":      result.Attempt.Number,
+		"of":           def.Retry.MaxAttempts,
+		"status":       string(status),
+		"error":        errMsg,
+		"next_attempt": nextAt.UTC().Format(time.RFC3339),
+	})
+	// This event is the cause of the attempt that follows, which is why it is
+	// published before the run is made claimable: dispatchFor looks it up.
+	if _, _, err := e.publish(ctx, model.Event{
+		Type:          EventAttemptFailed,
+		Source:        model.SourceEngine,
+		Payload:       payload,
+		CausedByRunID: &result.Run.ID,
+		Depth:         result.depthForEmitted(),
+		CreatedAt:     at,
+	}); err != nil {
+		return fmt.Errorf("recording %s: %w", EventAttemptFailed, err)
+	}
+
+	if err := e.store.ScheduleRetry(ctx, result.Run.ID, nextAt); err != nil {
+		return err
+	}
+
+	detail := fmt.Sprintf("attempt %d of %d %s: %s -- retrying in %s (%s left)",
+		result.Attempt.Number, def.Retry.MaxAttempts, status, errMsg,
+		delay.Round(time.Second), plural(remaining, "attempt"))
+	// A status event, not a done: whoever is following `je run` is following
+	// the run, and the run is not over. Their terminal says why it went quiet
+	// instead of appearing to hang.
+	e.broker.Publish(result.Run.ID, StreamEvent{
+		Kind: StreamStatus, Status: model.StatusRetrying, TS: at, Detail: detail,
+	})
+	e.log.Info("retrying",
+		"job", result.Job.Slug, "run", result.Run.ID,
+		"attempt", result.Attempt.Number, "of", def.Retry.MaxAttempts, "in", delay)
+
+	result.Run.Status = model.StatusRetrying
+	result.Run.NextAttemptAt = &nextAt
+	result.Attempt.Status = status
+	result.Attempt.ExitCode = exec.ExitCode
+	return nil
+}
+
+func plural(n int, noun string) string {
+	if n == 1 {
+		return fmt.Sprintf("%d %s", n, noun)
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
 }
 
 // ExpireLeases marks runs whose worker stopped heartbeating.

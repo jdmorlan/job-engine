@@ -63,6 +63,21 @@ func runWaiting(ctx context.Context, env *Env, args []string) error {
 			fmt.Fprintln(env.Stdout)
 		}
 
+		if len(w.Retrying) > 0 {
+			fmt.Fprintln(env.Stdout, "RETRYING  (failed, waiting to try again)")
+			tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
+			for _, r := range w.Retrying {
+				next := "now"
+				if r.NextAttemptAt != nil {
+					next = fmt.Sprintf("in %s", untilText(*r.NextAttemptAt))
+				}
+				fmt.Fprintf(tw, "  %s\trun %d\tattempt %d failed\tnext attempt %s\n",
+					names[r.JobID], r.ID, r.AttemptCount, next)
+			}
+			tw.Flush()
+			fmt.Fprintln(env.Stdout)
+		}
+
 		if len(w.Scheduled) > 0 {
 			fmt.Fprintln(env.Stdout, "SCHEDULED")
 			tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
@@ -152,7 +167,7 @@ func runWaiting(ctx context.Context, env *Env, args []string) error {
 			fmt.Fprintln(env.Stdout)
 		}
 
-		if len(w.Running)+len(w.Queued)+len(w.Scheduled)+len(w.Blocked) == 0 {
+		if len(w.Running)+len(w.Queued)+len(w.Retrying)+len(w.Scheduled)+len(w.Blocked) == 0 {
 			fmt.Fprintln(env.Stdout, "nothing scheduled, queued, or running")
 			return nil
 		}

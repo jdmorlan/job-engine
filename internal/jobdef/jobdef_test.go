@@ -75,6 +75,9 @@ func TestValidationErrors(t *testing.T) {
 		{"schedule with both", "command: [\"x\"]\non:\n  - every: 5m\n    cron: \"* * * * *\"\n", "not both"},
 		{"unknown timezone", "command: [\"x\"]\non:\n  - every: 5m\n    timezone: Mars/Olympus\n", "unknown timezone"},
 		{"empty file", "", "empty"},
+		{"zero attempts", "command: [\"x\"]\nretry:\n  max_attempts: 0\n", "max_attempts must be at least 1"},
+		{"bad backoff", "command: [\"x\"]\nretry:\n  backoff: eventually\n", "backoff must be"},
+		{"cap below floor", "command: [\"x\"]\nretry:\n  initial_delay: 10m\n  max_delay: 1m\n", "shorter than initial_delay"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -86,6 +89,38 @@ func TestValidationErrors(t *testing.T) {
 				t.Errorf("error = %q, want it to mention %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestRetryDefaultsToNotRetrying(t *testing.T) {
+	// The default matters more than any other in this file: an engine that
+	// repeats a job nobody told it was safe to repeat can double-charge a card
+	// or double-send an email, and no error message brings that back.
+	def := parse(t, "command: [\"x\"]\n")
+	if def.Retry.MaxAttempts != 1 {
+		t.Errorf("max_attempts defaults to %d, want 1", def.Retry.MaxAttempts)
+	}
+	if def.Retry.Wants(1) {
+		t.Error("a job with no retry policy wants a second attempt")
+	}
+}
+
+func TestBackoffGrowsAndIsCapped(t *testing.T) {
+	exponential := parse(t, "command: [\"x\"]\nretry:\n  max_attempts: 9\n  initial_delay: 10s\n  max_delay: 1m\n")
+	want := []time.Duration{10 * time.Second, 20 * time.Second, 40 * time.Second, time.Minute, time.Minute}
+	for i, w := range want {
+		if got := exponential.Retry.Delay(i + 1); got != w {
+			t.Errorf("delay after attempt %d = %s, want %s", i+1, got, w)
+		}
+	}
+
+	// Fixed means fixed: the same wait every time, which is what a job failing
+	// on a resource that frees up on a schedule wants.
+	fixed := parse(t, "command: [\"x\"]\nretry:\n  max_attempts: 5\n  backoff: fixed\n  initial_delay: 30s\n")
+	for _, n := range []int{1, 2, 4} {
+		if got := fixed.Retry.Delay(n); got != 30*time.Second {
+			t.Errorf("fixed delay after attempt %d = %s, want 30s", n, got)
+		}
 	}
 }
 

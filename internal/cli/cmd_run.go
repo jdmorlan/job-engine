@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os/user"
+	"text/tabwriter"
 	"time"
 
 	"github.com/jdmorlan/job-engine/internal/engine"
@@ -58,10 +59,18 @@ func runViaControlPlane(ctx context.Context, env *Env, client *Client, slug stri
 	if err != nil {
 		return err
 	}
+	return followRun(ctx, env, client, run.ID, quiet)
+}
 
+// followRun streams a run to the terminal and reports how it ended.
+//
+// Shared by `je run` and `je retry` because the half after the request is
+// identical: both are watching one run, and a run that retries is still one
+// run -- which is exactly why this loop does not stop when an attempt fails.
+func followRun(ctx context.Context, env *Env, client *Client, runID int64, quiet bool) error {
 	// Streamed with the caller's context, not a timeout: a job may legitimately
 	// run for its full hour, and the whole point of this path is watching it.
-	streamErr := client.StreamRun(ctx, run.ID, func(ev engine.StreamEvent) {
+	streamErr := client.StreamRun(ctx, runID, func(ev engine.StreamEvent) {
 		switch ev.Kind {
 		case engine.StreamLog:
 			if quiet {
@@ -72,12 +81,18 @@ func runViaControlPlane(ctx context.Context, env *Env, client *Client, slug stri
 				w = env.Stderr
 			}
 			fmt.Fprintln(w, ev.Line)
+		case engine.StreamStatus:
+			// The retry notice (D7). Without it the terminal simply goes quiet
+			// for the length of the backoff, which reads as a hang.
+			if ev.Detail != "" {
+				fmt.Fprintf(env.Stderr, "je: %s\n", ev.Detail)
+			}
 		case engine.StreamOverflow:
 			// Honest rather than silent: the stored logs are complete, this
 			// terminal just could not keep up.
 			fmt.Fprintf(env.Stderr,
 				"je: output was arriving faster than this terminal could take it; "+
-					"see `je logs %d` for the complete log\n", run.ID)
+					"see `je logs %d` for the complete log\n", runID)
 		}
 	})
 
@@ -89,8 +104,8 @@ func runViaControlPlane(ctx context.Context, env *Env, client *Client, slug stri
 			// surprise.
 			fmt.Fprintf(env.Stderr,
 				"\nje: stopped following. Run %d continues in the background: je logs %d\n",
-				run.ID, run.ID)
-			return err
+				runID, runID)
+			return nil
 		}
 		return streamErr
 	}
@@ -98,7 +113,7 @@ func runViaControlPlane(ctx context.Context, env *Env, client *Client, slug stri
 	detailCtx, cancelDetail := withTimeout(ctx)
 	defer cancelDetail()
 
-	detail, err := client.RunDetail(detailCtx, run.ID)
+	detail, err := client.RunDetail(detailCtx, runID)
 	if err != nil {
 		return err
 	}
@@ -160,9 +175,40 @@ func printRunDetail(env *Env, d engine.RunDetail) {
 	if len(d.Run.Output) > 0 {
 		fmt.Fprintf(env.Stdout, "    output  %s\n", truncate(string(d.Run.Output), 120))
 	}
+	// D7's question, answered here rather than in a separate view: "did a human
+	// have to intervene, or did this just work?" is read off the attempt list.
 	if len(d.Attempts) > 1 {
-		fmt.Fprintf(env.Stdout, "    attempts %d\n", len(d.Attempts))
+		fmt.Fprintln(env.Stdout, "    attempts")
+		tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
+		for _, a := range d.Attempts {
+			detail := a.Error
+			if detail == "" && a.Status == model.StatusSucceeded {
+				detail = "-"
+			}
+			fmt.Fprintf(tw, "      %d\t%s\t%s\t%s\t%s\n",
+				a.Number, a.Status, attemptCauseText(a),
+				runDuration(a.StartedAt, a.EndedAt), truncate(detail, 60))
+		}
+		tw.Flush()
 	}
+}
+
+// attemptCauseText says whose idea an attempt was.
+//
+// The first attempt is the run's own cause; anything after it is a retry, and
+// the difference between the engine deciding and a person deciding is the
+// distinction D7 exists to preserve.
+func attemptCauseText(a store.Attempt) string {
+	if a.Number == 1 {
+		if a.Actor == "" {
+			return "engine"
+		}
+		return a.Actor
+	}
+	if a.Actor == "" {
+		return "automatic retry"
+	}
+	return a.Actor + " (retry)"
 }
 
 // currentActor names the person responsible for a manual action (D7).

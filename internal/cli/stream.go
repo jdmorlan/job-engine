@@ -21,6 +21,12 @@ func (c *Client) TriggerRun(ctx context.Context, job, actor string) (store.Run, 
 		api.TriggerRequest{Job: job, Actor: actor})
 }
 
+// RetryRun asks the control plane to add an attempt to an existing run.
+func (c *Client) RetryRun(ctx context.Context, id int64, actor string) (store.Run, error) {
+	return do[store.Run](ctx, c, http.MethodPost,
+		"/v1/runs/"+strconv.FormatInt(id, 10)+"/retry", api.RetryRequest{Actor: actor})
+}
+
 // RunDetail fetches the full picture of a run.
 func (c *Client) RunDetail(ctx context.Context, id int64) (engine.RunDetail, error) {
 	return do[engine.RunDetail](ctx, c, http.MethodGet,

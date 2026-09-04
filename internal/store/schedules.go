@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/jdmorlan/job-engine/internal/jobdef"
 	"github.com/jdmorlan/job-engine/internal/model"
 )
 
@@ -54,57 +53,14 @@ func (s *Store) ActiveRunCount(ctx context.Context) (int, error) {
 // is what the overlap policy keys off (D8).
 func (s *Store) JobHasActiveRun(ctx context.Context, jobID int64) (bool, error) {
 	var n int
+	// `retrying` counts as active. A run waiting out a backoff has not
+	// finished, and starting a second run of the job beside it is precisely
+	// what `overlap: skip` exists to prevent (D7).
 	err := s.state.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM runs WHERE job_id = ? AND status IN (?, ?)`,
-		jobID, string(model.StatusQueued), string(model.StatusRunning)).Scan(&n)
+		SELECT COUNT(*) FROM runs WHERE job_id = ? AND status IN (?, ?, ?)`,
+		jobID, string(model.StatusQueued), string(model.StatusRunning),
+		string(model.StatusRetrying)).Scan(&n)
 	return n > 0, err
-}
-
-// ClaimNextQueuedRun atomically takes the oldest queued run and marks it
-// running, returning sql.ErrNoRows when the queue is empty.
-//
-// Atomic because several workers pull from the same queue, and two workers
-// executing one run would double-fire the job -- the same failure the data
-// directory lock prevents between processes, one level down.
-func (s *Store) ClaimNextQueuedRun(ctx context.Context, at time.Time) (Run, error) {
-	tx, err := s.state.BeginTx(ctx, nil)
-	if err != nil {
-		return Run{}, err
-	}
-	defer tx.Rollback()
-
-	var id int64
-	// Oldest first, so the queue is fair and a job that has been waiting does
-	// not starve behind newer arrivals.
-	//
-	// The NOT EXISTS clause is what makes `overlap: queue` mean what it says:
-	// a second run of the same job waits for the first to finish rather than
-	// running beside it. Without it the worker pool would happily claim both,
-	// and a queued backlog would execute concurrently -- which is the one
-	// thing the author ruled out by not choosing `allow`.
-	err = tx.QueryRowContext(ctx, `
-		SELECT r.id FROM runs r
-		WHERE r.status = ?
-		  AND (r.overlap = ? OR NOT EXISTS (
-		        SELECT 1 FROM runs o WHERE o.job_id = r.job_id AND o.status = ?))
-		ORDER BY r.queued_at, r.id LIMIT 1`,
-		string(model.StatusQueued), string(jobdef.OverlapAllow), string(model.StatusRunning),
-	).Scan(&id)
-	if err != nil {
-		return Run{}, err
-	}
-
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE runs SET status = ?, started_at = ? WHERE id = ?`,
-		string(model.StatusRunning), formatTime(at), id); err != nil {
-		return Run{}, err
-	}
-
-	run, err := scanRun(tx.QueryRowContext(ctx, selectRun+` WHERE id = ?`, id))
-	if err != nil {
-		return Run{}, err
-	}
-	return run, tx.Commit()
 }
 
 // QueuedRuns lists runs waiting for a worker, oldest first. This is what

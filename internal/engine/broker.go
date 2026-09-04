@@ -29,6 +29,12 @@ type StreamEvent struct {
 	TS      time.Time    `json:"ts"`
 	Line    string       `json:"line,omitempty"`
 	Status  model.Status `json:"status,omitempty"`
+
+	// Detail is a sentence a client cannot compose for itself. It carries the
+	// retry notice -- which attempt failed, how long the wait is, how many are
+	// left -- because someone watching `je run` should see the gap explained
+	// rather than a terminal that goes quiet for five minutes (D7, P1).
+	Detail string `json:"detail,omitempty"`
 }
 
 // subscriberBuffer is how many events a slow subscriber may fall behind by.

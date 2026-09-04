@@ -4,11 +4,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/jdmorlan/job-engine/internal/engine"
+	"github.com/jdmorlan/job-engine/internal/model"
 )
 
 // The write and streaming side of runs.
@@ -19,6 +21,7 @@ import (
 // D8 already allows an hour-long job by default.
 func (s *Server) registerRuns(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/runs", s.handleTriggerRun)
+	mux.HandleFunc("POST /v1/runs/{id}/retry", s.handleRetryRun)
 	mux.HandleFunc("GET /v1/runs/{id}/detail", s.handleRunDetail)
 	mux.HandleFunc("GET /v1/runs/{id}/stream", s.handleRunStream)
 }
@@ -58,6 +61,50 @@ func (s *Server) handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 		return
 	case err != nil:
 		if s.handleLookupError(w, err, "job") {
+			return
+		}
+		s.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, run)
+}
+
+// RetryRequest is the body of POST /v1/runs/{id}/retry.
+//
+// Actor is the same fallback as TriggerRequest's, and it matters more here:
+// this endpoint exists so the history can say a person intervened, and a
+// verified certificate outranks anything the body claims (D25).
+type RetryRequest struct {
+	Actor string `json:"actor,omitempty"`
+}
+
+// handleRetryRun adds an attempt to an existing run (D7).
+//
+// A separate endpoint from POST /v1/runs rather than a flag on it, because
+// they produce different things: one creates a run, the other adds to one.
+func (s *Server) handleRetryRun(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, "run id must be a number")
+		return
+	}
+	var req RetryRequest
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil && err != io.EOF {
+		s.writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+		return
+	}
+
+	run, err := s.engine.RetryRun(r.Context(), id, actorOf(r, req.Actor))
+	switch {
+	case errors.Is(err, engine.ErrNotRetryable):
+		// 409, the same as an overlap skip: the request was well formed and
+		// the state of the run is the reason, which the caller can act on.
+		s.writeError(w, http.StatusConflict, err.Error())
+		return
+	case err != nil:
+		if s.handleLookupError(w, err, "run") {
 			return
 		}
 		s.writeError(w, http.StatusBadRequest, err.Error())
@@ -120,16 +167,24 @@ func (s *Server) handleRunStream(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
-	// Replay what is already durable.
-	attempt := max(run.AttemptCount, 1)
+	// Replay what is already durable, for the attempt that is in flight or was
+	// the last one.
+	//
+	// Skipped for a run that is between attempts (D7). Its stored lines belong
+	// to the attempt that just failed, and replaying them to somebody who
+	// typed `je retry` would show them the old failure's output as though the
+	// new attempt had produced it.
 	replayed := map[int64]bool{}
-	if lines, err := s.engine.Logs(r.Context(), id, attempt); err == nil {
-		for _, l := range lines {
-			replayed[l.Seq] = true
-			sendSSE(w, flusher, engine.StreamEvent{
-				Kind: engine.StreamLog, Seq: l.Seq, Attempt: l.Attempt,
-				Stream: l.Stream, TS: l.TS, Line: l.Line,
-			})
+	if run.Status != model.StatusQueued && run.Status != model.StatusRetrying {
+		attempt := max(run.AttemptCount, 1)
+		if lines, err := s.engine.Logs(r.Context(), id, attempt); err == nil {
+			for _, l := range lines {
+				replayed[l.Seq] = true
+				sendSSE(w, flusher, engine.StreamEvent{
+					Kind: engine.StreamLog, Seq: l.Seq, Attempt: l.Attempt,
+					Stream: l.Stream, TS: l.TS, Line: l.Line,
+				})
+			}
 		}
 	}
 

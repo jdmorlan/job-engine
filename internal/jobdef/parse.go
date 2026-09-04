@@ -26,6 +26,7 @@ type rawDefinition struct {
 	Timeout     *Duration     `yaml:"timeout"`
 	Overlap     *Overlap      `yaml:"overlap"`
 	OnInterrupt *OnInterrupt  `yaml:"on_interrupt"`
+	Retry       *rawRetry     `yaml:"retry"`
 	Enabled     *bool         `yaml:"enabled"`
 	On          []rawSchedule `yaml:"on"`
 	State       *rawState     `yaml:"state"`
@@ -37,6 +38,13 @@ type rawSchedule struct {
 	Cron     *string   `yaml:"cron"`
 	Timezone *string   `yaml:"timezone"`
 	CatchUp  *CatchUp  `yaml:"catch_up"`
+}
+
+type rawRetry struct {
+	MaxAttempts  *int      `yaml:"max_attempts"`
+	Backoff      *Backoff  `yaml:"backoff"`
+	InitialDelay *Duration `yaml:"initial_delay"`
+	MaxDelay     *Duration `yaml:"max_delay"`
 }
 
 type rawState struct {
@@ -88,6 +96,12 @@ func Parse(path, slug string, body []byte) (*Definition, error) {
 		Overlap:     DefaultOverlap,
 		OnInterrupt: DefaultOnInterrupt,
 		Enabled:     true,
+		Retry: RetrySpec{
+			MaxAttempts:  DefaultMaxAttempts,
+			Backoff:      DefaultBackoff,
+			InitialDelay: Duration{DefaultInitialDelay},
+			MaxDelay:     Duration{DefaultMaxDelay},
+		},
 		State: StateSpec{
 			PrimaryCursor: DefaultPrimaryCursor,
 			Commit:        DefaultStateCommit,
@@ -106,6 +120,13 @@ func Parse(path, slug string, body []byte) (*Definition, error) {
 	setIf(&d.Enabled, raw.Enabled)
 	d.Command = raw.Command
 	d.Secrets = raw.Secrets
+
+	if raw.Retry != nil {
+		setIf(&d.Retry.MaxAttempts, raw.Retry.MaxAttempts)
+		setIf(&d.Retry.Backoff, raw.Retry.Backoff)
+		setIf(&d.Retry.InitialDelay, raw.Retry.InitialDelay)
+		setIf(&d.Retry.MaxDelay, raw.Retry.MaxDelay)
+	}
 
 	if raw.State != nil {
 		setIf(&d.State.PrimaryCursor, raw.State.PrimaryCursor)

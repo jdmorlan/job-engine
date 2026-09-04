@@ -80,7 +80,7 @@ tbody tr:hover { background: var(--panel-2); }
 .s-succeeded { background: var(--ok); }
 .s-failed, .s-error { background: var(--fail); }
 .s-running { background: var(--running); }
-.s-queued, .s-waiting { background: var(--wait); }
+.s-queued, .s-waiting, .s-retrying { background: var(--wait); }
 .s-none, .s-skipped { background: var(--faint); }
 .pill {
   display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 11px;

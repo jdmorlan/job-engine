@@ -457,6 +457,7 @@ je workers              what is attached, and what it can run
 je sync           reload job definitions, atomically
 je waiting        what has not happened yet, and what is stuck
 je run <job>      run a job now and follow its output
+je retry <run>    add an attempt to an existing run
 je init [dir]     set up a new jobs repository
 je source         register where definitions come from, and what each provides
 je new <job>      write a job file, and optionally the script it runs
@@ -491,6 +492,58 @@ ok  run 12 succeeded in 1.2s
 
 Ctrl-C detaches rather than cancelling: the run belongs to the control plane and
 its worker, and it tells you how to follow it again.
+
+### Retries
+
+A job that is safe to repeat says so. Nothing retries by default, because the
+engine cannot know whether running your job twice sends one email or two:
+
+```yaml
+retry:
+  max_attempts: 3       # counting the first; 1 (the default) means no retry
+  backoff: exponential  # or fixed
+  initial_delay: 10s
+  max_delay: 5m
+```
+
+Attempts belong to the run, so a job that fails twice and succeeds on the third
+try is **one** successful run with three attempts — not three runs. The run
+waits in `retrying`, which is its own state and shows up in `je waiting` with
+the clock it is waiting on:
+
+```console
+$ je waiting
+RETRYING  (failed, waiting to try again)
+  house/sync-readings  run 41  attempt 2 failed  next attempt in 40s
+```
+
+Failures and timeouts retry. Interruptions do not — `on_interrupt` already
+decides those — and neither does a **lost** run: when a worker stops answering,
+"it died" and "it is still running your job" are indistinguishable, so retrying
+could double-fire work that is still in flight (D20/C6).
+
+`je retry <run>` adds an attempt by hand, and that is a different thing from
+`je run <job>`: a retry is another go at the same intent, with the same input
+cursor, while `je run` is a new run with a fresh cursor read. A manual retry
+ignores `max_attempts` — typing the command is the judgement the limit exists to
+protect — and the history keeps them apart:
+
+```console
+$ je retry 41
+je: retrying run 41 (attempt 3)
+ingested 41 readings
+
+ok  run 41 succeeded in 1.4s
+    cursor  since  2026-08-13T04:00 -> 2026-09-02T11:15  (v41)
+    attempts
+      1  failed     engine           exited 7
+      2  failed     automatic retry  exited 7
+      3  succeeded  jay (retry)      -
+```
+
+That last block is the point of separating runs from attempts: *did this
+eventually work* and *did a human have to intervene* are different questions,
+and both are answerable without reading a log.
 
 ### Schedules
 
@@ -716,7 +769,7 @@ Pulls readings from the local station into the almanac store.
   runs_on                 default                            (default)
   timeout                 30m                                (weather-ingest.yaml:5)
   overlap                 skip                               (default)
-  retry                   none                               (default)
+  retry                   3 attempts, exponential from 10s up to 5m  (weather-ingest.yaml:6)
   on_interrupt            fail                               (default)
   state.commit            on_success                         (default)
   state.primary_cursor    since                              (weather-ingest.yaml:12)
@@ -873,7 +926,7 @@ a key still works and says plainly that nothing verified it.
 
 ### Not built yet
 
-Retries, the container executor, and retention.
+The container executor, and retention.
 
 **Runtimes** (D28) install a job's dependencies before it runs:
 
