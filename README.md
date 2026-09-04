@@ -822,8 +822,11 @@ a key still works and says plainly that nothing verified it.
 
 ### Not built yet
 
-Retries, job sources (D22), container executor, the TypeScript shim (D21),
-and retention.
+Retries, the container executor, retention, and **runtimes** — a job declaring
+`runtime: typescript` having its dependencies installed and the right toolchain
+on PATH before it runs (D28). Today a job runs whatever `command:` says with
+whatever the worker already has, so anything beyond a shell script needs the
+worker prepared by hand.
 
 **Fan-in is not built.** A step waits on one condition. `all_of` with a window
 (D3) — "when both of these landed, within six hours" — parses and is refused

@@ -202,6 +202,9 @@ architecture), **D16** (daemon lifecycle and generic event ingress).
 | D23 | The web client | **NEW (v0.7) — agreed, phase 1 shipped** |
 | D24 | Worker version coherence | **NEW (v0.7) — phase 1 shipped, C10 enforced** |
 | D25 | Secrets that travel with definitions | **NEW (v0.7) — steps 1-5 shipped** |
+| D26 | Machine-scoped commands | **NEW (v0.8) — shipped** |
+| D27 | Only repositories are sources | **NEW (v0.8) — shipped** |
+| D28 | Runtimes and dependency preparation | **NEW (v0.8) — agreed in shape, one question open** |
 | N1 | Non-goals | AGREED |
 | N2 | v1 done | AGREED |
 | Q1 | Storage adapters | AGREED — SQLite only, no adapter |
@@ -3734,10 +3737,191 @@ the engine sees only as `je source sync`. The one place the CLI touches git is
 `je secret set --source`, which edits a secrets file in a repository you own and
 offers to commit it -- helping with a file, not managing a repository.
 
-**The second gap is `upgrade` for a split deployment.****The second gap is `upgrade` for a split deployment.** It now handles every
+**The second gap is `upgrade` for a split deployment.** It now handles every
 component on the machine it runs on, which is the whole answer for one box and
 half of it for two. The other half is the same channel: a control plane that can
 tell a worker to replace itself.
+
+### D28. Runtimes: how a job's language gets what it needs — NEW
+
+**Status:** NEW (v0.8) — agreed in shape, one question open
+
+> *"Let's say we want to run typescript jobs, what's the strategy? I could run
+> things in a docker container, but the piece I don't like is that I need to go
+> through a build process every time. However, the other side is that I have to
+> make sure that a worker has all the dependencies it needs if I'm just going to
+> run it on the machine."*
+
+#### The fork is not the one it looks like
+
+Docker cannot be the only format, so "one format, made fast" is not actually on
+the table. F1's motivating worker runs `shortcuts run "Water the plants"` on a
+Mac, and that cannot go in a container. The process executor has to exist
+whatever else is true, so the real question is **what the process executor
+knows**, with containers as the escape hatch D20 already planned for.
+
+That changes the cost of the answer. This is not a second mechanism competing
+with a first; it is deciding how much the one that must exist understands.
+
+#### Not a module per language. A table.
+
+The instinct was "each language would have to have its own module in the
+worker", and the useful correction is that it does not, because every ecosystem
+has converged on the same three facts:
+
+| runtime | manifest | install | run |
+|---|---|---|---|
+| typescript | `package.json` | `pnpm install --frozen-lockfile` | `pnpm exec tsx` |
+| python | `pyproject.toml` | `uv sync --frozen` | `uv run` |
+| go | `go.mod` | `go mod download` | `go run` |
+| swift | `Package.swift` | `swift package resolve` | `swift run` |
+
+That is data. The mechanism -- detect a manifest, install once, cache, put the
+right binaries on PATH, then exec the job's own `command:` -- is written once
+and shared. Adding a language is a row, not a package, which is the whole
+difference between this being a growing maintenance surface and a fixed one.
+
+**The job's command stays the job's command.** The runtime prepares the tree and
+the environment; it does not invent a per-language calling convention. D6 is
+intact: the filesystem is still the contract, and `command: ["tsx",
+"jobs/ingest.ts"]` is still what runs.
+
+#### The version problem mostly solves itself, and Swift shows where it does not
+
+The part that sounded expensive is nearly free for the first three, because the
+package manager bootstraps its own runtime from something already in the repo:
+`uv` installs Python against `requires-python`, `pnpm` fetches Node from
+`use-node-version`, and `go` downloads toolchains from the `toolchain` directive
+(1.21+). So the version is a property of the code rather than of the machine,
+which is the right place for it, and a worker needs one static binary per
+runtime it supports rather than a correctly-versioned language install.
+
+**Swift is the first row where that does not hold**, and it is worth recording
+before somebody adds it and is surprised: SwiftPM has no equivalent of `uv
+python install`, so a Swift row costs a toolchain prerequisite (`swiftly`, or
+Xcode) that the other three do not. The table still absorbs it; the
+self-bootstrapping property just does not generalise for free.
+
+#### Two caches, and they fall out of what already exists
+
+Source trees are content-addressed at `cache/sources/<name>/<sha>`. Dependencies
+are the same idea keyed on content instead of commit:
+
+- **`cache/deps/<key>`** -- keyed by the *lockfile*, so it is shared across
+  commits and across sources. A repo that has not touched its lockfile in a
+  month installs nothing on a new commit, and two repos pinning the same
+  dependencies share an entry.
+- **`cache/build/<source-sha>`** -- compiled artefacts, for the rows that
+  compile (Go, Swift). Keyed by the commit, which is already the identity of the
+  tree. Interpreted runtimes never populate it.
+
+**The key must include the runtime version**, not just the lockfile hash:
+`(runtime, version, lockfile-hash)`. The same `pnpm-lock.yaml` installed under
+Node 20 and Node 22 can produce different native modules, because anything with
+a compiled addon builds against the ABI. Keyed on the lockfile alone, the first
+machine to install poisons the entry and it misbehaves everywhere else, which is
+a genuinely miserable thing to debug.
+
+**Install to a temporary directory and rename on success.** A killed install
+must not leave a half-populated entry that looks complete forever after. That is
+the same atomic-rename discipline `WriteRuntime` and `WriteEndpoint` already
+use, for the same reason.
+
+#### A missing runtime is unservable work, not a failed run
+
+The question was how to make a runtime failure clear. The better answer is that
+it should usually not be a failure: a worker knows at startup what it can
+prepare, so this is a capability, and there is already machinery for capabilities.
+
+A worker advertises its runtimes the way it advertises labels, and a job whose
+runtime nothing serves is *queued and visible* rather than dispatched and
+broken:
+
+```console
+$ je waiting
+WAITING FOR A RUNTIME  (queued for a runtime nothing is serving)
+  runtime: typescript
+    3 run(s), jobs: house/ingest
+    on a worker that should run these:  je worker runtime install typescript
+```
+
+No run, no failure, nothing to go and read -- and it is visible when the source
+is registered rather than the first time a schedule fires at 3am. C8 calls the
+unservable-work view the most important diagnostic in the system; this is the
+same class of problem and gets the same treatment.
+
+**Runtimes are self-reported, and labels are not.** This looks like it
+contradicts D25 and does not. A label *gates* something -- it is a permission,
+so a worker advertising its own was the hole D25 closed. A runtime is an
+objective, checkable property of a machine, and the worst case of a wrong claim
+is a job failing on that worker rather than somebody reading a secret. Facts can
+be self-reported; permissions cannot.
+
+#### Installing a toolchain: explicit, never implicit
+
+The worker does **not** install a runtime because a job arrived. It offers `je
+worker runtime install <name>`, and `je worker runtimes` lists what is present,
+what is missing, and the command for each.
+
+Both halves of that follow rules already established in this project rather than
+new ones:
+
+- *"If an instruction to somebody starts with a tool that is not `je`, that is a
+  gap in `je`"* (D26's Docker argument) -- so "go and install pnpm yourself" is
+  the wrong answer, and the CLI owns the work.
+- *"Do not manage things behind my back"* (D27's git argument) -- so silently
+  materialising a Node toolchain on a machine because a job showed up is equally
+  wrong.
+
+**The hard part already exists.** `internal/selfupdate` downloads an archive,
+verifies SHA-256 against a published checksum file, refuses on mismatch,
+extracts, and atomically replaces. That is exactly the operation needed for
+`pnpm`, `uv`, or a Go toolchain, and it is machinery this project already trusts
+enough to replace `je` itself with. Installing a runtime is that, pointed
+somewhere else.
+
+For what still slips through -- a toolchain removed after a worker started, a
+version the worker cannot produce -- the error names the runtime, what was
+looked for and where, and the single command that fixes it, in the shape the
+"no control plane authority" error already uses.
+
+#### `runtime:` and `language:` are different fields
+
+`language:` exists in `jobdef` today and marks a job misconfigured, because D21's
+shim injection is not implemented. That field should stay D21's: it is about
+*sugar*, materialising helper functions from the binary.
+
+This is not that. Once dependencies are installed and PATH is set, the job's own
+`command:` runs the job's own file; nothing is injected. The field is saying
+**how to prepare the tree**, so it should be called `runtime:`. Keeping them
+separate means the two features can ship independently and neither has to
+explain the other.
+
+#### Containers stay, as an escape hatch
+
+`image:` on a job, for what the table cannot reach: a language nobody wants to
+support, or a job needing system packages (ffmpeg, imagemagick). That is D20's
+container executor, and it stays per-job rather than becoming a format every job
+pays a build for.
+
+#### The open question
+
+**Does the worker install dependencies, or refuse and require the repo to vendor
+them?**
+
+Installing is better ergonomics and is what the whole design above assumes. The
+argument for refusing is hermeticity: a worker's behaviour becomes fully
+predictable from the tree, and it never reaches the network at prepare time,
+which matters more on a machine you do not fully control.
+
+The recommendation is to install, because the cache makes it fast and vendoring
+`node_modules` into git is a worse ask than requiring one static binary on a
+worker. But the honest cost belongs in the decision rather than in a surprise:
+**`pnpm install` runs postinstall scripts**, as does much of pip. The worker
+executes arbitrary code from the repository at install time. That *feels*
+different from running the job and is not -- the worker already runs that
+repository's command from that same tree, so it is the same trust boundary, not
+a new one.
 
 ## Part 6 — Scope
 
