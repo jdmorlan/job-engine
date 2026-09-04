@@ -46,6 +46,12 @@ type Removed struct {
 	LogLines int64 `json:"log_lines"`
 	Events   int64 `json:"events"`
 
+	// StateVersions is cursor history trimmed, and Triggers is spent fan-in
+	// state. Neither is bytes anybody notices; both are unbounded without
+	// this, which is the only reason they are here.
+	StateVersions int64 `json:"state_versions"`
+	Triggers      int64 `json:"triggers"`
+
 	// RunsLeft is what the cap stopped this pass from reaching. Reported
 	// rather than hidden, because a sweep that quietly does a tenth of the
 	// work looks identical to one that had nothing to do.
@@ -60,7 +66,7 @@ type Removed struct {
 
 // Any reports whether the sweep removed anything at all.
 func (r Removed) Any() bool {
-	return r.Runs+r.Attempts+r.LogLines+r.Events > 0
+	return r.Runs+r.Attempts+r.LogLines+r.Events+r.StateVersions+r.Triggers > 0
 }
 
 // defaultMaxRuns is how many runs one sweep will remove.
@@ -324,4 +330,65 @@ func batches(in []int64, size int) [][]int64 {
 		out = append(out, in)
 	}
 	return out
+}
+
+// StateHistoryVersions is how many versions of a job's cursor are kept (D13).
+//
+// The current cursor is never expired at any age: it is tiny, and losing it
+// means reprocessing from the beginning. What trims is the history behind it,
+// which exists to answer "when did this stop moving?" -- a question a hundred
+// versions answers as well as a thousand.
+const StateHistoryVersions = 100
+
+// SweepState trims each job's cursor history, keeping the newest versions.
+//
+// Bounded by count rather than by age, unlike everything else here, and that is
+// D13's decision rather than an inconsistency: a job that runs hourly and one
+// that runs yearly have wildly different histories in thirty days, and neither
+// of them wants the *current* value to be the thing that ages out.
+func (s *Store) SweepState(ctx context.Context, keep int) (int64, error) {
+	if keep <= 0 {
+		keep = StateHistoryVersions
+	}
+	// The subquery is per job, and the comparison is on version rather than on
+	// time: versions are dense and monotonic per job, so "everything below the
+	// keep-th newest" needs no window function and no second pass.
+	res, err := s.state.ExecContext(ctx, `
+		DELETE FROM job_state
+		WHERE (job_id, version) IN (
+			SELECT js.job_id, js.version FROM job_state js
+			WHERE js.version <= (
+				SELECT MAX(version) FROM job_state m WHERE m.job_id = js.job_id
+			) - ?
+		)`, keep)
+	if err != nil {
+		return 0, fmt.Errorf("trimming cursor history: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+// SweepTriggers removes fan-in state that can no longer do anything (D3).
+//
+// Not in D13, which predates fan-in: trigger_state grows by a row per route per
+// correlation key and nothing ever removed one, so a chain that fans in daily
+// outgrows the run history it is meant to be smaller than.
+//
+// Only rows that have fired, or whose window closed before the cutoff. A
+// partly-satisfied trigger still inside its window is live work -- it is what
+// `je waiting` is showing somebody -- and the cutoff is thirty days against
+// windows measured in hours, so the distinction costs nothing and removing it
+// would silently drop a pending fan-in.
+func (s *Store) SweepTriggers(ctx context.Context, before time.Time) (int64, error) {
+	cutoff := formatTime(before)
+	res, err := s.state.ExecContext(ctx, `
+		DELETE FROM trigger_state
+		WHERE window_started_at < ?
+		  AND (fired_at IS NOT NULL OR (expires_at IS NOT NULL AND expires_at < ?))`,
+		cutoff, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("removing spent triggers: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
 }

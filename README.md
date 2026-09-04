@@ -458,6 +458,7 @@ je sync           reload job definitions, atomically
 je waiting        what has not happened yet, and what is stuck
 je run <job>      run a job now and follow its output
 je retry <run>    add an attempt to an existing run
+je retention sweep  remove history past its keep period
 je init [dir]     set up a new jobs repository
 je source         register where definitions come from, and what each provides
 je new <job>      write a job file, and optionally the script it runs
@@ -801,6 +802,68 @@ starts when
   run.succeeded job=normalize-readings  chain daily-weather step 2  daily-weather.yaml
 ```
 
+### Retention, and the engine's own jobs
+
+History does not accumulate forever. A daily job removes what is past its keep
+period — thirty days for runs, their output and the timeline — and returns the
+space to the disk:
+
+```console
+$ je retention sweep
+keeping runs 30d, logs 30d, events 30d
+removed 412 run(s), 431 attempt(s), 88201 log line(s), 903 event(s)
+reclaimed 41.2 MB; logs database is now 6.1 MB
+```
+
+**That is not a loop inside the control plane. It is a job**, and one you can
+see:
+
+```console
+$ je jobs --all
+JOB               STATUS  COMMAND                                              FILE
+system/retention  ok      je retention sweep --runs 30d --logs 30d --events…   jobs/retention.yaml
+```
+
+It has runs, logs, a schedule, a timeout and a visible failure, because P2 says
+the engine's own work is jobs and treats that as a forcing function rather than
+decoration: if housekeeping were awkward to express in the job format, the
+format would have a hole, and this project should find it on itself first. It is
+hidden from `je jobs` by default — the "is everything OK?" screen should not be
+mostly housekeeping — and its keep periods live in its own file, so
+`je explain system/retention` is the answer to "what is my retention policy?"
+
+The `system` source is built in and cannot be unregistered. It is not really an
+exception to "only repositories are sources": that rule exists because code
+which cannot travel is not a source, and these jobs run `je`, which is on every
+worker by definition. A system job runs *as the worker itself* — the worker's
+own binary rather than whatever is on `PATH`, and the worker's own data
+directory — which is a grant no other job gets.
+
+**Three things are kept regardless of age**, and they are the design rather than
+exceptions to it:
+
+- **A run a live cursor points at.** Job state never expires and names the run
+  that moved it. "What set this cursor?" is the question D14 exists to answer.
+- **A run the timeline still describes.** Events are kept at least as long as
+  runs — `je why` reads through them — so a policy that expired events first is
+  refused rather than accepted and regretted.
+- **A job that asked.** `keep_logs: forever` in a job file exempts its output,
+  and its runs with it: `je logs` is addressed by a run id, so keeping logs whose
+  run has gone would leave bytes nothing can reach.
+
+And deletion is the one operation that erases its own evidence, so what goes is
+counted before it goes:
+
+```console
+$ je runs house/chatty
+no runs within the keep period; 412 older run(s) have been removed by
+retention. je explain system/retention
+```
+
+Without that line, a job trimmed to thirty days is indistinguishable from a job
+that started thirty days ago — and nothing left in the database could tell you
+which you were looking at.
+
 ### Chains
 
 A job never names another job. What happens after what lives in one file per
@@ -935,7 +998,7 @@ a key still works and says plainly that nothing verified it.
 
 ### Not built yet
 
-The container executor, and retention.
+The container executor.
 
 **Runtimes** (D28) install a job's dependencies before it runs:
 

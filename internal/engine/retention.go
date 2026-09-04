@@ -140,6 +140,21 @@ func (e *Engine) Sweep(ctx context.Context, policy Policy, actor string) (Sweep,
 	}
 	removed.Events += events
 
+	// Cursor history, trimmed by count rather than by age (D14), and the
+	// fan-in state that has already done its job. Both are small and neither
+	// is bounded by anything else.
+	versions, err := e.store.SweepState(ctx, store.StateHistoryVersions)
+	if err != nil {
+		return Sweep{}, err
+	}
+	removed.StateVersions = versions
+
+	triggers, err := e.store.SweepTriggers(ctx, now.Add(-policy.Events))
+	if err != nil {
+		return Sweep{}, err
+	}
+	removed.Triggers = triggers
+
 	// And only then the space, because reclaiming before deleting would return
 	// whatever the last sweep freed and none of this one's.
 	space, err := e.store.ReclaimLogSpace(ctx, 0)
@@ -149,15 +164,17 @@ func (e *Engine) Sweep(ctx context.Context, policy Policy, actor string) (Sweep,
 	out := Sweep{Removed: removed, Space: space, Policy: policy}
 
 	payload, _ := json.Marshal(map[string]any{
-		"runs":         removed.Runs,
-		"attempts":     removed.Attempts,
-		"log_lines":    removed.LogLines,
-		"events":       removed.Events,
-		"runs_left":    removed.RunsLeft,
-		"pinned":       removed.Pinned,
-		"converted":    space.Converted,
-		"bytes_freed":  space.Reclaimed(),
-		"logs_db_size": space.BytesAfter,
+		"runs":           removed.Runs,
+		"attempts":       removed.Attempts,
+		"log_lines":      removed.LogLines,
+		"events":         removed.Events,
+		"state_versions": removed.StateVersions,
+		"triggers":       removed.Triggers,
+		"runs_left":      removed.RunsLeft,
+		"pinned":         removed.Pinned,
+		"converted":      space.Converted,
+		"bytes_freed":    space.Reclaimed(),
+		"logs_db_size":   space.BytesAfter,
 	})
 	if _, _, err := e.publish(ctx, model.Event{
 		Type:      EventRetentionSwept,

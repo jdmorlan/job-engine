@@ -75,6 +75,10 @@ func printSweep(env *Env, s engine.Sweep) {
 	} else {
 		fmt.Fprintf(env.Stdout, "removed %d run(s), %d attempt(s), %d log line(s), %d event(s)\n",
 			r.Runs, r.Attempts, r.LogLines, r.Events)
+		if r.StateVersions > 0 || r.Triggers > 0 {
+			fmt.Fprintf(env.Stdout, "trimmed %d cursor version(s) and %d spent trigger(s)\n",
+				r.StateVersions, r.Triggers)
+		}
 	}
 	if r.RunsLeft > 0 {
 		// A cap that stops quietly looks exactly like a sweep with nothing to

@@ -190,7 +190,7 @@ architecture), **D16** (daemon lifecycle and generic event ingress).
 | D10 | Secrets | AGREED |
 | D11 | Definition versioning | AGREED |
 | D12 | Observability surface | AGREED |
-| D13 | Retention | AGREED — **revised v0.9, shape agreed, not built** |
+| D13 | Retention | AGREED — **revised v0.9, shipped** |
 | D14 | Job state / cursors | AGREED (revised v0.5) — **2 questions open** |
 | D15 | Daemon + API + CLI (`je`) | AGREED |
 | D16 | Daemon lifecycle + event ingress | AGREED (renamed v0.5) |
@@ -2497,7 +2497,7 @@ Still not in v1: OpenTelemetry, metrics endpoints, distributed tracing.
 
 ### D13. Retention — revised again
 
-**Status:** AGREED (revised v0.9) — **shape agreed, not yet built**
+**Status:** AGREED (revised v0.9) — **shipped**
 
 > *"I almost think the defaults can be tighter... records could be 30 days... logs
 > could be 30 days as well."*
@@ -2589,6 +2589,24 @@ So the sweep keeps a per-job count of what it removed, and the views carry a
 floor: *"30 days shown; 340 older runs removed by retention."* The rows that
 would have told you are gone, so the count has to be written down at the moment
 they go — there is no reconstructing it afterwards.
+
+**As built**, with two findings worth keeping:
+
+`keep_logs: forever` had to reach further than its name. The first version kept
+a job's log lines and deleted the runs they belonged to, which leaves bytes on
+the disk that nothing can reach, because `je logs` is addressed by a run id. A
+job whose logs are kept keeps its runs.
+
+And the empty case is the one that mattered. `je runs <job>` printed "no runs
+yet" for a job whose entire history had just been swept — which is exactly what
+a job that has never run looks like, and precisely the confusion C5 was written
+to prevent. The count was already being kept; the view was not using it.
+
+**Not yet:** a way to change the periods without editing the embedded file.
+They are arguments in `system/retention.yaml`, which makes them visible and
+validated, and unowned — nobody can edit that file, so 30/30/30 is the policy
+until `je retention set` or a per-deployment override exists. Stated rather than
+hidden, because it is the one obvious question the shape invites.
 
 ---
 
