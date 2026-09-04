@@ -779,6 +779,13 @@ There is no package to install and no version to match: the shim is materialised
 by the same binary that runs your job, so there is no version pair that can be
 wrong. That is the whole reason it is not published to npm (D21).
 
+**The types come with it**, so your editor knows what `je` is — including that
+`lastSuccessAt` may be null, which is the one that bites. They ship inside the
+package the worker writes rather than as a declaration file scaffolded into your
+repository, for the same reason the shim does: a copy in your repo is a second
+thing to keep in step across versions, which is precisely the cost this design
+refuses to pay.
+
 **It is sugar and may never be more than sugar.** Every line above reads an
 environment variable the engine sets or writes one of the three output files it
 reads back. A job in a language we ship no shim for does exactly as much through

@@ -10,6 +10,7 @@ import (
 
 	"github.com/jdmorlan/job-engine/internal/jobdef"
 	"github.com/jdmorlan/job-engine/internal/schedule"
+	"github.com/jdmorlan/job-engine/internal/shim"
 	"github.com/jdmorlan/job-engine/internal/toolchain"
 )
 
@@ -219,6 +220,23 @@ func writeJobFile(env *Env, root, name string, t jobTemplate) error {
 				return err
 			}
 			fmt.Fprintf(env.Stdout, "wrote %s\n", path)
+		}
+
+		// The helpers, now rather than at the first run (D21).
+		//
+		// A worker writes these before it executes anything, so the job would
+		// work without this. Your editor would not: the file the scaffold just
+		// opened imports a package that does not exist yet, which is a red
+		// squiggle and no autocomplete on the very first thing somebody reads.
+		//
+		// The same function the worker calls, so what lands here is what will
+		// land there -- and the types come with it, which is why the scaffold
+		// does not write a declaration file of its own to go stale.
+		if _, err := shim.Install(t.language.name, root); err != nil {
+			return err
+		}
+		if s, ok := shim.For(t.language.name); ok {
+			fmt.Fprintf(env.Stdout, "wrote %s\n", filepath.Join(root, s.Dir))
 		}
 	}
 
