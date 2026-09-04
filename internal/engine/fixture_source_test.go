@@ -3,6 +3,7 @@ package engine_test
 import (
 	"path/filepath"
 	"sync"
+	"testing"
 
 	"github.com/jdmorlan/job-engine/internal/engine"
 	"github.com/jdmorlan/job-engine/internal/testsupport"
@@ -37,4 +38,12 @@ func hubFor(e *engine.Engine) *testsupport.GitHub {
 	fixtureMu.Lock()
 	defer fixtureMu.Unlock()
 	return fixtureHubs[e]
+}
+
+// newHub is testsupport.NewGitHub with the test's cleanup attached.
+func newHub(t *testing.T) *testsupport.GitHub {
+	t.Helper()
+	hub := testsupport.NewGitHub()
+	t.Cleanup(hub.Close)
+	return hub
 }

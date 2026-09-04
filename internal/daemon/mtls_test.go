@@ -24,7 +24,6 @@ import (
 	"github.com/jdmorlan/job-engine/internal/engine"
 	"github.com/jdmorlan/job-engine/internal/paths"
 	"github.com/jdmorlan/job-engine/internal/store"
-	"github.com/jdmorlan/job-engine/internal/testsupport"
 	"github.com/jdmorlan/job-engine/internal/worker"
 )
 
@@ -135,7 +134,7 @@ func startTLSDaemon(t *testing.T) (base string, layout paths.Layout) {
 		[]byte("command: [\"/bin/sh\", \"-c\", \"true\"]\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	hub := testsupport.NewGitHub(t)
+	hub := newHub(t)
 	hub.Add("you/src", tree)
 
 	ctx, cancel := context.WithCancel(context.Background())

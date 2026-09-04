@@ -35,6 +35,7 @@ func runQuickstart(ctx context.Context, env *Env, args []string) error {
 	addr := fs.String("addr", daemon.DefaultAddr, "address for the control plane")
 	labels := fs.String("labels", jobdef.DefaultRunsOn, "labels for the worker it starts")
 	verbose := fs.Bool("v", false, "log at debug level")
+	githubAPI := fs.String("github-api", "", "GitHub API base URL, for GitHub Enterprise")
 	if extra, err := parseArgs(fs, args); err != nil {
 		return err
 	} else if len(extra) > 0 {
@@ -54,11 +55,12 @@ func runQuickstart(ctx context.Context, env *Env, args []string) error {
 	planeDone := make(chan error, 1)
 	go func() {
 		planeDone <- daemon.Run(ctx, daemon.Config{
-			Layout:  env.Layout,
-			Addr:    *addr,
-			Version: env.Version,
-			Logger:  logger,
-			Ready:   ready,
+			Layout:    env.Layout,
+			Addr:      *addr,
+			Version:   env.Version,
+			Logger:    logger,
+			Ready:     ready,
+			GitHubAPI: *githubAPI,
 		})
 	}()
 

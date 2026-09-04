@@ -11,7 +11,6 @@ import (
 	"github.com/jdmorlan/job-engine/internal/model"
 	"github.com/jdmorlan/job-engine/internal/paths"
 	"github.com/jdmorlan/job-engine/internal/store"
-	"github.com/jdmorlan/job-engine/internal/testsupport"
 )
 
 // chainFixture writes a set of job files and chain files, and loads them.
@@ -41,7 +40,7 @@ func chainFixture(t *testing.T, jobs, chains map[string]string) (*engine.Engine,
 		write(t, filepath.Join(tree, "chains", name+".yaml"), body)
 	}
 
-	hub := testsupport.NewGitHub(t)
+	hub := newHub(t)
 	hub.Add("you/"+testSource, tree)
 	rememberFixture(e, tree, hub)
 	engine.SetGitHubBaseURLForTest(e, hub.URL)

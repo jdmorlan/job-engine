@@ -15,7 +15,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"testing"
 )
 
 // Package testsupport provides a fake GitHub that serves whatever is in a
@@ -37,14 +36,15 @@ type GitHub struct {
 	repos map[string]string // "owner/name" -> directory on disk
 }
 
-func NewGitHub(t *testing.T) *GitHub {
-	t.Helper()
+func NewGitHub() *GitHub {
 	g := &GitHub{repos: map[string]string{}}
 	g.server = httptest.NewServer(http.HandlerFunc(g.serve))
 	g.URL = g.server.URL
-	t.Cleanup(g.server.Close)
 	return g
 }
+
+// Close stops the server.
+func (g *GitHub) Close() { g.server.Close() }
 
 // add registers a repository backed by a directory, and returns the location a
 // source would name it by.

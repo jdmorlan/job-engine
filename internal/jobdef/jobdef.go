@@ -17,6 +17,7 @@ package jobdef
 import (
 	"errors"
 	"fmt"
+	"github.com/jdmorlan/job-engine/internal/toolchain"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -39,8 +40,18 @@ type Definition struct {
 	Workdir string   `json:"workdir,omitempty"`
 	Runtime Runtime  `json:"runtime"`
 
-	// Language opts the job into shim injection (D21). Empty means the raw
-	// protocol, which is the floor every language reaches.
+	// Language is the ecosystem this job's code belongs to, and it is what the
+	// worker prepares before running the command: dependencies installed from
+	// the tree's lockfile, and the right binaries on PATH (D28).
+	//
+	// Empty means the tree needs no preparation -- a shell script, or anything
+	// whose dependencies are already wherever it expects them.
+	//
+	// Named `language:` rather than `runtime:` because `runtime:` was already
+	// taken by the process/container choice (D20), and because a job written in
+	// TypeScript should say so once. D21's shim injection keys off the same
+	// field when it lands: preparing a tree and injecting helpers are two
+	// capabilities of one fact about the job, not two fields to keep in step.
 	Language string `json:"language,omitempty"`
 
 	// RunsOn is the capability label a worker must advertise to run this job
@@ -322,7 +333,9 @@ func (s Schedule) validate() error {
 // Returning "" means the job is runnable.
 func (d *Definition) ConfigError() string {
 	if d.Language != "" {
-		return fmt.Sprintf("language: %s -- shim injection is not implemented yet (D21)", d.Language)
+		if _, ok := toolchain.Lookup(d.Language); !ok {
+			return toolchain.Unknown(d.Language).Error()
+		}
 	}
 	return ""
 }

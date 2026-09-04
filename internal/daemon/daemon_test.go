@@ -65,7 +65,7 @@ func startDaemonIn(t *testing.T, jobs ...string) (string, paths.Layout) {
 			t.Fatal(err)
 		}
 	}
-	hub := testsupport.NewGitHub(t)
+	hub := newHub(t)
 	hub.Add("you/src", tree)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -625,4 +625,12 @@ func registerFixtureSource(t *testing.T, base string, layout paths.Layout) {
 		out, _ := io.ReadAll(resp.Body)
 		t.Fatalf("registering the fixture source: %s: %s", resp.Status, out)
 	}
+}
+
+// newHub is testsupport.NewGitHub with the test's cleanup attached.
+func newHub(t *testing.T) *testsupport.GitHub {
+	t.Helper()
+	hub := testsupport.NewGitHub()
+	t.Cleanup(hub.Close)
+	return hub
 }

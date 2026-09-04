@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/jdmorlan/job-engine/internal/secretfile"
+	"github.com/jdmorlan/job-engine/internal/toolchain"
 )
 
 // Source supplies job definitions.
@@ -250,9 +251,16 @@ func (s Snapshot) validate() error {
 // otherwise true and the encrypted secrets file (D25) would be parsed as a
 // broken job -- rejecting the whole sync, since D19 makes one unparseable file
 // fail everything.
-var sidecars = map[string]bool{
-	secretfile.Name: true,
-}
+var sidecars = func() map[string]bool {
+	out := map[string]bool{secretfile.Name: true}
+	// A source tree is also a project: its manifest and lockfile live beside
+	// the definitions, and `pnpm-lock.yaml` is a .yaml that is emphatically not
+	// a job (D28).
+	for _, name := range toolchain.ProjectFiles() {
+		out[name] = true
+	}
+	return out
+}()
 
 func isYAML(name string) bool {
 	if sidecars[name] {

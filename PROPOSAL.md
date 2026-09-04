@@ -204,7 +204,7 @@ architecture), **D16** (daemon lifecycle and generic event ingress).
 | D25 | Secrets that travel with definitions | **NEW (v0.7) — steps 1-5 shipped** |
 | D26 | Machine-scoped commands | **NEW (v0.8) — shipped** |
 | D27 | Only repositories are sources | **NEW (v0.8) — shipped** |
-| D28 | Runtimes and dependency preparation | **NEW (v0.8) — agreed in shape, one question open** |
+| D28 | Runtimes and dependency preparation | **NEW (v0.8) — phase 1 shipped** |
 | N1 | Non-goals | AGREED |
 | N2 | v1 done | AGREED |
 | Q1 | Storage adapters | AGREED — SQLite only, no adapter |
@@ -3744,7 +3744,7 @@ tell a worker to replace itself.
 
 ### D28. Runtimes: how a job's language gets what it needs — NEW
 
-**Status:** NEW (v0.8) — agreed in shape, one question open
+**Status:** NEW (v0.8) — **phase 1 shipped**; toolchain installation is the remaining half
 
 > *"Let's say we want to run typescript jobs, what's the strategy? I could run
 > things in a docker container, but the piece I don't like is that I need to go
@@ -3904,24 +3904,68 @@ support, or a job needing system packages (ffmpeg, imagemagick). That is D20's
 container executor, and it stays per-job rather than becoming a format every job
 pays a build for.
 
-#### The open question
+#### The open question, answered: install
 
-**Does the worker install dependencies, or refuse and require the repo to vendor
-them?**
+The worker installs. The cache makes it fast, and vendoring `node_modules` into
+git is a worse ask than requiring one static binary on a worker. The cost stands
+as written: `pnpm install` runs postinstall scripts, so the worker executes
+arbitrary code from the repository at install time -- the same trust boundary as
+running the job's command from that same tree, not a new one.
 
-Installing is better ergonomics and is what the whole design above assumes. The
-argument for refusing is hermeticity: a worker's behaviour becomes fully
-predictable from the tree, and it never reaches the network at prepare time,
-which matters more on a machine you do not fully control.
+#### What building it changed
 
-The recommendation is to install, because the cache makes it fast and vendoring
-`node_modules` into git is a worse ask than requiring one static binary on a
-worker. But the honest cost belongs in the decision rather than in a surprise:
-**`pnpm install` runs postinstall scripts**, as does much of pip. The worker
-executes arbitrary code from the repository at install time. That *feels*
-different from running the job and is not -- the worker already runs that
-repository's command from that same tree, so it is the same trust boundary, not
-a new one.
+**Dependencies install in the tree, not in a `cache/deps/<key>` directory.**
+This was the plan and the plan was wrong. `pnpm` and `uv` both want to own a
+project directory, and both already keep a global content-addressed store -- so
+the cross-commit sharing a separate deps directory was meant to buy is a thing
+the package manager does better than we would: a second commit with the same
+lockfile hardlinks from that store rather than downloading. What remains ours is
+knowing whether a tree is already prepared, which is a marker file holding the
+key. Reimplementing a package manager's store would have been a worse copy of
+something already on the machine.
+
+**`runtime:` was taken, so the field is `language:`.** D20 already uses
+`runtime:` for the process/container choice. And a job written in TypeScript
+should say so once: two fields both naming the language, one for preparation and
+one for D21's shim, is worse than one field with two capabilities. So D21's shim
+keys off `language:` when it lands, and this ships on the same field -- which
+also means `language:` stops being a load-time error and starts being a
+supported thing to declare.
+
+**Three bugs, all found by running it and none reachable by reading:**
+
+1. **A lockfile is a `.yaml`.** `pnpm-lock.yaml` sits beside the definitions and
+   "every .yaml here is a job" parsed it as a broken one -- which under D19's
+   atomic load failed the *entire* source. Fixed by the loader skipping the
+   manifests and lockfiles the toolchain table already lists, so adding a
+   language teaches the loader about its files for free.
+2. **`os/exec` resolves the program against the parent's PATH**, at the moment
+   the command is built. Setting `cmd.Env` afterwards changes nothing, so a job
+   whose dependencies put `tsx` in its own `node_modules/.bin` failed with
+   "executable file not found" while the binary sat right there.
+3. **`cmd.Err` outlives the fix.** Setting `cmd.Path` to the resolved binary is
+   not enough: `exec.Command` recorded the failed lookup, and `Start` returns
+   that error regardless. The first fix looked correct and did nothing, which is
+   the kind of thing a test written from the design would have asserted its way
+   past.
+
+**Verified end to end**, not asserted: a repository holding `package.json`, a
+lockfile, `ingest.ts` importing a real dependency, and `ingest.yaml` declaring
+`language: typescript`. The control plane fetched it, the worker installed from
+the lockfile, `tsx` resolved out of the tree, and the job printed a value its
+dependency computed.
+
+#### What is still to build
+
+**`je worker runtime install`** -- the toolchain installer, reusing
+`internal/selfupdate`'s download-verify-replace. Until it exists, a worker
+without `pnpm` gets an error naming the tool, the worker and the command, which
+is the fallback rather than the answer.
+
+**Advertising runtimes.** A worker should report what it can prepare, so a job
+whose language nothing serves is queued and visible in `je waiting` rather than
+dispatched and failed. That is the piece that makes a missing toolchain a
+planning problem instead of a 3am one, and it is not built yet.
 
 ## Part 6 — Scope
 

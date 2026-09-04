@@ -91,6 +91,14 @@ type Dispatch struct {
 	// resolved by whoever will use it.
 	Workdir string `json:"workdir"`
 
+	// Language is the ecosystem this job's code belongs to, so the worker can
+	// install its dependencies from the tree before running it (D28).
+	//
+	// Carried on the dispatch rather than looked up, for the same reason the
+	// command is: what a run executed under is decided once, by the control
+	// plane, and recorded (D11).
+	Language string `json:"language,omitempty"`
+
 	// SourceRoot is the root of the registered source this job came from, when
 	// that is a directory (D22). A job with no declared workdir runs here, not
 	// in the worker's own jobs directory -- code travels with definitions, so
@@ -360,6 +368,7 @@ func (e *Engine) dispatchFor(ctx context.Context, p Prepared, worker store.Worke
 		JobSlug:        p.Job.Slug,
 		Command:        p.Def.Command,
 		Workdir:        p.Def.Workdir,
+		Language:       p.Def.Language,
 		SourceRoot:     sourceRoot,
 		SourceName:     sourceName,
 		SourceRevision: sourceRevision,

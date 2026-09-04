@@ -71,6 +71,9 @@ const pollInterval = time.Second
 
 // Worker pulls dispatches from the control plane and executes them.
 type Worker struct {
+	// prepared serialises dependency installation per source tree (D28).
+	prepared *prepared
+
 	opts   Options
 	log    *slog.Logger
 	client *Client
@@ -108,10 +111,11 @@ func New(opts Options) (*Worker, error) {
 	}
 
 	return &Worker{
-		opts:    opts,
-		log:     opts.Logger,
-		client:  opts.Client,
-		holding: map[int64]context.CancelFunc{},
+		opts:     opts,
+		prepared: newPrepared(),
+		log:      opts.Logger,
+		client:   opts.Client,
+		holding:  map[int64]context.CancelFunc{},
 	}, nil
 }
 
@@ -313,6 +317,19 @@ func (w *Worker) execute(ctx context.Context, d engine.Dispatch) {
 	if err != nil {
 		w.report(ctx, d, engine.Completion{ExecError: err.Error()})
 		return
+	}
+
+	// Dependencies for this job's language, installed once per tree (D28).
+	// An exec error rather than a run that fails: the job never started, and
+	// "pnpm is not installed on this worker" beats whatever the command would
+	// have printed without its dependencies.
+	binDir, err := w.prepare(runCtx, d.Language, root)
+	if err != nil {
+		w.report(ctx, d, engine.Completion{ExecError: err.Error()})
+		return
+	}
+	if binDir != "" {
+		env = append(env, "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	}
 
 	// Secrets the control plane could not resolve, decrypted here (D25/C11).

@@ -42,6 +42,7 @@ func runControlPlane(ctx context.Context, env *Env, args []string) error {
 	addr := fs.String("addr", daemon.DefaultAddr, "address to listen on")
 	verbose := fs.Bool("v", false, "log at debug level")
 	tlsHosts := fs.String("tls-host", "", "comma-separated extra names this control plane is reached by")
+	githubAPI := fs.String("github-api", "", "GitHub API base URL, for GitHub Enterprise")
 	useDocker := fs.Bool("docker", false, "install as a container instead of a native service")
 	native := fs.Bool("native", false, "install as a native service (launchd or systemd)")
 	printOnly := fs.Bool("print", false, "print what would be done, and do nothing")
@@ -59,7 +60,7 @@ func runControlPlane(ctx context.Context, env *Env, args []string) error {
 
 	switch positional[0] {
 	case "run":
-		return runControlPlaneForeground(ctx, env, *addr, *verbose, splitLabels(*tlsHosts))
+		return runControlPlaneForeground(ctx, env, *addr, *verbose, splitLabels(*tlsHosts), *githubAPI)
 	case "install":
 		return installControlPlane(ctx, env, *addr, installMode{
 			docker: *useDocker, native: *native, printOnly: *printOnly,
@@ -135,7 +136,7 @@ func installControlPlane(ctx context.Context, env *Env, addr string, mode instal
 	})
 }
 
-func runControlPlaneForeground(ctx context.Context, env *Env, addr string, verbose bool, tlsHosts []string) error {
+func runControlPlaneForeground(ctx context.Context, env *Env, addr string, verbose bool, tlsHosts []string, githubAPI string) error {
 	level := slog.LevelInfo
 	if verbose {
 		level = slog.LevelDebug
@@ -146,10 +147,11 @@ func runControlPlaneForeground(ctx context.Context, env *Env, addr string, verbo
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 
 	return daemon.Run(ctx, daemon.Config{
-		Layout:   env.Layout,
-		Addr:     addr,
-		Version:  env.Version,
-		Logger:   logger,
-		TLSHosts: tlsHosts,
+		Layout:    env.Layout,
+		Addr:      addr,
+		Version:   env.Version,
+		Logger:    logger,
+		TLSHosts:  tlsHosts,
+		GitHubAPI: githubAPI,
 	})
 }

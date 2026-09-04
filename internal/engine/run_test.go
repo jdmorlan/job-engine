@@ -14,7 +14,6 @@ import (
 	"github.com/jdmorlan/job-engine/internal/model"
 	"github.com/jdmorlan/job-engine/internal/paths"
 	"github.com/jdmorlan/job-engine/internal/store"
-	"github.com/jdmorlan/job-engine/internal/testsupport"
 )
 
 // jobFixture writes a job file into a fresh data directory and returns an
@@ -54,7 +53,7 @@ func jobFixtureAt(t *testing.T, name, script string, now func() time.Time, extra
 		t.Fatal(err)
 	}
 
-	hub := testsupport.NewGitHub(t)
+	hub := newHub(t)
 	hub.Add("you/"+testSource, tree)
 	rememberFixture(e, tree, hub)
 	engine.SetGitHubBaseURLForTest(e, hub.URL)

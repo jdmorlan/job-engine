@@ -635,6 +635,20 @@ state:
   primary_cursor: since
 ```
 
+A job in a language with dependencies declares it, and the worker installs them
+from the repository's own lockfile before running the command:
+
+```yaml
+# ingest.yaml, beside package.json and pnpm-lock.yaml
+language: typescript
+command: ["tsx", "ingest.ts"]
+```
+
+Installed once per tree and keyed on `(language, tool version, lockfile)`, so a
+commit that did not touch dependencies installs nothing. The job's command is
+still the job's command — the language only decides what gets installed and what
+goes on PATH (D28).
+
 The engine talks to the job through the environment and three files, with no
 SDK and nothing to import — **the filesystem is the contract** (D6). Everything
 the engine promotes is discarded unless the job exits zero.
@@ -822,11 +836,16 @@ a key still works and says plainly that nothing verified it.
 
 ### Not built yet
 
-Retries, the container executor, retention, and **runtimes** — a job declaring
-`runtime: typescript` having its dependencies installed and the right toolchain
-on PATH before it runs (D28). Today a job runs whatever `command:` says with
-whatever the worker already has, so anything beyond a shell script needs the
-worker prepared by hand.
+Retries, the container executor, and retention.
+
+**Runtimes are half built** (D28). A job declaring `language:` has its
+dependencies installed from its own lockfile before it runs, and the binaries
+that install produced are on PATH — so a TypeScript job's `command: ["tsx",
+"ingest.ts"]` works. What is missing is `je worker runtime install`, so the
+worker's toolchain (`pnpm`, `uv`) still has to be there already, and workers do
+not yet advertise which languages they can prepare — meaning a job whose
+toolchain is missing fails at run time with a clear message rather than being
+visibly unservable in `je waiting`.
 
 **Fan-in is not built.** A step waits on one condition. `all_of` with a window
 (D3) — "when both of these landed, within six hours" — parses and is refused
