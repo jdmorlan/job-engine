@@ -847,6 +847,13 @@ $ je chain dev/watering
   step 1   dev/log-watering  run 5  succeeded in 8ms  on plants.watered
 ```
 
+**If there is no control plane on this machine, it offers to set one up** — a
+control plane and a worker, as services — because typing `je dev` is you saying
+you want a development deployment, and being told to go and run two more
+commands is a gap in this one. It notices a control plane with no worker too,
+which would otherwise queue your run and wait forever while every view looked
+healthy.
+
 Nothing here is a simulation, and there is no second executor that could tell
 you something the engine would not. That matters more than it sounds: the first
 version of this *was* a harness that ran the job itself, and its environment had

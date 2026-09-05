@@ -24,14 +24,24 @@ import (
 // It bought one saved command (`je quickstart`) and cost a second implementation of
 // every read. See v0.6's rule: a capability is not a reason.
 func withClient(ctx context.Context, env *Env, fn func(context.Context, *Client) error) error {
-	client, err := Connect(env.Layout)
+	client, err := connectOrAdvise(ctx, env)
 	if err != nil {
-		return adviseNoControlPlane(err)
-	}
-	if !reachable(ctx, client) {
-		return adviseNoControlPlane(fmt.Errorf("%w at %s", ErrNoControlPlane, client.base.Host))
+		return err
 	}
 	return fn(ctx, client)
+}
+
+// connectOrAdvise is withClient without the callback, for the one command that
+// wants to do something about a missing control plane rather than report it.
+func connectOrAdvise(ctx context.Context, env *Env) (*Client, error) {
+	client, err := Connect(env.Layout)
+	if err != nil {
+		return nil, adviseNoControlPlane(err)
+	}
+	if !reachable(ctx, client) {
+		return nil, adviseNoControlPlane(fmt.Errorf("%w at %s", ErrNoControlPlane, client.base.Host))
+	}
+	return client, nil
 }
 
 // reachable reports whether the control plane actually answers, as opposed to
