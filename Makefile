@@ -50,14 +50,21 @@ image:
 # installed `je` does the upgrading, not the one just built -- a binary cannot
 # replace itself, and the one on PATH is the one being replaced.
 #
-# With nothing installed yet there is nothing to upgrade, so it copies instead.
+# Two cases need the copy instead. Nothing is installed yet, so there is nothing
+# to upgrade -- and the installed one predates --from, which is the bootstrap
+# every self-installing tool has exactly once and which nobody thinks about
+# until they hit it: the first `make install` after adding the flag is run by a
+# binary that does not have it. The new one then restarts the deployment
+# itself, which is the half that mattered.
 JE_INSTALL_DIR ?= $(HOME)/.local/bin
 install: build
-	@if command -v je >/dev/null 2>&1; then \
+	@if command -v je >/dev/null 2>&1 && je upgrade --help 2>&1 | grep -q -- '-from'; then \
 		je upgrade --from ./je; \
 	else \
-		install -d "$(JE_INSTALL_DIR)" && install -m 0755 ./je "$(JE_INSTALL_DIR)/je" && \
-		echo "installed $(JE_INSTALL_DIR)/je -- add it to PATH if it is not there"; \
+		target="$$(command -v je || echo '$(JE_INSTALL_DIR)/je')"; \
+		install -d "$$(dirname "$$target")" && install -m 0755 ./je "$$target" && \
+		echo "installed $$target by copying: the je already there is older than --from"; \
+		"$$target" upgrade --restart --yes || true; \
 	fi
 
 # Build every release artifact locally, exactly as the workflow does.
