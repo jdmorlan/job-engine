@@ -4,7 +4,7 @@
 VERSION ?= dev
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
-.PHONY: build test vet fmt check image release-dry clean web web-build
+.PHONY: build install test vet fmt check image release-dry clean web web-build
 
 build: ## build ./je for this machine
 	go build -trimpath -ldflags "$(LDFLAGS)" -o je ./cmd/je
@@ -36,6 +36,29 @@ web-build:
 
 image:
 	docker build --build-arg VERSION=$(VERSION) -t job-engine:$(VERSION) .
+
+# Build and install onto this machine, restarting what runs here.
+#
+# The loop for trying a change on your own deployment. Going through a tag, a
+# workflow and a download to find out whether something worked costs ten
+# minutes, and a ten minute loop is not a loop -- people stop testing on their
+# own deployment, which is the worst outcome available.
+#
+# It is `je upgrade` underneath, so the install is the same one a release does:
+# the same refusal to write over a package manager's file, the same atomic
+# replace, and the same restart of the control plane and worker here. The
+# installed `je` does the upgrading, not the one just built -- a binary cannot
+# replace itself, and the one on PATH is the one being replaced.
+#
+# With nothing installed yet there is nothing to upgrade, so it copies instead.
+JE_INSTALL_DIR ?= $(HOME)/.local/bin
+install: build
+	@if command -v je >/dev/null 2>&1; then \
+		je upgrade --from ./je; \
+	else \
+		install -d "$(JE_INSTALL_DIR)" && install -m 0755 ./je "$(JE_INSTALL_DIR)/je" && \
+		echo "installed $(JE_INSTALL_DIR)/je -- add it to PATH if it is not there"; \
+	fi
 
 # Build every release artifact locally, exactly as the workflow does.
 #

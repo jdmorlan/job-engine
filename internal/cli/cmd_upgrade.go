@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,7 +33,12 @@ func init() {
 			"restarts what is behind.\n\n" +
 			"The exception is a deployment you drive with `docker compose`: that\n" +
 			"compose file is yours and owns its containers, so this reports them and\n" +
-			"changes nothing.",
+			"changes nothing.\n\n" +
+			"--from installs a binary you built instead of a published release, which\n" +
+			"is how you try a change on your own deployment without tagging one:\n\n" +
+			"  make build && je upgrade --from ./je\n\n" +
+			"Nothing verifies that file, because there is nothing to verify it\n" +
+			"against -- you built it. Everything after that is the same upgrade.",
 		Local: true,
 		Run:   runUpgrade,
 	})
@@ -44,6 +50,7 @@ func runUpgrade(ctx context.Context, env *Env, args []string) error {
 	check := fs.Bool("check", false, "report what is available without installing it")
 	yes := fs.Bool("yes", false, "restart the components on this machine without asking")
 	restartOnly := fs.Bool("restart", false, "skip the download; just restart what is on the old version")
+	from := fs.String("from", "", "install this binary instead of downloading a release")
 	repo := fs.String("repo", "", "GitHub repository to fetch releases from")
 	if extra, err := parseArgs(fs, args); err != nil {
 		return err
@@ -66,6 +73,10 @@ func runUpgrade(ctx context.Context, env *Env, args []string) error {
 	if *restartOnly {
 		upgradeDeployment(ctx, env, env.Version, *yes)
 		return nil
+	}
+
+	if *from != "" {
+		return upgradeFromFile(ctx, env, *from, *yes)
 	}
 
 	release, err := client.Latest(ctx)
@@ -164,6 +175,107 @@ func runUpgrade(ctx context.Context, env *Env, args []string) error {
 	return nil
 }
 
+// upgradeFromFile installs a binary you built instead of one we published.
+//
+// The loop it exists for is the obvious one: change something, run it on your
+// own deployment, see whether it was right. Going through a tag, a workflow and
+// a download to answer that costs ten minutes, and a ten minute loop is not a
+// loop -- so people stop using their own deployment to test with, which is the
+// worst outcome available.
+//
+// Everything after the source of the file is identical to a released upgrade:
+// the same refusal to write somewhere managed by a package manager, the same
+// atomic replace, and the same restart of whatever this machine runs (D26). The
+// only thing that changes is where the bytes came from.
+//
+// What it deliberately does NOT do is verify a checksum. There is nothing to
+// verify against: you built this. Saying so is better than inventing a
+// ceremony -- a hash of the file you just made, checked against itself, would
+// look like a guarantee and be none.
+func upgradeFromFile(ctx context.Context, env *Env, path string, yes bool) error {
+	source, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	target, err := selfupdate.CurrentBinary()
+	if err != nil {
+		return err
+	}
+	if source == target {
+		return fmt.Errorf("%s is already the binary you are running", source)
+	}
+	if owner := selfupdate.ManagedElsewhere(target); owner != "" {
+		return fmt.Errorf("this binary is managed by %s, so upgrading it here would be undone", owner)
+	}
+	if !selfupdate.Writable(target) {
+		return fmt.Errorf("cannot write to %s", filepath.Dir(target))
+	}
+
+	// Run it before installing it. The release workflow smoke-tests the
+	// artifact it is about to publish rather than trusting that it would have
+	// worked, and a binary you built on the machine you are about to install
+	// it on deserves at least as much: a build for the wrong architecture, or
+	// one that panics on startup, should not become your `je`.
+	version, err := binaryVersion(ctx, source)
+	if err != nil {
+		return err
+	}
+
+	// Copied rather than renamed, and into the target's own directory because
+	// the last step is a rename and rename cannot cross filesystems. Renaming
+	// the source would move the binary out of the tree you built it in, which
+	// is somebody's `make build` output and not ours to consume.
+	staged := filepath.Join(filepath.Dir(target), ".je-upgrade-staged")
+	if err := copyFile(source, staged); err != nil {
+		return err
+	}
+	defer os.Remove(staged)
+
+	if err := selfupdate.Replace(target, staged); err != nil {
+		return err
+	}
+	fmt.Fprintf(env.Stdout, "installed %s at %s\n", version, target)
+	fmt.Fprintf(env.Stderr, "je: from %s, which nothing verified -- you built it\n", source)
+
+	upgradeDeployment(ctx, env, version, yes)
+	return nil
+}
+
+// binaryVersion asks a binary what it is, which doubles as the check that it
+// runs at all on this machine.
+func binaryVersion(ctx context.Context, path string) (string, error) {
+	out, err := exec.CommandContext(ctx, path, "version").Output()
+	if err != nil {
+		return "", fmt.Errorf("%s does not run on this machine: %w", path, err)
+	}
+	// "je v0.9.0 darwin/arm64" -- the version is the second field, and a
+	// locally built one says "dev", which is exactly what should then show up
+	// in `je workers` and be compared by C10.
+	fields := strings.Fields(string(out))
+	if len(fields) < 2 {
+		return "", fmt.Errorf("%s did not report a version", path)
+	}
+	return fields[1], nil
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o755)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
+}
+
 // upgradeDeployment brings the components on this machine to the new version.
 //
 // `je upgrade` used to replace the binary and then *tell* you what else to run.
@@ -222,7 +334,11 @@ func upgradeDeployment(ctx context.Context, env *Env, newVersion string, yes boo
 	}
 
 	for _, c := range stale {
-		fmt.Fprintf(env.Stdout, "\n%s: ", c.component)
+		if c.ours() {
+			fmt.Fprintf(env.Stdout, "\n%s: ", c.component)
+		} else {
+			fmt.Fprintf(env.Stdout, "\n%s:\n", c.component)
+		}
 		if err := c.upgrade(ctx, env, newVersion); err != nil {
 			// One failure must not stop the others: a control plane that came
 			// up and a worker that did not is a state somebody can act on,
@@ -230,7 +346,9 @@ func upgradeDeployment(ctx context.Context, env *Env, newVersion string, yes boo
 			fmt.Fprintf(env.Stderr, "could not upgrade: %v\n", err)
 			continue
 		}
-		fmt.Fprintf(env.Stdout, "restarted on %s\n", newVersion)
+		if c.ours() {
+			fmt.Fprintf(env.Stdout, "restarted on %s\n", newVersion)
+		}
 	}
 }
 
@@ -242,6 +360,18 @@ type staleComponent struct {
 	how       string // how it is supervised, for the human
 	upgrade   func(ctx context.Context, env *Env, version string) error
 }
+
+// ours reports whether this command can restart the component itself.
+//
+// The one that is not ours is a control plane somebody started in a terminal:
+// it is described by the runtime file like a service, and it is theirs to stop.
+// The distinction is only about rendering -- claiming "restarted on v0.9.0"
+// after printing "it is yours to restart" would be the tool contradicting
+// itself in consecutive lines.
+func (c staleComponent) ours() bool { return c.how != inATerminal }
+
+// inATerminal marks the deployment shape somebody is standing in.
+const inATerminal = "in a terminal"
 
 // staleComponents finds what this machine runs and what version each is on.
 //
@@ -273,11 +403,22 @@ func staleComponents(ctx context.Context, env *Env, newVersion string) []staleCo
 	if !containerExists(ctx, "control-plane") {
 		if info, err := daemon.ReadRuntime(env.Layout.Runtime()); err == nil &&
 			!sameVersion(info.Version, newVersion) {
+			// A runtime file says a control plane is running. It does not say
+			// how it was started, and the two cases want opposite things: a
+			// service is ours to restart, and one somebody launched in their
+			// terminal is theirs. Offering to restart the second produced
+			// `launchctl kickstart: Could not find service ... in domain for
+			// user gui: 501`, which is a true sentence about the wrong
+			// question.
+			how, upgrade := "native service", restartNativeService(service.ControlPlane)
+			if !serviceInstalled(service.ControlPlane) {
+				how, upgrade = inATerminal, restartYourself(info.PID)
+			}
 			out = append(out, staleComponent{
 				component: "control-plane",
 				version:   info.Version,
-				how:       "native service",
-				upgrade:   restartNativeService(service.ControlPlane),
+				how:       how,
+				upgrade:   upgrade,
 			})
 		}
 	}
@@ -315,6 +456,35 @@ func upgradeContainer(component string) func(context.Context, *Env, string) erro
 
 // restartNativeService restarts a launchd or systemd unit, which picks up the
 // binary that was just replaced.
+// serviceInstalled reports whether this component has a unit file, which is
+// what makes it something this command can restart.
+func serviceInstalled(c service.Component) bool {
+	manager, err := service.New(c)
+	if err != nil {
+		return false
+	}
+	state, err := manager.Status()
+	if err != nil {
+		return false
+	}
+	return state.Installed
+}
+
+// restartYourself is what to do about a control plane running in somebody's
+// terminal, which is: tell them, because only they can.
+//
+// Not an error. It is the ordinary shape while developing -- `je quickstart` in
+// one window, `make install` in another -- and a command that failed there
+// would be failing at the thing working correctly.
+func restartYourself(pid int) func(context.Context, *Env, string) error {
+	return func(_ context.Context, env *Env, _ string) error {
+		fmt.Fprintf(env.Stdout,
+			"  the control plane is running in a terminal (pid %d), so it is yours to\n"+
+				"  restart: stop it there and start it again to pick this up\n", pid)
+		return nil
+	}
+}
+
 func restartNativeService(c service.Component) func(context.Context, *Env, string) error {
 	return func(ctx context.Context, env *Env, version string) error {
 		manager, err := service.New(c)

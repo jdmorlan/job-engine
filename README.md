@@ -449,6 +449,7 @@ other's events.
 ```
 je demo           register a repo of example jobs, a chain, and a tour
 je upgrade        upgrade this deployment: the binary, and what runs here
+                  --from <path> installs one you built, without a release
 je reset          tear it all down on this machine and start from scratch
 je quickstart     a control plane and a worker, in this terminal
 je control-plane run    the control plane: schedules, history, the API
