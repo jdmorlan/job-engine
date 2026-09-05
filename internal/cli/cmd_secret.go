@@ -112,9 +112,17 @@ func runSecret(ctx context.Context, env *Env, args []string) error {
 		})
 	case "list":
 		if len(positional) != 1 {
-			return usagef("usage: je secret list")
+			return usagef("usage: je secret list [--source <src>]")
 		}
 		return withClient(ctx, env, func(ctx context.Context, c *Client) error {
+			// --source used to parse and then be dropped, so `je secret list
+			// --source x` reported the control plane's store and said "no
+			// secrets set" to somebody who had just set one in x. Two stores
+			// exist on purpose (D25); a flag naming one of them and being
+			// ignored is how that turns from a design into a trap.
+			if *source != "" {
+				return secretListInSource(ctx, env, c, *source)
+			}
 			return secretList(ctx, env, c)
 		})
 	case "rm":

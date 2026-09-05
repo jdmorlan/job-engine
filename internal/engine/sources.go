@@ -33,10 +33,6 @@ type SourceStatus struct {
 	Jobs   int `json:"jobs"`
 	Chains int `json:"chains"`
 
-	// Path is where a directory source actually reads from, with the built-in
-	// local source's "wherever the jobs directory is" resolved.
-	Path string `json:"path,omitempty"`
-
 	// Secrets are the names encrypted alongside this source's definitions, and
 	// Recipients is how many keys can read them (D25).
 	//
@@ -70,7 +66,7 @@ func (e *Engine) Sources(ctx context.Context) ([]SourceStatus, error) {
 
 	out := make([]SourceStatus, 0, len(sources))
 	for _, src := range sources {
-		status := SourceStatus{Source: src, Path: e.SourceDir(src)}
+		status := SourceStatus{Source: src}
 		for _, j := range jobs {
 			if j.Source == src.Name && !j.Removed() {
 				status.Jobs++

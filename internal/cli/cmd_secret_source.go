@@ -40,11 +40,21 @@ type sourceTarget struct {
 
 // resolveSourceTree finds the working copy to edit.
 //
-// Explicit --path wins. Otherwise a directory source knows where it reads from
-// and that path *is* the checkout, so it needs no flag. A repository source has
-// no local path the control plane can name -- its tree lives in a cache keyed by
-// commit -- so the current directory is the answer, and it has to look like the
-// right one before anything is written to it.
+// Explicit --path wins; otherwise it is the git root of the directory you are
+// standing in, which has to look like a checkout before anything is written to
+// it.
+//
+// It used to ask the control plane where the source lived and use that when it
+// answered. That answer was the *cache* -- a tree keyed by commit that the next
+// fetch replaces -- so `je secret set --source` would report success, print the
+// path, tell you to commit it, and leave nothing in your repository at all. The
+// field it read was documented as "where a directory source reads from", a kind
+// D27 deleted, and once every source was a repository it returned the cache for
+// all of them.
+//
+// Which is the failure this file's own comment above says it exists to prevent.
+// A comment is not a mechanism: the field is gone now, so the wrong answer is
+// not available to be read.
 func resolveSourceTree(ctx context.Context, env *Env, c *Client, source, path string) (sourceTarget, error) {
 	if path != "" {
 		abs, err := filepath.Abs(path)
@@ -63,13 +73,9 @@ func resolveSourceTree(ctx context.Context, env *Env, c *Client, source, path st
 	}
 	var known bool
 	for _, s := range sources {
-		if s.Name != source {
-			continue
-		}
-		known = true
-		if s.Path != "" {
-			return sourceTarget{source: source, dir: s.Path,
-				file: filepath.Join(s.Path, secretfile.Name)}, nil
+		if s.Name == source {
+			known = true
+			break
 		}
 	}
 	if !known {
@@ -100,11 +106,9 @@ func secretSetInSource(ctx context.Context, env *Env, c *Client, t sourceTarget,
 	if !secrets.ValidName(name) {
 		return fmt.Errorf("%q is not a valid secret name; use A-Z, digits and underscores", name)
 	}
-	id, err := readAgeIdentity(env)
+	id, err := ensureAgeIdentity(env)
 	if err != nil {
-		return fmt.Errorf(
-			"this machine has no key to encrypt with (%s).\n"+
-				"Make one:  je worker keygen", ageIdentityPath(env))
+		return err
 	}
 
 	file, created, err := openOrCreateSecretFile(t, id)
@@ -349,4 +353,66 @@ func relativeTo(base, path string) string {
 		return rel
 	}
 	return path
+}
+
+// secretListInSource shows what a repository holds, which is names and readers
+// and never values.
+//
+// The control plane cannot decrypt these and neither can this command without
+// the right key -- so what is listed is exactly what the file leaves in
+// cleartext, on purpose: a declared secret that is missing is still a load-time
+// error, and nothing else about it is knowable from here (D25).
+func secretListInSource(ctx context.Context, env *Env, c *Client, source string) error {
+	listCtx, cancel := withTimeout(ctx)
+	defer cancel()
+
+	sources, err := c.Sources(listCtx)
+	if err != nil {
+		return err
+	}
+	for _, s := range sources {
+		if s.Name != source {
+			continue
+		}
+		if s.SecretsError != "" {
+			return fmt.Errorf("%s: %s", secretfile.Name, s.SecretsError)
+		}
+		// Everything below describes the revision the control plane last
+		// fetched, and saying so is the whole difference between this being
+		// useful and being the confusing answer it replaced. The secrets file
+		// travels with the definitions (D25), so one just written into a
+		// checkout is invisible here until it is pushed and synced -- and "no
+		// secrets" a second after setting one reads exactly like a failure.
+		at := "the revision the control plane last fetched"
+		if s.Revision != "" {
+			at = shortSHA(s.Revision) + ", the revision the control plane last fetched"
+		}
+
+		if len(s.Secrets) == 0 {
+			fmt.Fprintf(env.Stdout, "no secrets in %s at %s.\n", source, at)
+			fmt.Fprintf(env.Stdout,
+				"\nIf you have just set one, it is in your checkout and not here yet:\n"+
+					"  git add %s && git commit -m \"secrets\" && git push\n"+
+					"  je source sync %s\n"+
+					"\nOr set one:  je secret set --source %s NAME\n",
+				secretfile.Name, source, source)
+			return nil
+		}
+
+		fmt.Fprintf(env.Stdout, "%d secret(s) in %s at %s, readable by %d key(s)\n\n",
+			len(s.Secrets), source, at, len(s.Recipients))
+		for _, name := range s.Secrets {
+			fmt.Fprintf(env.Stdout, "  %s\n", name)
+		}
+		// The recipients are the access list, and "who can read production
+		// credentials" is the question this file exists to make reviewable.
+		if len(s.Recipients) > 0 {
+			fmt.Fprintln(env.Stdout, "\nreadable by")
+			for _, r := range s.Recipients {
+				fmt.Fprintf(env.Stdout, "  %s\n", r)
+			}
+		}
+		return nil
+	}
+	return fmt.Errorf("no source named %q; `je source` shows the ones registered", source)
 }

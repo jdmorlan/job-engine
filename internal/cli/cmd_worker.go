@@ -412,6 +412,45 @@ func explainUnregisteredKey(env *Env, recipient, why string) error {
 // ageIdentityPath is where this machine's secret-reading key lives.
 func ageIdentityPath(env *Env) string { return env.Layout.AgeIdentity() }
 
+// ensureAgeIdentity loads this machine's key, creating one if there is none.
+//
+// Creating rather than instructing, because being told to run `je worker
+// keygen` is a step we made somebody type instead of doing. A keypair is not a
+// destructive act and it costs nothing: the only reason to refuse would be if
+// there were already one, and that case is still refused where it matters --
+// `je worker keygen` will not overwrite a key, because replacing it makes every
+// secret encrypted to it unreadable.
+//
+// It is loud about it. A new identity is a fact worth seeing go by, and the
+// public key is what somebody has to add as a recipient elsewhere.
+func ensureAgeIdentity(env *Env) (*age.X25519Identity, error) {
+	id, err := readAgeIdentity(env)
+	if err == nil {
+		return id, nil
+	}
+	if !os.IsNotExist(err) {
+		return nil, err
+	}
+
+	path := ageIdentityPath(env)
+	id, err = age.GenerateX25519Identity()
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(path, []byte(id.String()+"\n"), 0o600); err != nil {
+		return nil, err
+	}
+	fmt.Fprintf(env.Stderr,
+		"je: this machine had no key to encrypt with, so one was made\n"+
+			"    %s\n"+
+			"    public key  %s\n",
+		path, id.Recipient())
+	return id, nil
+}
+
 // readAgeIdentity loads this machine's secret-reading key.
 func readAgeIdentity(env *Env) (*age.X25519Identity, error) {
 	body, err := os.ReadFile(ageIdentityPath(env))
