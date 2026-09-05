@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"text/tabwriter"
 	"time"
 )
 
@@ -42,50 +41,54 @@ func runWaiting(ctx context.Context, env *Env, args []string) error {
 		}
 
 		if len(w.Running) > 0 {
-			fmt.Fprintln(env.Stdout, "RUNNING")
-			tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
+			env.section("RUNNING", "")
+			tw := env.table()
 			for _, r := range w.Running {
-				fmt.Fprintf(tw, "  %s\trun %d\tstarted %s\n",
-					names[r.JobID], r.ID, sinceText(r.StartedAt))
+				fmt.Fprintf(tw, "  %s\t%s\t%s\n", names[r.JobID],
+					env.Style.Muted(fmt.Sprintf("run %d", r.ID)),
+					env.Style.Muted("started "+sinceText(r.StartedAt)))
 			}
 			tw.Flush()
 			fmt.Fprintln(env.Stdout)
 		}
 
 		if len(w.Queued) > 0 {
-			fmt.Fprintln(env.Stdout, "QUEUED  (waiting for a worker slot)")
-			tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
+			env.section("QUEUED", "(waiting for a worker slot)")
+			tw := env.table()
 			for _, r := range w.Queued {
-				fmt.Fprintf(tw, "  %s\trun %d\tqueued %s\n",
-					names[r.JobID], r.ID, sinceText(&r.QueuedAt))
+				fmt.Fprintf(tw, "  %s\t%s\t%s\n", names[r.JobID],
+					env.Style.Muted(fmt.Sprintf("run %d", r.ID)),
+					env.Style.Muted("queued "+sinceText(&r.QueuedAt)))
 			}
 			tw.Flush()
 			fmt.Fprintln(env.Stdout)
 		}
 
 		if len(w.Retrying) > 0 {
-			fmt.Fprintln(env.Stdout, "RETRYING  (failed, waiting to try again)")
-			tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
+			env.section("RETRYING", "(failed, waiting to try again)")
+			tw := env.table()
 			for _, r := range w.Retrying {
 				next := "now"
 				if r.NextAttemptAt != nil {
 					next = fmt.Sprintf("in %s", untilText(*r.NextAttemptAt))
 				}
-				fmt.Fprintf(tw, "  %s\trun %d\tattempt %d failed\tnext attempt %s\n",
-					names[r.JobID], r.ID, r.AttemptCount, next)
+				fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\n", names[r.JobID],
+					env.Style.Muted(fmt.Sprintf("run %d", r.ID)),
+					env.Style.Warn(fmt.Sprintf("attempt %d failed", r.AttemptCount)),
+					env.Style.Muted("next attempt "+next))
 			}
 			tw.Flush()
 			fmt.Fprintln(env.Stdout)
 		}
 
 		if len(w.Scheduled) > 0 {
-			fmt.Fprintln(env.Stdout, "SCHEDULED")
-			tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
+			env.section("SCHEDULED", "")
+			tw := env.table()
 			for _, s := range w.Scheduled {
-				fmt.Fprintf(tw, "  %s\t%s\tnext %s\t(in %s)\n",
-					s.Job, s.Schedule,
-					s.Next.Local().Format(time.DateTime),
-					untilText(s.Next))
+				fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\n", s.Job,
+					env.Style.Muted(s.Schedule),
+					"next "+s.Next.Local().Format(time.DateTime),
+					env.Style.Muted("(in "+untilText(s.Next)+")"))
 			}
 			tw.Flush()
 			fmt.Fprintln(env.Stdout)
@@ -95,20 +98,20 @@ func runWaiting(ctx context.Context, env *Env, args []string) error {
 			// C8: queued work nothing can take. Above BLOCKED because it is
 			// less obviously broken -- everything about it looks like ordinary
 			// queueing, which is exactly why it needs to be said out loud.
-			fmt.Fprintln(env.Stdout,
-				"WAITING FOR A WORKER  (queued for a label nothing is serving)")
+			env.section("WAITING FOR A WORKER", "(queued for a label nothing is serving)")
 			for _, u := range w.Unservable {
 				fmt.Fprintf(env.Stdout, "  runs_on: %s\n    %d run(s), jobs: %s\n"+
-					"    start one:  je worker run --labels %s\n",
-					u.Label, len(u.Runs), strings.Join(u.Jobs, ", "), u.Label)
+					"    start one:  %s\n",
+					u.Label, len(u.Runs), strings.Join(u.Jobs, ", "),
+					env.Style.Cmd("je worker run --labels "+u.Label))
 			}
 			// The command above is the local case. A label like `macos` usually
 			// means a machine that is not this one, and that machine needs an
 			// identity before it can talk to anything (D25) -- so the line that
 			// mints one belongs here rather than in a page somebody has to know
 			// to go and read.
-			fmt.Fprintln(env.Stdout,
-				"  On another machine, enroll it first:  je enroll <name> --labels <label>")
+			fmt.Fprintln(env.Stdout, env.Style.Muted("  On another machine, enroll it first:  ")+
+				env.Style.Cmd("je enroll <name> --labels <label>"))
 			fmt.Fprintln(env.Stdout)
 		}
 
@@ -116,10 +119,9 @@ func runWaiting(ctx context.Context, env *Env, args []string) error {
 			// D3 calls this view the feature, and it is: the mechanism is a
 			// few hundred lines, and answering "why hasn't the rollup run?"
 			// without reading logs is what makes it worth having.
-			fmt.Fprintln(env.Stdout,
-				"WAITING TO FAN IN  (some conditions met, the rest not yet)")
-			tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(tw, "  TRIGGER\tWAITING ON\tSATISFIED\tEXPIRES")
+			env.section("WAITING TO FAN IN", "(some conditions met, the rest not yet)")
+			tw := env.table()
+			fmt.Fprintln(tw, env.Style.Header("  TRIGGER\tWAITING ON\tSATISFIED\tEXPIRES"))
 			for _, t := range w.Triggers {
 				satisfied := make([]string, 0, len(t.Satisfied))
 				for _, sc := range t.Satisfied {
@@ -135,9 +137,9 @@ func runWaiting(ctx context.Context, env *Env, args []string) error {
 			if err := tw.Flush(); err != nil {
 				return err
 			}
-			fmt.Fprintln(env.Stdout,
+			fmt.Fprintln(env.Stdout, env.Style.Muted(
 				"\n  After EXPIRES the events already seen fall out of the window,\n"+
-					"  and the trigger starts again from whatever arrives next.")
+					"  and the trigger starts again from whatever arrives next."))
 			fmt.Fprintln(env.Stdout)
 		}
 
@@ -146,12 +148,12 @@ func runWaiting(ctx context.Context, env *Env, args []string) error {
 			// have failed on arrival for want of a toolchain. Distinct from the
 			// label case above and worth its own heading: the fix is on a
 			// machine that already exists rather than a machine that does not.
-			fmt.Fprintln(env.Stdout,
-				"WAITING FOR A RUNTIME  (queued for a language no worker can prepare)")
+			env.section("WAITING FOR A RUNTIME", "(queued for a language no worker can prepare)")
 			for _, u := range w.UnservedRuntimes {
 				fmt.Fprintf(env.Stdout, "  language: %s\n    %d run(s), jobs: %s\n"+
-					"    on a worker that should run these:  je worker runtime install %s\n",
-					u.Language, len(u.Runs), strings.Join(u.Jobs, ", "), u.Language)
+					"    on a worker that should run these:  %s\n",
+					u.Language, len(u.Runs), strings.Join(u.Jobs, ", "),
+					env.Style.Cmd("je worker runtime install "+u.Language))
 			}
 			fmt.Fprintln(env.Stdout)
 		}
@@ -160,9 +162,9 @@ func runWaiting(ctx context.Context, env *Env, args []string) error {
 			// Last, because it is the part that needs a human. Putting it at
 			// the bottom means it is what you are looking at when the command
 			// finishes.
-			fmt.Fprintln(env.Stdout, "BLOCKED  (these will not run until you fix them)")
+			env.section(env.Style.Bad("BLOCKED"), "(these will not run until you fix them)")
 			for _, j := range w.Blocked {
-				fmt.Fprintf(env.Stdout, "  %s\n    %s\n", j.Slug, brokenReason(j))
+				fmt.Fprintf(env.Stdout, "  %s\n    %s\n", env.Style.Bad(j.Slug), brokenReason(j))
 			}
 			fmt.Fprintln(env.Stdout)
 		}

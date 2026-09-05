@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"text/tabwriter"
 )
 
 func init() {
@@ -40,30 +39,35 @@ func runSync(ctx context.Context, env *Env, args []string) error {
 			return err
 		}
 
-		tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintf(tw, "source\t%s\n", result.Source)
-		fmt.Fprintf(tw, "loaded\t%d job(s)\n", result.Loaded)
+		st := env.Style
+		tw := env.table()
+		fmt.Fprintf(tw, "%s\t%s\n", st.Header("source"), result.Source)
+		fmt.Fprintf(tw, "%s\t%s\n", st.Header("loaded"),
+			st.Good(fmt.Sprintf("%d job(s)", result.Loaded)))
 		if result.Chains > 0 {
 			// Stated only when there are any, but stated: "7 jobs" reads
 			// identically whether the chains directory came across or not, and
 			// a repo whose wiring did not arrive still runs every job it has.
-			fmt.Fprintf(tw, "\t%d chain(s), %d route(s)\n", result.Chains, result.Routes)
+			fmt.Fprintf(tw, "\t%s\n",
+				st.Muted(fmt.Sprintf("%d chain(s), %d route(s)", result.Chains, result.Routes)))
 		}
 		if result.Revision != "" {
 			// D11/D19: with a git source this is the commit that defines what
 			// now runs, which is what makes `je why` able to point at one.
-			fmt.Fprintf(tw, "revision\t%s\n", result.Revision)
+			fmt.Fprintf(tw, "%s\t%s\n", st.Header("revision"), st.Muted(result.Revision))
 		}
 		if result.Removed > 0 {
 			// Said explicitly because it is the destructive-looking half, and
 			// it is not destructive: history stays.
-			fmt.Fprintf(tw, "removed\t%d job(s) whose files are gone (history kept)\n", result.Removed)
+			fmt.Fprintf(tw, "%s\t%d job(s) whose files are gone %s\n", st.Header("removed"),
+				result.Removed, st.Muted("(history kept)"))
 		}
 		if !result.SchedulesApplied {
 			// Brief and normal, but it is the window in which a new schedule
 			// is loaded and not yet firing -- so it is stated rather than left
 			// to look identical to a working sync.
-			fmt.Fprintf(tw, "schedules\tnot rebuilt yet; the clock will catch up\n")
+			fmt.Fprintf(tw, "%s\t%s\n", st.Header("schedules"),
+				st.Muted("not rebuilt yet; the clock will catch up"))
 		}
 		if err := tw.Flush(); err != nil {
 			return err
@@ -71,9 +75,10 @@ func runSync(ctx context.Context, env *Env, args []string) error {
 
 		if len(result.Misconfig) > 0 {
 			// Last, because it is the part that needs a human.
-			fmt.Fprintf(env.Stdout,
-				"\n%d job(s) loaded but cannot run: %s\n  je jobs   for the reason\n",
-				len(result.Misconfig), strings.Join(result.Misconfig, ", "))
+			fmt.Fprintf(env.Stdout, "\n%s %s\n  %s   %s\n",
+				st.Bad(fmt.Sprintf("%d job(s) loaded but cannot run:", len(result.Misconfig))),
+				strings.Join(result.Misconfig, ", "),
+				st.Cmd("je jobs"), st.Muted("for the reason"))
 			return errAttention
 		}
 		return nil

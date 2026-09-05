@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"text/tabwriter"
 	"time"
 
 	"github.com/jdmorlan/job-engine/internal/engine"
@@ -53,25 +52,27 @@ func runChains(ctx context.Context, env *Env, args []string) error {
 			// Not an error, and not silence either: a chain file in the wrong
 			// place is the most likely reason somebody is running this
 			// command, so say where they go.
-			fmt.Fprintln(env.Stdout,
-				"no chains loaded\n"+
-					"  chain files go in chains/<name>.yaml in a source's repository\n"+
-					"  je source     shows which sources are registered")
+			fmt.Fprintln(env.Stdout, "no chains loaded")
+			fmt.Fprintln(env.Stdout, env.Style.Muted(
+				"  chain files go in chains/<name>.yaml in a source's repository"))
+			env.hint("  ", "je source")
 			return nil
 		}
 
-		tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(tw, "CHAIN\tSTEPS\tLAST\tSTATE")
+		st := env.Style
+		tw := env.table()
+		fmt.Fprintln(tw, st.Header("CHAIN\tSTEPS\tLAST\tSTATE"))
 		attention := false
 		for _, c := range chains {
 			fmt.Fprintf(tw, "%s\t%d\t%s\t%s\n",
-				c.Name, len(c.Steps), chainLastAt(c), chainStateShort(c))
+				c.Name, len(c.Steps), st.Muted(chainLastAt(c)), chainStateShort(c, st))
 			attention = attention || c.State == engine.ChainStopped
 		}
 		tw.Flush()
 
 		if attention {
-			fmt.Fprintln(env.Stdout, "\nje chain <name> shows where it stopped")
+			fmt.Fprintln(env.Stdout)
+			env.hint("", "je chain <name>")
 			return errAttention
 		}
 		return nil
@@ -94,25 +95,28 @@ func runChain(ctx context.Context, env *Env, args []string) error {
 			return err
 		}
 
-		fmt.Fprintf(env.Stdout, "%s\n", c.Name)
+		st := env.Style
+		fmt.Fprintf(env.Stdout, "%s\n", st.Title(c.Name))
 		if c.Description != "" {
 			fmt.Fprintf(env.Stdout, "%s\n", c.Description)
 		}
-		fmt.Fprintf(env.Stdout, "%s\n\n", c.FilePath)
+		fmt.Fprintf(env.Stdout, "%s\n\n", st.Muted(c.FilePath))
 
-		tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
+		tw := env.table()
 		if c.Trigger != nil {
 			// The run upstream of step 1. Shown because "what set this off" is
 			// half of what somebody opening this view wants to know.
-			fmt.Fprintf(tw, "  trigger\t%s\t%s\n", c.Trigger.Job, chainRunText(c.Trigger))
+			fmt.Fprintf(tw, "  %s\t%s\t%s\n",
+				st.Header("trigger"), c.Trigger.Job, chainRunText(c.Trigger, st))
 		}
 		for _, s := range c.Steps {
-			fmt.Fprintf(tw, "  step %d\t%s\t%s\ton %s\n",
-				s.Step, s.Job, chainRunText(s.Run), s.On)
+			fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\n",
+				st.Header(fmt.Sprintf("step %d", s.Step)), s.Job,
+				chainRunText(s.Run, st), st.Muted(fmt.Sprintf("on %s", s.On)))
 		}
 		tw.Flush()
 
-		fmt.Fprintf(env.Stdout, "\n%s\n", chainStateText(c))
+		fmt.Fprintf(env.Stdout, "\n%s\n", chainStateText(c, st))
 		if c.State == engine.ChainStopped {
 			return errAttention
 		}
@@ -121,36 +125,38 @@ func runChain(ctx context.Context, env *Env, args []string) error {
 }
 
 // chainRunText renders the run a step started, or its absence.
-func chainRunText(r *engine.ChainRun) string {
+func chainRunText(r *engine.ChainRun, st Style) string {
 	if r == nil {
 		// Deliberately not "failed" or "pending": the step did not fire, and
 		// the honest thing to say is that nothing happened here.
-		return "-\tdid not fire"
+		return st.Muted("-") + "\t" + st.Muted("did not fire")
 	}
+	id := st.Muted(fmt.Sprintf("run %d", r.ID))
+	status := st.State(string(r.Status))
 	switch {
 	case r.EndedAt != nil && r.StartedAt != nil:
 		// Millisecond precision, the same as `je runs`: a step that took 31ms
 		// and a step that took 900ms are different facts, and rounding both to
 		// "0s" hides the one thing a per-step view is for.
-		return fmt.Sprintf("run %d\t%s in %s", r.ID, r.Status,
+		return fmt.Sprintf("%s\t%s in %s", id, status,
 			r.EndedAt.Sub(*r.StartedAt).Round(time.Millisecond))
 	case r.StartedAt != nil:
-		return fmt.Sprintf("run %d\t%s for %s", r.ID, r.Status,
+		return fmt.Sprintf("%s\t%s for %s", id, status,
 			time.Since(*r.StartedAt).Round(time.Millisecond))
 	default:
-		return fmt.Sprintf("run %d\t%s", r.ID, r.Status)
+		return fmt.Sprintf("%s\t%s", id, status)
 	}
 }
 
 // chainStateShort is the table cell: the fact, without the explanation.
-func chainStateShort(c engine.ChainView) string {
+func chainStateShort(c engine.ChainView, st Style) string {
 	switch c.State {
 	case engine.ChainComplete:
-		return fmt.Sprintf("complete (%s)", c.Duration.Round(time.Millisecond))
+		return st.Good("complete") + " " + st.Muted("("+c.Duration.Round(time.Millisecond).String()+")")
 	case engine.ChainStopped:
-		return "stopped at " + failedSteps(c)
+		return st.Bad("stopped at " + failedSteps(c))
 	case engine.ChainUnstarted:
-		return "stalled"
+		return st.Warn("stalled")
 	default:
 		return string(c.State)
 	}
@@ -160,21 +166,23 @@ func chainStateShort(c engine.ChainView) string {
 const emptyChainNote = "no steps yet -- this file wires nothing"
 
 // chainStateText says what happened in the words the state means.
-func chainStateText(c engine.ChainView) string {
+func chainStateText(c engine.ChainView, st Style) string {
 	switch c.State {
 	case engine.ChainComplete:
-		return fmt.Sprintf("complete, %s end to end", c.Duration.Round(time.Millisecond))
+		return st.Good(fmt.Sprintf("complete, %s end to end",
+			c.Duration.Round(time.Millisecond)))
 	case engine.ChainStopped:
-		return fmt.Sprintf("stopped at %s -- nothing downstream of that fired, "+
-			"because the event it waits for never happened", failedSteps(c))
+		return st.Bad("stopped at "+failedSteps(c)) + st.Muted(
+			" -- nothing downstream of that fired, because the event it waits for never happened")
 	case engine.ChainRunning:
-		return "running"
+		return st.Good("running")
 	case engine.ChainUnstarted:
-		return "stalled: a step succeeded and the next one never fired (je events shows why)"
+		return st.Warn("stalled") + st.Muted(": a step succeeded and the next one never fired (") +
+			st.Cmd("je events") + st.Muted(" shows why)")
 	case engine.ChainEmpty:
-		return emptyChainNote
+		return st.Warn(emptyChainNote)
 	default:
-		return "never run"
+		return st.Muted("never run")
 	}
 }
 

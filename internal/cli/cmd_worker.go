@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"text/tabwriter"
 
 	"github.com/jdmorlan/job-engine/internal/daemon"
 	"github.com/jdmorlan/job-engine/internal/jobdef"
@@ -134,7 +133,7 @@ func runWorker(ctx context.Context, env *Env, args []string) error {
 			// point is to read the command before anything exists.
 			target = daemon.DefaultAddr
 		default:
-			return adviseNoControlPlane(err)
+			return adviseNoControlPlane(env, err)
 		}
 	}
 	// A recorded 0.0.0.0 is a bind address, not a destination, and nothing
@@ -155,7 +154,7 @@ func runWorker(ctx context.Context, env *Env, args []string) error {
 		}
 	} else if positional[0] == "run" {
 		// No token asked for. If this worker shares a machine with the control
-		// plane it can enroll itself, which is what keeps `je quickstart` and
+		// plane it can enroll itself, which is what keeps `je up` and
 		// `docker compose up` at zero extra steps (D25).
 		if err := autoEnroll(ctx, env, target, *name, splitLabels(*labels), nil); err != nil {
 			return err
@@ -255,27 +254,30 @@ func runWorkers(ctx context.Context, env *Env, args []string) error {
 			plane = health.Version
 		}
 
+		st := env.Style
 		stale := 0
-		tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(tw, "NAME\tROLES\tLABELS\tVERSION\tSESSION")
+		tw := env.table()
+		fmt.Fprintln(tw, st.Header("NAME\tROLES\tLABELS\tVERSION\tSESSION"))
 		for _, w := range workers {
-			session := "offline"
+			session := st.Bad("offline")
 			if w.Online {
-				session = "online " + humanAge(w.LastSeenAt)
+				session = st.Good("online") + " " + st.Muted(humanAge(w.LastSeenAt))
 			} else if w.GoneAt != nil {
-				session = "offline since " + humanAge(*w.GoneAt)
+				session = st.Bad("offline") + " " + st.Muted("since "+humanAge(*w.GoneAt))
 			}
 			version := w.Version
 			if version == "" {
 				version = "unknown"
 			}
 			if plane != "" && !sameVersion(w.Version, plane) {
-				version += " *"
+				version = st.Warn(version + " *")
 				stale++
+			} else {
+				version = st.Muted(version)
 			}
 			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
-				w.Name, strings.Join(w.Roles, ", "), strings.Join(w.Labels, ", "),
-				version, session)
+				w.Name, st.Muted(strings.Join(w.Roles, ", ")),
+				strings.Join(w.Labels, ", "), version, session)
 		}
 		if err := tw.Flush(); err != nil {
 			return err
@@ -287,12 +289,12 @@ func runWorkers(ctx context.Context, env *Env, args []string) error {
 			// because nothing re-checks it (D24). Saying so is the whole of
 			// phase 1: the fix is a restart, and you cannot ask for one you
 			// cannot see.
-			fmt.Fprintf(env.Stdout,
-				"\n* out of date -- the control plane is %s.\n"+
-					"  A worker is only version-checked when it registers, so one that was\n"+
+			fmt.Fprintf(env.Stdout, "\n%s\n%s\n",
+				st.Warn(fmt.Sprintf("* out of date -- the control plane is %s.", plane)),
+				st.Muted("  A worker is only version-checked when it registers, so one that was\n"+
 					"  running before the upgrade keeps claiming work at its old version.\n"+
-					"  Restart it to pick up %s:  je worker run   (or restart its container)\n",
-				plane, plane)
+					"  Restart it to pick up "+plane+":  ")+
+					st.Cmd("je worker run")+st.Muted("   (or restart its container)"))
 		}
 		return nil
 	})

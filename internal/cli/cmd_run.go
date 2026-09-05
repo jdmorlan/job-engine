@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os/user"
-	"text/tabwriter"
 	"time"
 
 	"github.com/jdmorlan/job-engine/internal/engine"
@@ -102,9 +101,10 @@ func followRun(ctx context.Context, env *Env, client *Client, runID int64, quiet
 			// control plane and its worker now, and silently killing someone's
 			// half-finished job because they stopped watching would be a bad
 			// surprise.
-			fmt.Fprintf(env.Stderr,
-				"\nje: stopped following. Run %d continues in the background: je logs %d\n",
-				runID, runID)
+			fmt.Fprintf(env.Stderr, "\n%s %s\n",
+				env.Style.Muted(fmt.Sprintf(
+					"je: stopped following. Run %d continues in the background:", runID)),
+				env.Style.Cmd(fmt.Sprintf("je logs %d", runID)))
 			return nil
 		}
 		return streamErr
@@ -137,21 +137,26 @@ func printRunDetail(env *Env, d engine.RunDetail) {
 		duration = d.Run.EndedAt.Sub(*d.Run.StartedAt).Round(time.Millisecond)
 	}
 
-	mark := "x"
+	// The verdict line is the one thing somebody watching a run is waiting
+	// for, and until now it looked like every other line the job printed. It
+	// gets the only strong colour on the screen.
+	st := env.Style
+	mark, verdict := st.Bad("x"), st.Bad(string(d.Run.Status))
 	if d.Run.Status == model.StatusSucceeded {
-		mark = "ok"
+		mark, verdict = st.Good("ok"), st.Good(string(d.Run.Status))
 	}
-	fmt.Fprintf(env.Stdout, "\n%s  run %d %s in %s\n", mark, d.Run.ID, d.Run.Status, duration)
+	fmt.Fprintf(env.Stdout, "\n%s  run %d %s in %s\n", mark, d.Run.ID, verdict, duration)
 
 	if d.Run.Error != "" {
-		fmt.Fprintf(env.Stdout, "    error   %s\n", d.Run.Error)
+		fmt.Fprintf(env.Stdout, "    %s   %s\n", st.Header("error"), st.Bad(d.Run.Error))
 	}
 
 	cursor := d.PrimaryCursor
 	switch {
 	case d.StateOut != nil && d.StateIn != nil:
-		fmt.Fprintf(env.Stdout, "    cursor  %s  %s -> %s  (v%d)\n",
-			cursor, d.StateIn.Summary(cursor), d.StateOut.Summary(cursor), d.StateOut.Version)
+		fmt.Fprintf(env.Stdout, "    %s  %s  %s -> %s  %s\n", st.Header("cursor"),
+			cursor, d.StateIn.Summary(cursor), d.StateOut.Summary(cursor),
+			st.Muted(fmt.Sprintf("(v%d)", d.StateOut.Version)))
 	case d.StateIn != nil && d.Run.Status == model.StatusSucceeded &&
 		d.StateIn.SetByActor != store.ActorEngine:
 		// Worth saying out loud for a job that uses a cursor: succeeding
@@ -163,31 +168,33 @@ func printRunDetail(env *Env, d engine.RunDetail) {
 		// written a cursor of its own does not have one worth reporting, and
 		// saying so on `je run demo-hello` is noise on the first command
 		// anybody types.
-		fmt.Fprintf(env.Stdout, "    cursor  %s unchanged at %s\n",
-			cursor, d.StateIn.Summary(cursor))
+		fmt.Fprintf(env.Stdout, "    %s  %s %s\n", st.Header("cursor"), cursor,
+			st.Muted("unchanged at "+d.StateIn.Summary(cursor)))
 	}
 
 	for _, ev := range d.Emitted {
 		if ev.Source == "job" {
-			fmt.Fprintf(env.Stdout, "    emitted %s (event %d)\n", ev.Type, ev.ID)
+			fmt.Fprintf(env.Stdout, "    %s %s %s\n", st.Header("emitted"), ev.Type,
+				st.Muted(fmt.Sprintf("(event %d)", ev.ID)))
 		}
 	}
 	if len(d.Run.Output) > 0 {
-		fmt.Fprintf(env.Stdout, "    output  %s\n", truncate(string(d.Run.Output), 120))
+		fmt.Fprintf(env.Stdout, "    %s  %s\n", st.Header("output"),
+			truncate(string(d.Run.Output), 120))
 	}
 	// D7's question, answered here rather than in a separate view: "did a human
 	// have to intervene, or did this just work?" is read off the attempt list.
 	if len(d.Attempts) > 1 {
-		fmt.Fprintln(env.Stdout, "    attempts")
-		tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(env.Stdout, "    "+st.Header("attempts"))
+		tw := env.table()
 		for _, a := range d.Attempts {
 			detail := a.Error
 			if detail == "" && a.Status == model.StatusSucceeded {
 				detail = "-"
 			}
 			fmt.Fprintf(tw, "      %d\t%s\t%s\t%s\t%s\n",
-				a.Number, a.Status, attemptCauseText(a),
-				runDuration(a.StartedAt, a.EndedAt), truncate(detail, 60))
+				a.Number, st.State(string(a.Status)), st.Muted(attemptCauseText(a)),
+				runDuration(a.StartedAt, a.EndedAt), st.Muted(truncate(detail, 60)))
 		}
 		tw.Flush()
 	}

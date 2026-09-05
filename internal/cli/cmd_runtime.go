@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"text/tabwriter"
 
 	"github.com/jdmorlan/job-engine/internal/selfupdate"
 	"github.com/jdmorlan/job-engine/internal/toolchain"
@@ -31,26 +30,33 @@ func runWorkerRuntimes(ctx context.Context, env *Env) error {
 		available[name] = true
 	}
 
-	tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "LANGUAGE\tTOOL\tSTATUS")
+	st := env.Style
+	tw := env.table()
+	fmt.Fprintln(tw, st.Header("LANGUAGE\tTOOL\tSTATUS"))
 	for _, name := range toolchain.Names() {
 		tc, _ := toolchain.Lookup(name)
-		status := "not installed"
-		if available[name] {
-			status = "ready"
-		} else if _, _, err := toolchain.RecipeFor(name); err == nil {
-			status = "not installed -- je worker runtime install " + name
-		} else {
-			status = "not installed -- no verified installer; install " + tc.Tool + " yourself"
+		var status string
+		switch _, _, err := toolchain.RecipeFor(name); {
+		case available[name]:
+			status = st.Good("ready")
+		case err == nil:
+			// Not an error: a runtime you have not installed on a worker that
+			// does not need it is the ordinary case. It is a thing you can do
+			// something about, and the doing is the part worth colouring.
+			status = st.Muted("not installed -- ") +
+				st.Cmd("je worker runtime install "+name)
+		default:
+			status = st.Muted("not installed -- no verified installer; install " +
+				tc.Tool + " yourself")
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\n", name, tc.Tool, status)
+		fmt.Fprintf(tw, "%s\t%s\t%s\n", name, st.Muted(tc.Tool), status)
 	}
 	if err := tw.Flush(); err != nil {
 		return err
 	}
-	fmt.Fprintf(env.Stderr,
-		"\nA job declaring `language:` runs only on a worker that is ready for it.\n"+
-			"Restart this worker after installing, so it advertises what it can do.\n")
+	fmt.Fprintf(env.Stderr, "\n%s\n", env.ErrStyle.Muted(
+		"A job declaring `language:` runs only on a worker that is ready for it.\n"+
+			"Restart this worker after installing, so it advertises what it can do."))
 	return nil
 }
 

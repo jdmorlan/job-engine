@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"text/tabwriter"
 
 	"github.com/jdmorlan/job-engine/internal/jobdef"
 	"github.com/jdmorlan/job-engine/internal/schedule"
@@ -207,7 +206,7 @@ func writeJobFile(env *Env, root, name string, t jobTemplate) error {
 		return fmt.Errorf("wrote a file the engine will not load, which is a bug: %w", err)
 	}
 
-	fmt.Fprintf(env.Stdout, "wrote %s\n", jobPath)
+	fmt.Fprintf(env.Stdout, "wrote %s\n", env.Style.Muted(jobPath))
 	if t.language.set() {
 		if err := os.MkdirAll(filepath.Dir(scriptPath), 0o755); err != nil {
 			return err
@@ -215,7 +214,7 @@ func writeJobFile(env *Env, root, name string, t jobTemplate) error {
 		if err := os.WriteFile(scriptPath, []byte(t.language.template(name)), 0o755); err != nil {
 			return err
 		}
-		fmt.Fprintf(env.Stdout, "wrote %s\n", scriptPath)
+		fmt.Fprintf(env.Stdout, "wrote %s\n", env.Style.Muted(scriptPath))
 
 		// Whatever the language needs before a job in it can run at all --
 		// which is only TypeScript, and only a package.json declaring tsx.
@@ -229,7 +228,7 @@ func writeJobFile(env *Env, root, name string, t jobTemplate) error {
 			if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 				return err
 			}
-			fmt.Fprintf(env.Stdout, "wrote %s\n", path)
+			fmt.Fprintf(env.Stdout, "wrote %s\n", env.Style.Muted(path))
 		}
 
 		// The helpers, now rather than at the first run (D21).
@@ -246,26 +245,32 @@ func writeJobFile(env *Env, root, name string, t jobTemplate) error {
 			return err
 		}
 		if s, ok := shim.For(t.language.name); ok {
-			fmt.Fprintf(env.Stdout, "wrote %s\n", filepath.Join(root, s.Dir))
+			fmt.Fprintf(env.Stdout, "wrote %s\n", env.Style.Muted(filepath.Join(root, s.Dir)))
 		}
 	}
 
 	// Commit and push first, deliberately. The engine reads a repository, so a
 	// file that is only on this disk is not a job the engine has -- and
 	// `je sync` on its own would be a command that appears to do nothing.
+	st := env.Style
 	fmt.Fprintln(env.Stdout)
-	tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
+	tw := env.table()
 	// Anything the author has to do by hand first. It goes above `je dev`
 	// rather than in the prose, because a step you have to notice is a step
 	// somebody will not.
 	for _, step := range t.language.next {
-		fmt.Fprintf(tw, "  %s\n", step)
+		fmt.Fprintf(tw, "  %s\t\n", st.Cmd(step))
 	}
-	fmt.Fprintf(tw, "  je dev %s\trun it from here, before anything is committed\n", name)
-	fmt.Fprintf(tw, "  git add -A && git commit -m %q && git push\tthe engine reads the repository\n", "add "+name)
-	fmt.Fprintf(tw, "  je source sync <source>\tfetch what you just pushed\n")
-	fmt.Fprintf(tw, "  je explain <source>/%s\tevery value, including the ones this file does not set\n", name)
-	fmt.Fprintf(tw, "  je run <source>/%s\trun it now\n", name)
+	step := func(command, why string) {
+		fmt.Fprintf(tw, "  %s\t%s\n", st.Cmd(command), st.Muted(why))
+	}
+	step("je dev "+name, "run it from here, before anything is committed")
+	step(fmt.Sprintf("git add -A && git commit -m %q && git push", "add "+name),
+		"the engine reads the repository")
+	step("je source sync <source>", "fetch what you just pushed")
+	step("je explain <source>/"+name,
+		"every value, including the ones this file does not set")
+	step("je run <source>/"+name, "run it now")
 	return tw.Flush()
 }
 
@@ -315,11 +320,13 @@ steps: []
 		return err
 	}
 
-	fmt.Fprintf(env.Stdout, "wrote %s\n\n", path)
+	st := env.Style
+	fmt.Fprintf(env.Stdout, "wrote %s\n\n", st.Muted(path))
 	fmt.Fprintln(env.Stdout, "it has no steps yet, so it wires nothing. Add some, then:")
-	tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintf(tw, "  je sync\tload it\n")
-	fmt.Fprintf(tw, "  je chain %s\twhat it wires, and how the last pass went\n", name)
+	tw := env.table()
+	fmt.Fprintf(tw, "  %s\t%s\n", st.Cmd("je sync"), st.Muted("load it"))
+	fmt.Fprintf(tw, "  %s\t%s\n", st.Cmd("je chain "+name),
+		st.Muted("what it wires, and how the last pass went"))
 	return tw.Flush()
 }
 

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"text/tabwriter"
 )
 
 func init() {
@@ -75,11 +74,14 @@ func runInit(ctx context.Context, env *Env, args []string) error {
 		written = append(written, rel)
 	}
 
-	fmt.Fprintf(env.Stdout, "jobs repository at %s\n\n", abs)
-	tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintf(tw, "  <name>/job.yaml\ta job. The folder's name is the job's name.\n")
-	fmt.Fprintf(tw, "  <name>/\tand its code, beside it\n")
-	fmt.Fprintf(tw, "  chains/<name>.yaml\tone flow, wiring jobs to each other\n")
+	st := env.Style
+	fmt.Fprintf(env.Stdout, "jobs repository at %s\n\n", st.Title(abs))
+	tw := env.table()
+	fmt.Fprintf(tw, "  %s\t%s\n", "<name>/job.yaml",
+		st.Muted("a job. The folder's name is the job's name."))
+	fmt.Fprintf(tw, "  %s\t%s\n", "<name>/", st.Muted("and its code, beside it"))
+	fmt.Fprintf(tw, "  %s\t%s\n", "chains/<name>.yaml",
+		st.Muted("one flow, wiring jobs to each other"))
 	tw.Flush()
 
 	// Not a tabwriter: one of these lines carries a path, and a single long
@@ -90,23 +92,34 @@ func runInit(ctx context.Context, env *Env, args []string) error {
 	// `cd .` is not a step. Printed only when init was given a directory
 	// other than the one you are standing in, which is the only time it is
 	// something to do rather than noise in a list of instructions.
-	step := fmt.Sprintf("  cd %s\n", dir)
+	cd := fmt.Sprintf("cd %s", dir)
 	if here, err := os.Getwd(); err == nil && here == abs {
-		step = ""
+		cd = ""
 	}
-	fmt.Fprintf(env.Stdout, `
-next
-%s  je new <job> --language python     writes a job and its script here
-  je dev <job>                       run it from here, before pushing anything
-  git init && git add -A && git commit -m "jobs"
-  gh repo create %s --private --source=. --push
 
-then point the engine at it:
-  je source add %s <you>/%s
-`, step, name, name, name)
+	fmt.Fprintln(env.Stdout)
+	env.section("next", "")
+	steps := env.table()
+	step := func(command, why string) {
+		if command == "" {
+			return
+		}
+		fmt.Fprintf(steps, "  %s\t%s\n", st.Cmd(command), st.Muted(why))
+	}
+	step(cd, "")
+	step("je new <job> --language python", "writes a job and its script here")
+	step("je dev <job>", "run it from here, before pushing anything")
+	step(`git init && git add -A && git commit -m "jobs"`, "")
+	step(fmt.Sprintf("gh repo create %s --private --source=. --push", name), "")
+	steps.Flush()
+
+	fmt.Fprintln(env.Stdout)
+	env.section("then point the engine at it", "")
+	fmt.Fprintf(env.Stdout, "  %s\n", st.Cmd(fmt.Sprintf("je source add %s <you>/%s", name, name)))
 
 	if len(skipped) > 0 {
-		fmt.Fprintf(env.Stderr, "\nleft alone (already present): %v\n", skipped)
+		fmt.Fprintf(env.Stderr, "\n%s\n", st.Muted(
+			fmt.Sprintf("left alone (already present): %v", skipped)))
 	}
 	return nil
 }

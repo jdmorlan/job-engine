@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"fmt"
-	"text/tabwriter"
 
 	"github.com/jdmorlan/job-engine/internal/engine"
 	"github.com/jdmorlan/job-engine/internal/store"
@@ -58,23 +57,29 @@ func runJobs(ctx context.Context, env *Env, args []string) error {
 		}
 
 		if len(jobs) == 0 {
-			fmt.Fprintln(env.Stdout,
-				"no jobs loaded.\n\n"+
-					"Definitions live in a repository and reach the engine as a source:\n"+
-					"  je source add <name> <owner/repo>\n"+
-					"  je demo                          the examples, from this project's repo")
-			return nil
+			st := env.Style
+			tw := env.table()
+			fmt.Fprint(env.Stdout, "no jobs loaded.\n\n"+
+				"Definitions live in a repository and reach the engine as a source:\n")
+			fmt.Fprintf(tw, "  %s\t\n", st.Cmd("je source add <name> <owner/repo>"))
+			fmt.Fprintf(tw, "  %s\t%s\n", st.Cmd("je demo"),
+				st.Muted("the examples, from this project's repo"))
+			return tw.Flush()
 		}
 
-		tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(tw, "JOB\tSTATUS\tCOMMAND\tFILE")
+		st := env.Style
+		tw := env.table()
+		fmt.Fprintln(tw, st.Header("JOB\tSTATUS\tCOMMAND\tFILE"))
 		for _, j := range jobs {
 			def, err := rd.Definition(ctx, j.Slug)
 			command := ""
 			if err == nil {
 				command = truncate(def.CommandLine(), 40)
 			}
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", j.Slug, jobStatus(j), command, j.FilePath)
+			// The file path is here so you know where to go and edit; it is
+			// not what you are scanning the list for.
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n",
+				j.Slug, st.State(jobStatus(j)), command, st.Muted(j.FilePath))
 		}
 		if err := tw.Flush(); err != nil {
 			return err
@@ -84,16 +89,18 @@ func runJobs(ctx context.Context, env *Env, args []string) error {
 		// does not say why is a prompt to go reading files (P1).
 		for _, j := range jobs {
 			if reason := brokenReason(j); reason != "" {
-				fmt.Fprintf(env.Stdout, "\n%s: %s\n", j.Slug, reason)
+				fmt.Fprintf(env.Stdout, "\n%s: %s\n", st.Bad(j.Slug), reason)
 			}
 		}
 		if hidden > 0 {
-			fmt.Fprintf(env.Stdout,
-				"\n%d removed job(s) hidden; their history is intact. je jobs --all\n", hidden)
+			fmt.Fprintf(env.Stdout, "\n%s%s\n",
+				st.Muted(fmt.Sprintf("%d removed job(s) hidden; their history is intact. ", hidden)),
+				st.Cmd("je jobs --all"))
 		}
 		if housekeeping > 0 {
-			fmt.Fprintf(env.Stdout,
-				"\n%d job(s) the engine runs for itself, hidden. je jobs --all\n", housekeeping)
+			fmt.Fprintf(env.Stdout, "\n%s%s\n",
+				st.Muted(fmt.Sprintf("%d job(s) the engine runs for itself, hidden. ", housekeeping)),
+				st.Cmd("je jobs --all"))
 		}
 		return nil
 	})

@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"fmt"
-	"text/tabwriter"
 	"time"
 
 	"github.com/jdmorlan/job-engine/internal/model"
@@ -44,12 +43,13 @@ func runEvents(ctx context.Context, env *Env, args []string) error {
 			return nil
 		}
 
-		tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
+		st := env.Style
+		tw := env.table()
 		// ACTOR earns a column now that it is true rather than claimed. It is
 		// the verified name from the caller's certificate (D25), so "who asked
 		// for this run" is answerable from the timeline instead of being a
 		// value the requester chose for itself.
-		fmt.Fprintln(tw, "ID\tWHEN\tTYPE\tACTOR\tSOURCE\tCAUSE\tPAYLOAD")
+		fmt.Fprintln(tw, st.Header("ID\tWHEN\tTYPE\tACTOR\tSOURCE\tCAUSE\tPAYLOAD"))
 		for _, e := range events {
 			payload := string(e.Payload)
 			if payload == "" {
@@ -63,8 +63,9 @@ func runEvents(ctx context.Context, env *Env, args []string) error {
 				actor = "-"
 			}
 			fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\t%s\n",
-				e.ID, e.CreatedAt.Local().Format(time.DateTime), e.Type, actor,
-				e.Source, causeOf(e), truncate(payload, 40))
+				e.ID, st.Muted(e.CreatedAt.Local().Format(time.DateTime)), e.Type, actor,
+				st.Muted(string(e.Source)), st.Muted(causeOf(e)),
+				st.Muted(truncate(payload, 40)))
 		}
 		return tw.Flush()
 	})

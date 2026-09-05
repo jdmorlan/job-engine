@@ -82,7 +82,7 @@ func identityJoin(ctx context.Context, env *Env, addr, token, pin, name string) 
 	if target == "" {
 		resolved, err := controlPlaneAddr(env)
 		if err != nil {
-			return adviseNoControlPlane(err)
+			return adviseNoControlPlane(env, err)
 		}
 		target = resolved
 	}

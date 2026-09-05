@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"text/tabwriter"
 	"time"
 )
 
@@ -27,7 +26,7 @@ func runStatus(ctx context.Context, env *Env, args []string) error {
 
 	client, err := Connect(env.Layout)
 	if err != nil {
-		return adviseNoControlPlane(err)
+		return adviseNoControlPlane(env, err)
 	}
 
 	ctx, cancel := withTimeout(ctx)
@@ -35,37 +34,48 @@ func runStatus(ctx context.Context, env *Env, args []string) error {
 
 	health, err := client.Health(ctx)
 	if err != nil {
-		return adviseNoControlPlane(err)
+		return adviseNoControlPlane(env, err)
 	}
 
-	tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintf(tw, "control plane\trunning (%s)\n", health.Version)
+	st := env.Style
+	tw := env.table()
+	// The label column is scaffolding: you know what you asked for, you are
+	// here for the values.
+	label := func(s string) string { return st.Header(s) }
+	fmt.Fprintf(tw, "%s\t%s %s\n", label("control plane"),
+		st.Good("running"), st.Muted("("+health.Version+")"))
 
 	// C8, and the most important line here. A control plane with no worker
 	// attached runs nothing at all: schedules fire into a queue that nobody
 	// drains. That is exactly the kind of quiet nothing-happening P1 exists to
 	// prevent, so it is stated on the default view and stated as a problem.
 	if health.Workers == 0 {
-		fmt.Fprintf(tw, "workers\tNONE -- nothing will run\n")
-		fmt.Fprintf(tw, "\tattach one:  je worker join   (registered, survives a reboot)\n")
-		fmt.Fprintf(tw, "\t             je worker run    (foreground, this terminal)\n")
+		fmt.Fprintf(tw, "%s\t%s\n", label("workers"), st.Bad("NONE -- nothing will run"))
+		fmt.Fprintf(tw, "\tattach one:  %s   %s\n",
+			st.Cmd("je worker join"), st.Muted("(registered, survives a reboot)"))
+		fmt.Fprintf(tw, "\t             %s    %s\n",
+			st.Cmd("je worker run"), st.Muted("(foreground, this terminal)"))
 	} else {
-		fmt.Fprintf(tw, "workers\t%d online (%s)\n",
-			health.Workers, strings.Join(health.Labels, ", "))
+		fmt.Fprintf(tw, "%s\t%s %s\n", label("workers"),
+			st.Good(fmt.Sprintf("%d online", health.Workers)),
+			st.Muted("("+strings.Join(health.Labels, ", ")+")"))
 	}
-	fmt.Fprintf(tw, "uptime\t%s\n", roundDuration(health.Uptime))
-	fmt.Fprintf(tw, "since\t%s\n", health.StartedAt.Local().Format(time.RFC1123))
-	fmt.Fprintf(tw, "data dir\t%s\n", health.DataDir)
+	fmt.Fprintf(tw, "%s\t%s\n", label("uptime"), roundDuration(health.Uptime))
+	fmt.Fprintf(tw, "%s\t%s\n", label("since"),
+		st.Muted(health.StartedAt.Local().Format(time.RFC1123)))
+	fmt.Fprintf(tw, "%s\t%s\n", label("data dir"), st.Muted(health.DataDir))
 
 	// D16 records the engine's own downtime so a gap in a job's history can be
 	// attributed to "the machine was asleep" rather than "something went
 	// wrong". Distinguishing those two is most of what makes a laptop-hosted
 	// scheduler trustworthy, so it is on the default status view, not hidden.
 	if health.LastDowntime >= time.Second {
-		fmt.Fprintf(tw, "last gap\t%s before this start\n", roundDuration(health.LastDowntime))
+		fmt.Fprintf(tw, "%s\t%s\n", label("last gap"),
+			st.Warn(fmt.Sprintf("%s before this start", roundDuration(health.LastDowntime))))
 	}
 	if health.UncleanStop {
-		fmt.Fprintf(tw, "note\tprevious run ended without a clean shutdown\n")
+		fmt.Fprintf(tw, "%s\t%s\n", label("note"),
+			st.Warn("previous run ended without a clean shutdown"))
 	}
 
 	// The control plane runs whatever binary started it, and `je upgrade`
@@ -74,9 +84,10 @@ func runStatus(ctx context.Context, env *Env, args []string) error {
 	// upgrade failed. A visible mismatch beats a mystery (P1), and it is the
 	// same reasoning behind D20/C10 refusing worker version skew loudly.
 	if !sameVersion(health.Version, env.Version) {
-		fmt.Fprintf(tw, "version\tcontrol plane is running %s, this binary is %s\n",
-			health.Version, env.Version)
-		fmt.Fprintf(tw, "\trestart it to pick up %s\n", env.Version)
+		fmt.Fprintf(tw, "%s\t%s\n", label("version"),
+			st.Warn(fmt.Sprintf("control plane is running %s, this binary is %s",
+				health.Version, env.Version)))
+		fmt.Fprintf(tw, "\t%s\n", st.Muted("restart it to pick up "+env.Version))
 	}
 	return tw.Flush()
 }

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"text/tabwriter"
 	"time"
 
 	"github.com/jdmorlan/job-engine/internal/secrets"
@@ -238,14 +237,15 @@ func secretList(ctx context.Context, env *Env, c *Client) error {
 	if len(view.Secrets) == 0 {
 		fmt.Fprintln(env.Stdout, "no secrets set")
 	} else {
-		tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(tw, "NAME\tSET\tUSED BY")
+		st := env.Style
+		tw := env.table()
+		fmt.Fprintln(tw, st.Header("NAME\tSET\tUSED BY"))
 		for _, e := range view.Secrets {
-			used := "-"
+			used := st.Muted("-")
 			if len(e.Jobs) > 0 {
 				used = strings.Join(e.Jobs, ", ")
 			}
-			fmt.Fprintf(tw, "%s\t%s\t%s\n", e.Name, humanAge(e.SetAt), used)
+			fmt.Fprintf(tw, "%s\t%s\t%s\n", e.Name, st.Muted(humanAge(e.SetAt)), used)
 		}
 		if err := tw.Flush(); err != nil {
 			return err
@@ -255,13 +255,16 @@ func secretList(ctx context.Context, env *Env, c *Client) error {
 	// The inverse view, and the one that actually unblocks you: secrets a job
 	// is waiting for.
 	for _, u := range view.Unset {
-		fmt.Fprintf(env.Stdout, "\n%s is declared by %s but not set\n  je secret set %s\n",
-			u.Name, strings.Join(u.Jobs, ", "), u.Name)
+		st := env.Style
+		fmt.Fprintf(env.Stdout, "\n%s\n  %s\n",
+			st.Bad(fmt.Sprintf("%s is declared by %s but not set",
+				u.Name, strings.Join(u.Jobs, ", "))),
+			st.Cmd("je secret set "+u.Name))
 	}
 
 	if !view.DirectoryPrivate {
-		fmt.Fprintln(env.Stderr,
-			"\nwarning: the control plane's data directory is readable by other users")
+		fmt.Fprintf(env.Stderr, "\n%s\n", env.ErrStyle.Warn(
+			"warning: the control plane's data directory is readable by other users"))
 	}
 	return nil
 }

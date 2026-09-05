@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"text/tabwriter"
 	"time"
 
 	"github.com/jdmorlan/job-engine/internal/api"
@@ -87,11 +86,17 @@ func listSources(ctx context.Context, env *Env) error {
 			return err
 		}
 
-		tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(tw, "NAME\tKIND\tWHERE\tREVISION\tJOBS\tSYNCED")
+		st := env.Style
+		tw := env.table()
+		fmt.Fprintln(tw, st.Header("NAME\tKIND\tWHERE\tREVISION\tJOBS\tSYNCED"))
 		for _, s := range sources {
+			name := s.Name
+			if s.LastError != "" {
+				name = st.Bad(name)
+			}
 			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%s\n",
-				s.Name, s.Kind, sourceWhere(s), sourceRevision(s), s.Jobs, sourceSynced(s))
+				name, st.Muted(string(s.Kind)), sourceWhere(s),
+				st.Muted(sourceRevision(s)), s.Jobs, st.Muted(sourceSynced(s)))
 		}
 		if err := tw.Flush(); err != nil {
 			return err
@@ -108,7 +113,8 @@ func listSources(ctx context.Context, env *Env) error {
 			// which is correct and is also exactly why it has to be said out
 			// loud: everything looks fine and the repo has quietly stopped
 			// updating.
-			fmt.Fprintln(env.Stdout, "\nNOT LOADING  (still serving what they last loaded)")
+			fmt.Fprintln(env.Stdout)
+			env.section(st.Bad("NOT LOADING"), "(still serving what they last loaded)")
 			for _, s := range broken {
 				fmt.Fprintf(env.Stdout, "  %s\n    %s\n", s.Name, s.LastError)
 			}
@@ -298,22 +304,27 @@ func removeSource(ctx context.Context, env *Env, name string) error {
 }
 
 func printLoaded(env *Env, name string, result engine.LoadResult) {
-	tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintf(tw, "  jobs\t%d\n", result.Loaded)
+	st := env.Style
+	tw := env.table()
+	fmt.Fprintf(tw, "  %s\t%d\n", st.Header("jobs"), result.Loaded)
 	if result.Chains > 0 {
-		fmt.Fprintf(tw, "  chains\t%d (%d route(s))\n", result.Chains, result.Routes)
+		fmt.Fprintf(tw, "  %s\t%d %s\n", st.Header("chains"), result.Chains,
+			st.Muted(fmt.Sprintf("(%d route(s))", result.Routes)))
 	}
 	if result.Removed > 0 {
-		fmt.Fprintf(tw, "  removed\t%d whose files are gone (history kept)\n", result.Removed)
+		fmt.Fprintf(tw, "  %s\t%d %s\n", st.Header("removed"), result.Removed,
+			st.Muted("whose files are gone (history kept)"))
 	}
 	tw.Flush()
 
 	if result.Loaded == 0 {
 		// A registration that succeeds and provides nothing is the failure
 		// this command is most likely to produce, and it looks like success.
-		fmt.Fprintf(env.Stdout,
-			"\n  no job files found -- job files are <source>/*.yaml, chains are <source>/chains/*.yaml\n"+
-				"  if they live in a subdirectory: je source add %s <path> --path jobs\n", name)
+		fmt.Fprintf(env.Stdout, "\n  %s\n  %s%s\n",
+			st.Warn("no job files found")+st.Muted(
+				" -- job files are <source>/*.yaml, chains are <source>/chains/*.yaml"),
+			st.Muted("if they live in a subdirectory: "),
+			st.Cmd(fmt.Sprintf("je source add %s <path> --path jobs", name)))
 	}
 }
 

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
-	"text/tabwriter"
 	"time"
 )
 
@@ -60,7 +59,7 @@ func runRuns(ctx context.Context, env *Env, args []string) error {
 			if removed := removedRuns(ctx, rd, jobSlug); removed > 0 {
 				fmt.Fprintf(env.Stdout,
 					"no runs within the keep period; %d older run(s) have been "+
-						"removed by retention. je explain system/retention\n", removed)
+						"removed by retention. "+env.Style.Cmd("je explain system/retention")+"\n", removed)
 				return nil
 			}
 			fmt.Fprintln(env.Stdout, "no runs yet")
@@ -73,13 +72,24 @@ func runRuns(ctx context.Context, env *Env, args []string) error {
 			return err
 		}
 
-		tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(tw, "RUN\tJOB\tSTATUS\tSTARTED\tDURATION\tATTEMPTS")
+		st := env.Style
+		tw := env.table()
+		fmt.Fprintln(tw, st.Header("RUN\tJOB\tSTATUS\tSTARTED\tDURATION\tATTEMPTS"))
 		for _, r := range runs {
-			fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%d\n",
-				r.ID, names[r.JobID], r.Status,
-				formatOptionalTime(r.StartedAt), runDuration(r.StartedAt, r.EndedAt),
-				r.AttemptCount)
+			// Only a retried run has an attempt count worth reading; on every
+			// other row the 1 is a column of ones, so it is dimmed rather than
+			// dropped -- it still answers the question, it just stops
+			// competing with the answer.
+			attempts := fmt.Sprintf("%d", r.AttemptCount)
+			if r.AttemptCount > 1 {
+				attempts = st.Warn(attempts)
+			} else {
+				attempts = st.Muted(attempts)
+			}
+			fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\n",
+				r.ID, names[r.JobID], st.State(string(r.Status)),
+				st.Muted(formatOptionalTime(r.StartedAt)), runDuration(r.StartedAt, r.EndedAt),
+				attempts)
 		}
 		if err := tw.Flush(); err != nil {
 			return err
@@ -128,7 +138,11 @@ func runLogs(ctx context.Context, env *Env, args []string) error {
 			if l.Stream == "stderr" {
 				w = env.Stderr
 			}
-			fmt.Fprintf(w, "%s  %s\n", l.TS.Local().Format("15:04:05.000"), l.Line)
+			// The timestamp is the least interesting thing on a log line and
+			// the leftmost, which is a bad combination: dimmed, it becomes a
+			// margin instead of a column the eye has to cross.
+			fmt.Fprintf(w, "%s  %s\n",
+				env.Style.Muted(l.TS.Local().Format("15:04:05.000")), l.Line)
 		}
 		return nil
 	})
@@ -144,9 +158,9 @@ func printRetentionFloor(ctx context.Context, env *Env, rd *Client, jobSlug stri
 	if removed == 0 {
 		return nil
 	}
-	fmt.Fprintf(env.Stdout,
-		"\n%d older run(s) have been removed by retention. je explain system/retention\n",
-		removed)
+	fmt.Fprintf(env.Stdout, "%s\n",
+		env.Style.Muted(fmt.Sprintf("\n%d older run(s) have been removed by retention. ", removed))+
+			env.Style.Cmd("je explain system/retention"))
 	return nil
 }
 

@@ -21,7 +21,7 @@ import (
 // answered from what it had loaded, so the same question had two answers
 // depending on something invisible.
 //
-// It bought one saved command (`je quickstart`) and cost a second implementation of
+// It bought one saved command (`je up --foreground`) and cost a second implementation of
 // every read. See v0.6's rule: a capability is not a reason.
 func withClient(ctx context.Context, env *Env, fn func(context.Context, *Client) error) error {
 	client, err := connectOrAdvise(ctx, env)
@@ -36,10 +36,10 @@ func withClient(ctx context.Context, env *Env, fn func(context.Context, *Client)
 func connectOrAdvise(ctx context.Context, env *Env) (*Client, error) {
 	client, err := Connect(env.Layout)
 	if err != nil {
-		return nil, adviseNoControlPlane(err)
+		return nil, adviseNoControlPlane(env, err)
 	}
 	if !reachable(ctx, client) {
-		return nil, adviseNoControlPlane(fmt.Errorf("%w at %s", ErrNoControlPlane, client.base.Host))
+		return nil, adviseNoControlPlane(env, fmt.Errorf("%w at %s", ErrNoControlPlane, client.base.Host))
 	}
 	return client, nil
 }
@@ -63,7 +63,7 @@ func reachable(ctx context.Context, c *Client) bool {
 // plane too old to speak TLS (D25) -- and telling somebody to start a control
 // plane while one is running and answering is the same class of confidently
 // wrong sentence this function exists to replace.
-func adviseNoControlPlane(err error) error {
+func adviseNoControlPlane(env *Env, err error) error {
 	if !errors.Is(err, ErrNoControlPlane) {
 		return err
 	}
@@ -71,8 +71,12 @@ func adviseNoControlPlane(err error) error {
 	// control plane with no worker, which runs nothing (C11) -- suggesting it
 	// first sends somebody to a second, quieter failure, which is the opposite
 	// of what an error message is for.
+	st := env.ErrStyle
 	return fmt.Errorf("%w\n\n"+
-		"Start one:  je quickstart          (control plane and a worker, this terminal)\n"+
-		"            docker compose up -d   (unattended)\n\n"+
-		"Nothing is scheduled while it is down.", err)
+		"Start one:  %s               %s\n"+
+		"            %s   %s\n\n"+
+		"%s", err,
+		st.Cmd("je up"), st.Muted("(control plane, worker and web client, for real)"),
+		st.Cmd("je up --foreground"), st.Muted("(both in this terminal, registering nothing)"),
+		st.Muted("Nothing is scheduled while it is down."))
 }

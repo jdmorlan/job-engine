@@ -21,7 +21,6 @@ import (
 	"io"
 	"os"
 	"sort"
-	"text/tabwriter"
 
 	"github.com/jdmorlan/job-engine/internal/paths"
 )
@@ -47,6 +46,17 @@ type Env struct {
 	Stdin   io.Reader
 	Layout  paths.Layout
 	Version string
+
+	// Style decides what the output is allowed to look like. Resolved once,
+	// from the real stdout, so that a command never has to ask whether it is
+	// talking to a terminal -- it asks for a heading and gets one either way.
+	Style Style
+
+	// ErrStyle is the same for stderr, which is a different stream and often a
+	// different destination: `je runs > file` still has a terminal to complain
+	// to, and an error that arrives in plain text while the table it replaced
+	// would have been coloured is a worse error, not a safer one.
+	ErrStyle Style
 }
 
 // Command is one `je` subcommand.
@@ -136,10 +146,20 @@ func Main(ctx context.Context, args []string, env *Env) int {
 	global := flag.NewFlagSet("je", flag.ContinueOnError)
 	global.SetOutput(env.Stderr)
 	dataDir := global.String("data-dir", "", "override the engine data directory")
-	global.Usage = func() { printRootUsage(env.Stderr, global) }
+	color := global.String("color", "auto", "colourise output: auto, always or never")
+	global.Usage = func() { printRootUsage(env.Stderr, global, env.Style) }
 
 	if err := global.Parse(args); err != nil {
 		return ExitUsage // flag already printed the problem and the usage
+	}
+
+	switch colorMode(*color) {
+	case colorAuto, colorAlways, colorNever:
+		env.Style = resolveStyle(env.Stdout, colorMode(*color), os.Getenv)
+		env.ErrStyle = resolveStyle(env.Stderr, colorMode(*color), os.Getenv)
+	default:
+		fmt.Fprintf(env.Stderr, "je: --color must be auto, always or never, not %q\n", *color)
+		return ExitUsage
 	}
 
 	layout, err := paths.Resolve()
@@ -157,7 +177,7 @@ func Main(ctx context.Context, args []string, env *Env) int {
 
 	rest := global.Args()
 	if len(rest) == 0 {
-		printRootUsage(env.Stdout, global)
+		printRootUsage(env.Stdout, global, env.Style)
 		return ExitUsage
 	}
 
@@ -168,7 +188,8 @@ func Main(ctx context.Context, args []string, env *Env) int {
 
 	cmd, ok := commands[name]
 	if !ok {
-		fmt.Fprintf(env.Stderr, "je: unknown command %q\nRun 'je help' for the list.\n", name)
+		fmt.Fprintf(env.Stderr, "%s unknown command %q\nRun %s for the list.\n",
+			env.ErrStyle.Bad("je:"), name, env.ErrStyle.Cmd("je help"))
 		return ExitUsage
 	}
 
@@ -189,7 +210,7 @@ func Main(ctx context.Context, args []string, env *Env) int {
 			// attention, and a trailing error line would just be noise.
 			return ExitAttention
 		}
-		fmt.Fprintf(env.Stderr, "je %s: %v\n", cmd.Name, err)
+		fmt.Fprintf(env.Stderr, "%s %v\n", env.ErrStyle.Bad("je "+cmd.Name+":"), err)
 		var ue usageError
 		if errors.As(err, &ue) {
 			return ExitUsage
@@ -200,7 +221,7 @@ func Main(ctx context.Context, args []string, env *Env) int {
 
 func runHelp(env *Env, global *flag.FlagSet, args []string) int {
 	if len(args) == 0 {
-		printRootUsage(env.Stdout, global)
+		printRootUsage(env.Stdout, global, env.Style)
 		return ExitOK
 	}
 	cmd, ok := commands[args[0]]
@@ -208,45 +229,123 @@ func runHelp(env *Env, global *flag.FlagSet, args []string) int {
 		fmt.Fprintf(env.Stderr, "je: unknown command %q\n", args[0])
 		return ExitUsage
 	}
-	fmt.Fprintf(env.Stdout, "usage: je %s %s\n\n%s\n", cmd.Name, cmd.Args, cmd.Usage)
+	st := env.Style
+	fmt.Fprintf(env.Stdout, "usage: %s\n\n%s\n", usageLine(cmd, st), cmd.Usage)
 	if cmd.Long != "" {
 		fmt.Fprintf(env.Stdout, "\n%s\n", cmd.Long)
 	}
 	if cmd.Local {
-		fmt.Fprint(env.Stdout, "\n"+localScopeNote)
+		fmt.Fprint(env.Stdout, "\n"+st.Warn(localScopeTitle)+"\n"+st.Muted(localScopeNote))
 	}
 	return ExitOK
 }
 
-func printRootUsage(w io.Writer, global *flag.FlagSet) {
-	fmt.Fprint(w, "je — a job engine you can debug\n\nusage: je [global flags] <command> [flags]\n\ncommands:\n")
+// group is a section of `je help`.
+//
+// Thirty commands in one alphabetical list is a wall: it is complete, it is
+// sorted, and it answers no question anybody arrives with. "chain" and
+// "chains" sit next to "control-plane" because of a letter they share, while
+// the three commands somebody actually needs on their first day are scattered
+// through it.
+//
+// The groups are ordered by when you meet them, not by importance -- write a
+// job, look at what happened, make something happen, configure it, run the
+// engine itself. Alphabetical order survives inside each group, where the list
+// is short enough for it to be a help rather than a shrug.
+type group struct {
+	title string
+	names []string
+}
 
-	names := make([]string, 0, len(commands))
-	for name := range commands {
-		names = append(names, name)
-	}
-	sort.Strings(names)
+var groups = []group{
+	{"start here", []string{"up", "down"}},
+	{"write jobs", []string{"init", "new", "dev", "demo"}},
+	{"see what happened", []string{
+		"status", "jobs", "runs", "logs", "chains", "chain",
+		"events", "state", "waiting", "explain", "workers",
+	}},
+	{"make something happen", []string{"run", "retry", "emit", "sync", "retention"}},
+	{"definitions and secrets", []string{"source", "secret", "enroll", "identity"}},
+	{"run the engine yourself", []string{
+		"control-plane", "worker", "web", "upgrade", "reset", "version",
+	}},
+}
 
-	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	local := false
-	for _, name := range names {
-		mark := ""
-		if commands[name].Local {
-			mark, local = " *", true
+func printRootUsage(w io.Writer, global *flag.FlagSet, st Style) {
+	fmt.Fprint(w, st.Title("je")+" — a job engine you can debug\n\n")
+	fmt.Fprint(w, "usage: je [global flags] "+st.Cmd("<command>")+" [flags]\n")
+
+	// Anything not placed in a group still has to appear: a command that is
+	// registered and undocumented is worse than an ugly help screen, and this
+	// is what catches the one somebody adds next year.
+	placed := map[string]bool{}
+	for _, g := range groups {
+		for _, n := range g.names {
+			placed[n] = true
 		}
-		fmt.Fprintf(tw, "  %s\t%s%s\n", name, commands[name].Usage, mark)
 	}
+	var ungrouped []string
+	for name := range commands {
+		if !placed[name] {
+			ungrouped = append(ungrouped, name)
+		}
+	}
+	sort.Strings(ungrouped)
+
+	// One table across every section rather than one per section: the usage
+	// column should line up down the whole screen, or the sections read as
+	// five small tables that nearly agree with each other.
+	local := false
+	tw := newTable(w)
+	section := func(title string, names []string) {
+		var rows []string
+		for _, name := range names {
+			if _, ok := commands[name]; ok {
+				rows = append(rows, name)
+			}
+		}
+		if len(rows) == 0 {
+			return
+		}
+		fmt.Fprintf(tw, "\n%s\n", st.Header(title))
+		for _, name := range rows {
+			cmd := commands[name]
+			mark := ""
+			if cmd.Local {
+				mark, local = " "+st.Muted("*"), true
+			}
+			fmt.Fprintf(tw, "  %s\t%s%s\n", st.Cmd(name), cmd.Usage, mark)
+		}
+	}
+	for _, g := range groups {
+		section(g.title, g.names)
+	}
+	section("other", ungrouped)
 	tw.Flush()
 
 	if local {
-		fmt.Fprint(w, "\n* acts on THIS MACHINE, not on the control plane wherever it is.\n"+
-			"  Everything else works the same against a control plane in a cluster.\n")
+		fmt.Fprint(w, "\n"+st.Muted(
+			"* acts on THIS MACHINE, not on the control plane wherever it is.\n"+
+				"  Everything else works the same against a control plane in a cluster.")+"\n")
 	}
 
-	fmt.Fprint(w, "\nglobal flags:\n")
+	fmt.Fprint(w, "\n"+st.Header("global flags")+"\n")
 	global.SetOutput(w)
 	global.PrintDefaults()
-	fmt.Fprint(w, "\nRun 'je help <command>' for detail.\n")
+	fmt.Fprint(w, "\nRun "+st.Cmd("je help <command>")+" for detail.\n")
+}
+
+// usageLine is the "usage: je runs [job]" line, with the argument shape held
+// back a shade: it is a placeholder, not something to type literally.
+//
+// A command that takes no arguments has no shape, and gluing an empty one on
+// leaves a trailing space that only shows up when somebody copies the line.
+func usageLine(cmd *Command, st Style) string {
+	line := st.Cmd("je " + cmd.Name)
+	if cmd.Args != "" {
+		line += " " + st.Muted(cmd.Args)
+	}
+	return line
 }
 
 // parseArgs parses a subcommand's flags and returns its positional arguments,
@@ -283,7 +382,8 @@ func newFlagSet(cmd *Command, env *Env) *flag.FlagSet {
 	fs := flag.NewFlagSet(cmd.Name, flag.ContinueOnError)
 	fs.SetOutput(env.Stderr)
 	fs.Usage = func() {
-		fmt.Fprintf(env.Stderr, "usage: je %s %s\n\n%s\n", cmd.Name, cmd.Args, cmd.Usage)
+		fmt.Fprintf(env.Stderr, "usage: %s\n\n%s\n",
+			usageLine(cmd, env.ErrStyle), cmd.Usage)
 		fs.PrintDefaults()
 	}
 	return fs
@@ -303,8 +403,9 @@ func truncate(s string, max int) string {
 // distinction once. It is deliberately specific about the failure it prevents:
 // the danger is not that these commands error on a split deployment, it is
 // that they succeed and change something other than what was meant.
-const localScopeNote = `THIS MACHINE ONLY.
-This acts on processes and files here -- not on the control plane if it is
+const localScopeTitle = "THIS MACHINE ONLY."
+
+const localScopeNote = `This acts on processes and files here -- not on the control plane if it is
 somewhere else. Against a split deployment (a control plane in a cluster, a
 worker on your laptop) it will do its work here and leave the rest untouched,
 which is rarely what you meant.

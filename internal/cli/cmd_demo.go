@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"fmt"
-	"text/tabwriter"
 
 	"github.com/jdmorlan/job-engine/internal/store"
 
@@ -117,25 +116,27 @@ func addDemo(ctx context.Context, env *Env, c *Client) error {
 		return fmt.Errorf("registering the examples: %w", err)
 	}
 
+	st := env.Style
 	fmt.Fprintf(env.Stdout, "registered %s/%s as %q", DemoRepo, DemoPath, DemoSource)
 	if result.Revision != "" {
-		fmt.Fprintf(env.Stdout, " at %s", shortRevision(result.Revision))
+		fmt.Fprintf(env.Stdout, " at %s", st.Muted(shortRevision(result.Revision)))
 	}
 	fmt.Fprintf(env.Stdout, "\n\n")
 
-	tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
+	tw := env.table()
 	for _, j := range demoJobs {
-		fmt.Fprintf(tw, "  %s/%s\t%s\t%s\n", DemoSource, j.slug, j.what, j.why)
+		fmt.Fprintf(tw, "  %s/%s\t%s\t%s\n", DemoSource, j.slug, j.what, st.Muted(j.why))
 	}
 	tw.Flush()
 
 	// Chains under their own heading rather than in the same table. A chain
 	// runs nothing itself, and a list that mixes the two would suggest it is
 	// just another job.
-	fmt.Fprintln(env.Stdout, "\nand one chain, which runs nothing itself:")
-	tw = tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(env.Stdout)
+	env.section("and one chain, which runs nothing itself", "")
+	tw = env.table()
 	for _, ch := range demoChains {
-		fmt.Fprintf(tw, "  %s/%s\t%s\n", DemoSource, ch.name, ch.what)
+		fmt.Fprintf(tw, "  %s/%s\t%s\n", DemoSource, ch.name, st.Muted(ch.what))
 	}
 	tw.Flush()
 
@@ -153,10 +154,10 @@ func removeDemo(ctx context.Context, env *Env, c *Client) error {
 	}
 	// Tombstoned, not deleted: the runs they produced keep a readable name
 	// (D22). Saying so beats implying the history went with them.
-	fmt.Fprintf(env.Stdout,
-		"unregistered %q; %d job(s) will no longer run.\n"+
-			"Their history is still there -- `je runs` keeps naming them.\n",
-		DemoSource, tombstoned)
+	fmt.Fprintf(env.Stdout, "unregistered %q; %d job(s) will no longer run.\n%s%s%s\n",
+		DemoSource, tombstoned,
+		env.Style.Muted("Their history is still there -- "),
+		env.Style.Cmd("je runs"), env.Style.Muted(" keeps naming them."))
 	return nil
 }
 
@@ -180,36 +181,56 @@ func shortRevision(rev string) string {
 // from a registered source. That is D22 working, and the tour should show it
 // rather than hide it behind an unqualified name that happens to resolve.
 func printDemoTour(env *Env) {
-	fmt.Fprint(env.Stdout, `
-First, start the engine. It is two components -- a control plane that decides
-what runs, and a worker that runs it -- so this starts both, in this terminal:
+	st := env.Style
 
-  je quickstart
+	// The tour used to be one raw string: four paragraphs, sixteen commands
+	// and their explanations, all in the same weight. It said the right things
+	// in the right order and it read as a page, which on somebody's first
+	// minute with the tool is the same as saying nothing. The content is
+	// unchanged; only the shape of it is.
+	steps := func(pairs ...[2]string) {
+		tw := env.table()
+		for _, p := range pairs {
+			fmt.Fprintf(tw, "  %s\t%s\n", st.Cmd(p[0]), st.Muted(p[1]))
+		}
+		tw.Flush()
+	}
 
-Then, in another terminal, try this in order:
+	fmt.Fprintln(env.Stdout)
+	env.section("first, start the engine", "")
+	fmt.Fprintln(env.Stdout, st.Muted(
+		"  It is two components -- a control plane that decides what runs, and a\n"+
+			"  worker that runs it -- plus a web client. This brings up all three."))
+	steps([2]string{"je up", ""})
 
-  je run demo/demo-hello         the loop: a command, its output, an exit code
-  je run demo/demo-counter       then run it again, and watch the cursor move
-  je run demo/demo-flaky         run it a few times; some fail, some do not
-  je state history demo/demo-flaky   the cursor moved only on the runs that worked
-  je runs                        what happened, and when
-  je waiting                     what has not happened yet
-  je workers                     what is attached, and what it can run
-  je source                      where these came from, and at which commit
+	fmt.Fprintln(env.Stdout)
+	env.section("then try these", "in order")
+	steps(
+		[2]string{"je run demo/demo-hello", "the loop: a command, its output, an exit code"},
+		[2]string{"je run demo/demo-counter", "then run it again, and watch the cursor move"},
+		[2]string{"je run demo/demo-flaky", "run it a few times; some fail, some do not"},
+		[2]string{"je state history demo/demo-flaky", "the cursor moved only on the runs that worked"},
+		[2]string{"je runs", "what happened, and when"},
+		[2]string{"je waiting", "what has not happened yet"},
+		[2]string{"je workers", "what is attached, and what it can run"},
+		[2]string{"je source", "where these came from, and at which commit"},
+	)
 
-Leave it alone for a couple of minutes, then:
+	fmt.Fprintln(env.Stdout)
+	env.section("leave it alone for a couple of minutes", "")
+	steps([2]string{"je runs demo/demo-tick", "the scheduler fired it without you"})
 
-  je runs demo/demo-tick         the scheduler fired it without you
+	fmt.Fprintln(env.Stdout)
+	env.section("then the part other job engines do not have", "")
+	steps(
+		[2]string{"je run demo/demo-ingest", "one command, and watch what follows it"},
+		[2]string{"je chains", "the flows, and how the last pass went"},
+		[2]string{"je chain demo-pipeline", "every step, and how long the whole thing took"},
+		[2]string{"je events", "the same story as raw events, with causation"},
+	)
 
-Then the part other job engines do not have:
-
-  je run demo/demo-ingest        one command, and watch what follows it
-  je chains                      the flows, and how the last pass went
-  je chain demo-pipeline         every step, and how long the whole thing took
-  je events                      the same story as raw events, with causation
-
-Remove all of it with: je demo --remove
-`)
+	fmt.Fprintf(env.Stdout, "\n%s%s\n",
+		st.Muted("Remove all of it with:  "), st.Cmd("je demo --remove"))
 }
 
 // demoRef pins the examples to this binary's release, or tracks the default

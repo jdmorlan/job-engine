@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"text/tabwriter"
 	"time"
 
 	"github.com/jdmorlan/job-engine/internal/store"
@@ -69,12 +68,13 @@ func runState(ctx context.Context, env *Env, args []string) error {
 				fmt.Fprintf(env.Stdout, "%s has no cursor yet\n", slug)
 				return nil
 			}
-			tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
+			tw := env.table()
 			for _, v := range versions {
-				fmt.Fprintf(tw, "v%d\t%s\t%s\t%s -> %s\n",
-					v.Version,
-					v.CreatedAt.Local().Format(time.DateTime),
-					stateAuthor(v),
+				st := env.Style
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s -> %s\n",
+					st.Header(fmt.Sprintf("v%d", v.Version)),
+					st.Muted(v.CreatedAt.Local().Format(time.DateTime)),
+					st.Muted(stateAuthor(v)),
 					def.State.PrimaryCursor,
 					v.Summary(def.State.PrimaryCursor))
 			}

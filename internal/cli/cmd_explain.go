@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
-	"text/tabwriter"
 )
 
 func init() {
@@ -41,7 +40,8 @@ func runExplain(ctx context.Context, env *Env, args []string) error {
 			return err
 		}
 
-		fmt.Fprintf(env.Stdout, "%s", x.Slug)
+		st := env.Style
+		fmt.Fprintf(env.Stdout, "%s", st.Title(x.Slug))
 		if x.DisplayName != "" {
 			fmt.Fprintf(env.Stdout, "  %s", x.DisplayName)
 		}
@@ -49,10 +49,10 @@ func runExplain(ctx context.Context, env *Env, args []string) error {
 		if x.Description != "" {
 			fmt.Fprintf(env.Stdout, "%s\n", x.Description)
 		}
-		fmt.Fprintf(env.Stdout, "%s\n\n", x.FilePath)
+		fmt.Fprintf(env.Stdout, "%s\n\n", st.Muted(x.FilePath))
 
 		file := filepath.Base(x.FilePath)
-		tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
+		tw := env.table()
 		for _, f := range x.Fields {
 			// The provenance column is the entire point of this view, so it is
 			// never blank: every value is either something you wrote at a line
@@ -61,14 +61,22 @@ func runExplain(ctx context.Context, env *Env, args []string) error {
 			if f.Declared() {
 				origin = fmt.Sprintf("(%s:%d)", file, f.Line)
 			}
-			fmt.Fprintf(tw, "  %s\t%s\t%s\n", f.Field, f.Value, origin)
+			// A value you set and a value you inherited are different kinds of
+			// fact, and this view exists to tell them apart. Dimming the
+			// inherited ones makes what the file actually says legible at a
+			// glance, which is the question that brought you here.
+			value, origin := f.Value, st.Muted(origin)
+			if !f.Declared() {
+				value = st.Muted(value)
+			}
+			fmt.Fprintf(tw, "  %s\t%s\t%s\n", st.Header(f.Field), value, origin)
 		}
 		for _, s := range x.Secrets {
-			status := "NOT SET -- this job will not run"
+			status := st.Bad("NOT SET -- this job will not run")
 			if s.Set {
-				status = "set"
+				status = st.Good("set")
 			}
-			fmt.Fprintf(tw, "  secret %s\t%s\n", s.Name, status)
+			fmt.Fprintf(tw, "  %s\t%s\n", st.Header("secret "+s.Name), status)
 		}
 		if err := tw.Flush(); err != nil {
 			return err
@@ -79,19 +87,21 @@ func runExplain(ctx context.Context, env *Env, args []string) error {
 			// Not a footnote. A job nothing starts is a job that only runs when
 			// you type its name, and that is worth saying out loud rather than
 			// leaving as an empty section somebody has to notice.
-			fmt.Fprintln(env.Stdout, "nothing starts this job automatically")
-			fmt.Fprintf(env.Stdout, "  je run %s   to run it now\n", x.Slug)
+			env.section("nothing starts this job automatically", "")
+			fmt.Fprintf(env.Stdout, "  %s   %s\n",
+				st.Cmd("je run "+x.Slug), st.Muted("to run it now"))
 		} else {
-			fmt.Fprintln(env.Stdout, "starts when")
-			tw = tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
+			env.section("starts when", "")
+			tw = env.table()
 			for _, t := range x.Triggers {
 				switch t.Kind {
 				case "schedule":
-					fmt.Fprintf(tw, "  %s\tcatch_up: %s\t%s\n",
-						t.Schedule, t.CatchUp, filepath.Base(t.File))
+					fmt.Fprintf(tw, "  %s\t%s\t%s\n", t.Schedule,
+						st.Muted("catch_up: "+t.CatchUp), st.Muted(filepath.Base(t.File)))
 				default:
-					fmt.Fprintf(tw, "  %s\tchain %s step %d\t%s\n",
-						t.Match, t.Chain, t.Step, filepath.Base(t.File))
+					fmt.Fprintf(tw, "  %s\t%s\t%s\n", t.Match,
+						st.Muted(fmt.Sprintf("chain %s step %d", t.Chain, t.Step)),
+						st.Muted(filepath.Base(t.File)))
 				}
 			}
 			if err := tw.Flush(); err != nil {
@@ -101,7 +111,7 @@ func runExplain(ctx context.Context, env *Env, args []string) error {
 
 		if x.Problem != "" {
 			// Last, because it is what you should still be looking at.
-			fmt.Fprintf(env.Stdout, "\nthis job cannot run: %s\n", x.Problem)
+			fmt.Fprintf(env.Stdout, "\n%s %s\n", st.Bad("this job cannot run:"), x.Problem)
 			return errAttention
 		}
 		return nil
