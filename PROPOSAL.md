@@ -205,6 +205,7 @@ architecture), **D16** (daemon lifecycle and generic event ingress).
 | D26 | Machine-scoped commands | **NEW (v0.8) — shipped** |
 | D27 | Only repositories are sources | **NEW (v0.8) — shipped** |
 | D28 | Runtimes and dependency preparation | **NEW (v0.8) — shipped** |
+| D29 | `je build`: a worker image from a jobs repo | **NEW (v0.10) — proposed, undecided** |
 | N1 | Non-goals | AGREED |
 | N2 | v1 done | AGREED |
 | Q1 | Storage adapters | AGREED — SQLite only, no adapter |
@@ -4312,6 +4313,205 @@ runtimes` moved python from "not installed" to "ready". A Python job from a
 repository then ran: `uv sync --frozen` from its lockfile, `python` resolved out
 of the resulting `.venv/bin`, and the job printed a value `humanize` computed.
 The TypeScript path was verified the same way earlier.
+
+### D29. `je build`: a worker image from a jobs repository — NEW
+
+**Status:** NEW (v0.10) — **proposed, undecided**
+
+> *"I wonder if the CLI could help build a docker worker... we already know
+> things about the toolchain and we already help manage a worker (job
+> definition/code) repo... would it not be possible for us to provide a build
+> like command that could take the current repo and produce a docker image based
+> on it? We already have this concept that a repo is language bound it seems...
+> and even if had multiple languages a Docker image would be able to handle that
+> I'm sure."*
+
+#### Most of this is already written, in D28's table
+
+The instinct is right about where the knowledge lives. D28 made a language a row
+of data rather than a module, and those rows contain nearly everything a worker
+image needs. Per language, `toolchain.Toolchain` holds the single tool that must
+be on PATH (`pnpm`, `uv`, `go`), the manifest and lockfile, the ecosystem's own
+frozen-install command, and the `BinDir` to prepend afterwards. `toolchain.Recipe`
+adds a **pinned, checksum-verified** download for that tool, with the OS and
+architecture names already translated for linux/amd64 and linux/arm64.
+
+Laid against a Dockerfile, the correspondence is close to total:
+
+```dockerfile
+FROM <base for this language>
+RUN <Recipe: fetch uv 0.5.11, verify against its published sha256>
+COPY . /jobs
+WORKDIR /jobs/<tree>
+RUN uv sync --frozen                       # Toolchain.Install, verbatim
+ENV PATH=/jobs/<tree>/.venv/bin:$PATH      # Toolchain.BinDir
+ENTRYPOINT ["/je", "worker", "run"]
+```
+
+Every value on those lines is data the engine already carries, and `je worker
+runtime install` already executes the fetch-and-verify half against the same
+recipes. This would not be a new mechanism so much as pointing an existing one
+at a build context.
+
+**One gap the table already admits.** `recipes` covers `uv` and `pnpm` (the
+latter through Node, because pnpm's own releases publish no checksum). There is
+no recipe for `go`, so `RecipeFor("go")` returns the "no verified way to install
+it" error by design. A Go worker image therefore needs a base that already has a
+Go toolchain, rather than a `RUN` line this command can generate. That is not an
+obstacle; it is the same honesty the install command already has, and it means
+the base image is per-language input rather than something to infer.
+
+#### The premise to correct, and it helps
+
+A repository is **not** language-bound. `language:` is a per-job field on
+`jobdef.Definition`, declared in each `job.yaml` and validated at load; nothing
+attaches a language to a source. D28's preparation is likewise per *tree*:
+`prepare(ctx, language, tree)` installs in the dispatched source tree and returns
+early when that tree has no manifest at all, because a one-file script with
+nothing to install is an ordinary job.
+
+So there is nothing to undo. `je build` would read the repository's jobs, collect
+the distinct set of languages, and emit one layer per toolchain and one install
+per tree that has a manifest. Multi-language is not a special case to handle; it
+is what falls out of walking a table whose rows are independent. The intuition
+that "a Docker image would be able to handle that" is right, and cheaper than
+expected for exactly the reason D28 was cheaper than expected.
+
+#### The fork that decides whether this is coherent
+
+**Does the image carry the job code, or only the environment it needs?**
+
+*Option A — environment only.* The image is a toolchain and its installed
+dependencies. The control plane still fetches definitions from the repository at
+a commit; the worker still receives a tree. The image answers "what does this
+code need in order to run", and nothing else.
+
+The tag for this already exists. `prepareKey` is
+`sha256(language, tool version, lockfile)`, and the comment above it states the
+property outright: two trees with the same lockfile need the same install,
+whatever commit they came from. That is an image cache key written a release
+early. Rebuild when the lockfile or the pinned tool version moves; otherwise the
+existing image is provably the right one.
+
+*Option B — code included.* Faster, self-contained, and one artifact to ship.
+It also creates a second source of truth for the same job. D27 says only
+repositories are sources and D22 has the control plane read them; D11 wants a run
+to say what it ran under. An image carrying a copy of the code can disagree with
+the commit the control plane loaded, and nothing in the system would notice —
+the run would report a definition version that did not produce the bytes that
+executed.
+
+**Recommendation: A.** It keeps one answer to "where does this job's code come
+from", it has a cache key already designed for it, and it makes the image a thing
+that changes on the cadence of dependencies rather than the cadence of edits —
+which is the whole reason to build an image at all.
+
+#### The hard problem is C10
+
+Today's argument for the single image is in the Dockerfile: one artifact, one
+version, so the skew D24 refuses "cannot arise by accident in a deployment that
+pulls one tag". A built worker image breaks that pairing. It would carry a `je`
+binary alongside dependencies that move on a completely different schedule, and
+the moment `je upgrade` lands a new control plane, every built image is stale and
+C10 correctly refuses it. That is the real cost of this feature, and it is worth
+being clear that it is a coherence problem rather than a packaging one.
+
+Two ways out:
+
+1. **Bake `je` in, and make `je build` part of upgrading.** `je upgrade` already
+   knows how to restart containerised components; it would also need to rebuild
+   and re-push images it did not necessarily create, on registries it may not be
+   able to write to. This keeps the image self-contained and makes upgrade a
+   distributed operation, which is a large change to a command that is currently
+   local.
+
+2. **Do not bake it in.** The image is purely a toolchain layer; the `je` binary
+   arrives at start, the way it already does for every other component that pulls
+   one tag. There stays exactly one artifact for the engine, and the built image
+   has no version of the engine in it to be wrong.
+
+**Recommendation: 2**, on the same reasoning as Option A above. Both choices push
+in one direction: the built image should describe an *environment*, and nothing
+about the engine or the code. Everything that has a version the control plane
+cares about stays in the one artifact that already has one.
+
+#### What this contradicts, and should not do quietly
+
+The Dockerfile currently states the opposite position:
+
+> *"a worker that runs Python jobs needs a Python image with /je copied in --
+> that is the job author's concern, and it is only expressible at all because the
+> control plane never runs anybody's code."*
+
+Adopting D29 moves that concern into the engine. It is defensible, and it is the
+same argument that produced `je up`: the default way to deploy this should not be
+homework, and a capability the CLI can generate correctly is a bad thing to leave
+as a documented exercise. But it is a reversal, and it should be recorded as one
+rather than arrived at by drift. If D29 is accepted, that comment changes with it.
+
+`FROM scratch` also goes, for built images only. The engine's own image stays as
+it is — it is right for the control plane and for the system worker, whose jobs
+are the engine's own.
+
+#### Why it fits the grain
+
+The reproducibility this would need is already the house style rather than
+something to add. Recipes pin a version instead of resolving one, and refuse to
+install anything without a published checksum. Every install command in the table
+is the ecosystem's frozen mode, chosen so that a job cannot quietly change its
+dependencies between two runs of the same commit. A built image inherits all of
+it: same pinned tool, same verified download, same lockfile, therefore the same
+image. That is a stronger guarantee than most hand-written worker Dockerfiles
+manage, and the engine gets it for free from decisions already made.
+
+It also turns an existing diagnostic into an action. `je waiting` already reports
+work queued for a language nothing can prepare:
+
+```console
+WAITING FOR A RUNTIME  (queued for a language no worker can prepare)
+  language: typescript
+    3 run(s), jobs: house/ingest
+    on a worker that should run these:  je worker runtime install typescript
+```
+
+The advice there assumes a machine you can install onto. With D29 the same
+condition has a second answer for the deployments that do not have one.
+
+#### Not in scope
+
+- **The native worker stays primary.** D20's motivating case — a job driving
+  Shortcuts on a Mac — cannot go in a container, and nothing here changes that.
+  This is an additional shape, not a replacement, and `je up` should keep
+  installing a native worker by default for the reason it already does: the
+  published image is `FROM scratch`, so a container worker runs only jobs that
+  need nothing but themselves.
+- **Not a general-purpose image builder.** If somebody needs a base with system
+  packages, a private registry, or a build step of their own, that is a
+  Dockerfile they write. This generates the case the engine can be sure about.
+
+#### Open questions
+
+1. **Environment-only or code-included** — Option A or B above. Everything else
+   follows from this.
+2. **Where does the base image come from?** Per-language default (`python:3.12-slim`),
+   or required input? A default is friendlier and is one more thing to keep
+   current; Go needs one regardless, since it has no install recipe.
+3. **Does `je build` push?** Building locally is useful on its own; a worker
+   image that never leaves the machine that built it is not. If it pushes, the
+   registry becomes configuration the engine has to hold.
+4. **How does a worker say which image it wants?** Today a worker advertises the
+   runtimes it found. A built image inverts that — the image *is* the answer —
+   and `runs_on` labels may be the right place, or may not.
+5. **Is it `je build` at all**, or `je worker image build`? The former reads like
+   the repo's own build command, which it is; the latter groups it with the
+   component it produces.
+
+**Your response:**
+
+```
+
+
+```
 
 ## Part 6 — Scope
 
