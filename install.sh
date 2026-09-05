@@ -7,7 +7,7 @@
 # SHA-256, and puts it somewhere on your PATH. Nothing else: nothing is
 # started, nothing is added to your shell config, and no directory outside the
 # install location is touched. Starting the engine is a separate, explicit
-# step -- `je quickstart` to try it, `docker compose up -d` to keep it running.
+# step -- `je up` brings up a control plane, a worker and the web client.
 #
 # Environment:
 #   JE_VERSION      release tag to install (default: latest)

@@ -214,7 +214,7 @@ func (e *Engine) Renew(ctx context.Context, name string, publicKeyPEM []byte) (c
 // The trust anchor is the filesystem: the directory it lands in is 0700 and
 // already contains the CA private key, so a process that can read the token
 // could sign its own certificates anyway. Recognising that is what removes the
-// setup step from `je quickstart` and `docker compose up` without inventing a
+// setup step from `je up` and `docker compose up` without inventing a
 // weaker rule to justify it.
 func (e *Engine) BootstrapToken() (string, error) {
 	if _, err := e.Authority(); err != nil {

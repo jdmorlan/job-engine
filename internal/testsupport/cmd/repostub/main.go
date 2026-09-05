@@ -7,7 +7,7 @@
 // for a real GitHub repo to test a local change is a poor loop.
 //
 //	repostub you/house ./my-jobs
-//	je quickstart --github-api <the URL it prints>
+//	je up --foreground --github-api <the URL it prints>
 package main
 
 import (

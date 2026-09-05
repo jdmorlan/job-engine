@@ -348,7 +348,7 @@ func TestARunningWorkerRenewsItselfUnattended(t *testing.T) {
 
 // A worker on the control plane's own machine gets an identity with nobody
 // asked for anything -- which is what has to be true before certificates can be
-// required at all, since `je quickstart` and `docker compose up` must stay at
+// required at all, since `je up` and `docker compose up` must stay at
 // zero extra steps (D25).
 func TestALocalWorkerEnrollsItselfFromTheDataDirectory(t *testing.T) {
 	_, layout := startTLSDaemon(t)

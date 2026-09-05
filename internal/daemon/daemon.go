@@ -172,6 +172,17 @@ func Run(ctx context.Context, cfg Config) error {
 	if name, err := os.Hostname(); err == nil && name != "" {
 		hosts = append(hosts, name)
 	}
+	// The name a container reaches this host by, for the reverse arrangement:
+	// a control plane running natively with something containerised talking to
+	// it. `je up` produces exactly that -- a native control plane and a
+	// containerised web client -- and without this the client resolves the
+	// host, connects, and fails to verify a certificate that is valid for
+	// every name except the one it used.
+	//
+	// It costs a name on a self-issued certificate and resolves nowhere except
+	// on a host running Docker Desktop, which is the same trade as the line
+	// above: cheaper than a flag nobody knows to pass.
+	hosts = append(hosts, "host.docker.internal")
 	tlsConfig, err := authority.ServerTLS(hosts)
 	if err != nil {
 		ln.Close()

@@ -150,6 +150,25 @@ func refusePlaintext(l paths.Layout) error {
 // container that mounts only the bootstrap volume has the third.
 func authorityPath(l paths.Layout) (string, error) {
 	candidates := []string{l.CACert(), l.IdentityCA(), l.BootstrapCA()}
+
+	// Which authority is right depends on where the control plane is, and the
+	// endpoint file already records that.
+	//
+	// CACert is the CA directory a control plane running natively on this
+	// machine generates and owns, so it belongs at the front -- unless the
+	// control plane here is a container, in which case that directory was left
+	// behind by one that no longer exists, and preferring it means verifying a
+	// live control plane against a dead one's authority. The failure is
+	// especially bad because everything looks healthy: the container is up and
+	// answering, and every command fails with a certificate error naming an
+	// authority the reader has never heard of.
+	//
+	// Reordering rather than skipping: a container that has gone away should
+	// still leave the machine able to fall back to whatever it has.
+	if e, err := ReadEndpoint(l.Endpoint()); err == nil && e.Kind == "docker" {
+		candidates = []string{l.IdentityCA(), l.BootstrapCA(), l.CACert()}
+	}
+
 	for _, path := range candidates {
 		if _, err := os.Stat(path); err == nil {
 			return path, nil
@@ -196,6 +215,31 @@ func adoptContainerAuthority(l paths.Layout) error {
 		return err
 	}
 	return copyAuthorityFrom(ctx, name, l.IdentityCA())
+}
+
+// adoptContainerAuthorityWithin is adoptContainerAuthority, waiting for the
+// container to have written its CA.
+//
+// `docker run` returns as soon as the container is started, which is before the
+// control plane inside it has generated an authority -- so a single attempt
+// immediately after starting one loses a race it will usually lose. Polled
+// rather than slept, so the common case costs one copy.
+func adoptContainerAuthorityWithin(ctx context.Context, l paths.Layout, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var last error
+	for {
+		if last = adoptContainerAuthority(l); last == nil {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return last
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
 }
 
 // controlPlaneContainer is what this data directory's control plane container

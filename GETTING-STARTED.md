@@ -22,18 +22,23 @@ matters later, and not yet.
 ## 2. Start it (1 minute)
 
 ```console
-$ je quickstart
-je: control plane on 127.0.0.1:7620, one worker attached (default)
-    try:  je jobs        in another terminal
-          je run <job>
+$ je up
+
+control plane  running as a container   127.0.0.1:7620
+worker         registered as a service  default
+web            running as a container   http://127.0.0.1:7621
 ```
 
-Leave that running and open a second terminal. Everything below happens there.
+Three things just started: a **control plane**, which decides what should run
+and remembers what did; a **worker**, which actually runs it; and a **web
+client**, which is another way to look at the same thing. They talk over HTTPS
+with certificates the control plane issued itself — you will never see that
+unless something breaks.
 
-Two things just started: a **control plane**, which decides what should run and
-remembers what did, and a **worker**, which actually runs it. They talk over
-HTTPS with certificates the control plane issued itself — you will never see
-that unless something breaks.
+None of it is tied to this terminal. It survives a reboot, and `je down` stops
+all of it without touching your data. If you would rather watch the two halves
+interact in the foreground instead, `je up --foreground` does that and
+registers nothing.
 
 ```console
 $ je status

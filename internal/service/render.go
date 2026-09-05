@@ -111,6 +111,15 @@ func unitFile(cfg Config) string {
 	return b.String()
 }
 
+// CommandLine is the exact argv a service manager will run, for a caller that
+// wants to show it rather than run it.
+//
+// Exported so that `--print` shows the real thing. A CLI that describes the
+// install by rebuilding the argv itself is two implementations of the same
+// sentence, and the printed one would be the one nobody notices has gone
+// wrong -- which is the whole failure this function exists to prevent.
+func CommandLine(cfg Config) []string { return commandLine(cfg) }
+
 // commandLine is the exact argv a service manager will run.
 //
 // One function for both platforms because the argv is the part that has to be

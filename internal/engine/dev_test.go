@@ -149,7 +149,7 @@ func TestRegisteringADirectoryTheControlPlaneCannotSeeIsRefused(t *testing.T) {
 	if err == nil {
 		t.Fatal("a directory that does not exist was accepted")
 	}
-	if !strings.Contains(err.Error(), "quickstart") {
+	if !strings.Contains(err.Error(), "je up") {
 		t.Errorf("the refusal does not name the fix: %v", err)
 	}
 }

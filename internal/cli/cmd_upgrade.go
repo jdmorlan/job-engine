@@ -473,7 +473,7 @@ func serviceInstalled(c service.Component) bool {
 // restartYourself is what to do about a control plane running in somebody's
 // terminal, which is: tell them, because only they can.
 //
-// Not an error. It is the ordinary shape while developing -- `je quickstart` in
+// Not an error. It is the ordinary shape while developing -- `je up --foreground` in
 // one window, `make install` in another -- and a command that failed there
 // would be failing at the thing working correctly.
 func restartYourself(pid int) func(context.Context, *Env, string) error {

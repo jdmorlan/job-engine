@@ -90,7 +90,7 @@ func webTarget(env *Env, flag string) (*url.URL, error) {
 	if addr == "" {
 		resolved, err := resolveAddr(env.Layout)
 		if err != nil {
-			return nil, adviseNoControlPlane(err)
+			return nil, adviseNoControlPlane(env, err)
 		}
 		addr = resolved
 	}
@@ -184,6 +184,26 @@ func startWebContainer(ctx context.Context, env *Env, addr string, base *url.URL
 		ports:     []string{host + ":" + port + ":" + port},
 		network:   network,
 	}
+
+	// The authority, mounted in. Without it this container starts, fails to
+	// verify the control plane, and restarts forever.
+	//
+	// D25 made HTTPS the only transport and the web client is a client like any
+	// other: it presents nothing, but it still has to know it is talking to the
+	// right control plane. It holds no state and therefore has no data
+	// directory of its own to have been given one -- so the file has to come
+	// from the host that already has it. Read-only, and a single file: the
+	// warning about bind mounts is about SQLite, and this is a certificate.
+	if !printOnly {
+		ca, err := authorityPath(env.Layout)
+		if err != nil {
+			return err
+		}
+		// The image's JE_DATA_DIR is /var/lib/je, and this is where a client
+		// looks for an adopted authority inside it.
+		spec.volumes = []string{ca + ":/var/lib/je/ca.crt:ro"}
+	}
+
 	if printOnly {
 		fmt.Fprintln(env.Stdout, spec)
 		return nil
@@ -194,7 +214,61 @@ func startWebContainer(ctx context.Context, env *Env, addr string, base *url.URL
 	if err := spec.start(ctx); err != nil {
 		return err
 	}
+
+	// Verified, like the other two components. `docker run` returning proves
+	// the daemon accepted a container, which is not the same as there being a
+	// web client to open -- and this one has a way of crash-looping that looks
+	// identical to success from the outside.
+	if err := waitForWeb(ctx, host, port); err != nil {
+		return fmt.Errorf("started, but it is not serving: %w\n  docker logs %s   has why",
+			err, containerName("web"))
+	}
+
 	fmt.Fprintf(env.Stdout, "web client running at http://%s:%s\n", host, port)
 	fmt.Fprintln(env.Stdout, "\nstop it with: je web stop")
 	return nil
+}
+
+// waitForWeb polls until the client can reach the control plane, or gives up.
+//
+// Through the API rather than at `/`, and the difference is the whole value of
+// the check. The web client serves its own assets out of the binary, so `/`
+// returns 200 from a container that cannot reach the control plane at all --
+// which is precisely the failure worth catching, and it looks like success from
+// every angle except a browser with the page open.
+func waitForWeb(ctx context.Context, host, port string) error {
+	deadline := time.Now().Add(20 * time.Second)
+	url := "http://" + net.JoinHostPort(host, port) + "/v1/health"
+	client := &http.Client{Timeout: 2 * time.Second}
+
+	var last error
+	for time.Now().Before(deadline) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return err
+		}
+		resp, err := client.Do(req)
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode < 400 {
+				return nil
+			}
+			// A proxy error, which is what a client that cannot verify or
+			// reach the control plane produces.
+			last = fmt.Errorf("it is serving, but cannot reach the control plane (HTTP %d)",
+				resp.StatusCode)
+		} else {
+			last = err
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+	if last == nil {
+		last = errors.New("it did not start answering")
+	}
+	return last
 }

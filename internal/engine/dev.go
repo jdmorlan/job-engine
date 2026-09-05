@@ -49,7 +49,7 @@ func (e *Engine) RegisterDev(ctx context.Context, dir string) (LoadResult, error
 		return LoadResult{}, fmt.Errorf(
 			"%w: %s.\n"+
 				"`je dev` runs the definitions in a directory, so the control plane has "+
-				"to be on the machine holding them -- try `je quickstart` here",
+				"to be on the machine holding them -- try `je up` here",
 			ErrNotLocal, abs)
 	}
 

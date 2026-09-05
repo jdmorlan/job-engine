@@ -242,7 +242,7 @@ const (
 
 	// DefaultRunsOn is the label a job needs when it does not say (D20/C3).
 	// It must match store.DefaultLabel and the label the system worker
-	// advertises; the demo jobs and `je quickstart` both rely on it.
+	// advertises; the demo jobs and `je up` both rely on it.
 	DefaultRunsOn = "default"
 )
 

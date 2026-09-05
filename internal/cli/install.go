@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"text/tabwriter"
 	"time"
 
 	"github.com/jdmorlan/job-engine/internal/service"
@@ -41,6 +40,14 @@ type installPlan struct {
 	// nextStep is printed last: the thing the person still has to do. Empty
 	// when they are done.
 	nextStep string
+
+	// printOnly describes the registration instead of performing it.
+	//
+	// It was missing here while the container path had it, which meant
+	// `--print` on a native install quietly did the install: the flag was
+	// accepted, ignored, and the machine changed. A flag whose entire promise
+	// is "and do nothing" has to be honoured on every path it is accepted on.
+	printOnly bool
 }
 
 // installComponent registers a component and proves it works.
@@ -74,14 +81,29 @@ func installComponent(ctx context.Context, env *Env, plan installPlan) error {
 		Path: os.Getenv("PATH"),
 	}
 
+	if plan.printOnly {
+		// The same auditability the container path offers: everything the CLI
+		// would do, in a form you could have done yourself.
+		st := env.Style
+		tw := env.table()
+		fmt.Fprintf(tw, "%s\t%s with %s\n", st.Header("would register"),
+			plan.component, mgr.Name())
+		fmt.Fprintf(tw, "%s\t%s\n", st.Header("unit"), st.Muted(mgr.UnitPath()))
+		fmt.Fprintf(tw, "%s\t%s\n", st.Header("command"),
+			strings.Join(service.CommandLine(cfg), " "))
+		fmt.Fprintf(tw, "%s\t%s\n", st.Header("log"), st.Muted(logPath))
+		return tw.Flush()
+	}
+
 	if err := mgr.Install(cfg); err != nil {
 		return err
 	}
 
-	tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintf(tw, "registered\t%s with %s\n", plan.component, mgr.Name())
-	fmt.Fprintf(tw, "unit\t%s\n", mgr.UnitPath())
-	fmt.Fprintf(tw, "log\t%s\n", logPath)
+	st := env.Style
+	tw := env.table()
+	fmt.Fprintf(tw, "%s\t%s with %s\n", st.Header("registered"), plan.component, mgr.Name())
+	fmt.Fprintf(tw, "%s\t%s\n", st.Header("unit"), st.Muted(mgr.UnitPath()))
+	fmt.Fprintf(tw, "%s\t%s\n", st.Header("log"), st.Muted(logPath))
 	if err := tw.Flush(); err != nil {
 		return err
 	}
@@ -90,13 +112,13 @@ func installComponent(ctx context.Context, env *Env, plan installPlan) error {
 	// service manager accepted a file; it proves nothing about the engine.
 	if plan.verify != nil {
 		if err := plan.verify(ctx); err != nil {
-			fmt.Fprintf(env.Stderr,
-				"\nregistered, but it is not working yet:\n  %v\n\n"+
-					"  %s   has what it said on the way up\n",
-				err, logPath)
+			fmt.Fprintf(env.Stderr, "\n%s\n  %v\n\n  %s   %s\n",
+				env.ErrStyle.Bad("registered, but it is not working yet:"), err,
+				env.ErrStyle.Muted(logPath),
+				env.ErrStyle.Muted("has what it said on the way up"))
 			return errAttention
 		}
-		fmt.Fprintln(env.Stdout, "\nverified: it is running and answering.")
+		fmt.Fprintf(env.Stdout, "\n%s\n", st.Good("verified: it is running and answering."))
 	}
 
 	if plan.nextStep != "" {
@@ -111,15 +133,17 @@ func installComponent(ctx context.Context, env *Env, plan installPlan) error {
 // container of that name is running would be a confident lie -- and the whole
 // argument for these commands is that a deployment should be legible.
 func componentStatus(ctx context.Context, env *Env, c service.Component) error {
-	tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
+	tw := env.table()
 
+	st := env.Style
 	if containerExists(ctx, string(c)) {
-		fmt.Fprintf(tw, "%s\trunning as a container\n", c)
-		fmt.Fprintf(tw, "container\t%s\n", containerName(string(c)))
+		fmt.Fprintf(tw, "%s\t%s\n", st.Header(string(c)), st.Good("running as a container"))
+		fmt.Fprintf(tw, "%s\t%s\n", st.Header("container"), containerName(string(c)))
 		if endpoint, err := ReadEndpoint(env.Layout.Endpoint()); err == nil && endpoint.Address != "" {
-			fmt.Fprintf(tw, "reachable at\t%s\n", endpoint.Address)
+			fmt.Fprintf(tw, "%s\t%s\n", st.Header("reachable at"), endpoint.Address)
 		}
-		fmt.Fprintf(tw, "logs\tdocker logs -f %s\n", containerName(string(c)))
+		fmt.Fprintf(tw, "%s\t%s\n", st.Header("logs"),
+			st.Cmd("docker logs -f "+containerName(string(c))))
 		return tw.Flush()
 	}
 
@@ -133,24 +157,27 @@ func componentStatus(ctx context.Context, env *Env, c service.Component) error {
 	}
 
 	if !state.Installed {
-		fmt.Fprintf(tw, "%s\tnot set up here\n", c)
+		fmt.Fprintf(tw, "%s\t%s\n", st.Header(string(c)), st.Muted("not set up here"))
 		if err := tw.Flush(); err != nil {
 			return err
 		}
-		fmt.Fprintf(env.Stdout, "\nSet it up:  je %s %s\n", c, registerVerb(c))
+		fmt.Fprintf(env.Stdout, "\n%s  %s\n", st.Muted("Set it up:"),
+			st.Cmd(fmt.Sprintf("je %s %s", c, registerVerb(c))))
 		return nil
 	}
-	fmt.Fprintf(tw, "%s\tregistered with %s\n", c, mgr.Name())
-	fmt.Fprintf(tw, "unit\t%s\n", state.UnitPath)
+	fmt.Fprintf(tw, "%s\tregistered with %s\n", st.Header(string(c)), mgr.Name())
+	fmt.Fprintf(tw, "%s\t%s\n", st.Header("unit"), st.Muted(state.UnitPath))
 	if state.PID > 0 {
-		fmt.Fprintf(tw, "running\tpid %d\n", state.PID)
+		fmt.Fprintf(tw, "%s\t%s\n", st.Header("running"),
+			st.Good(fmt.Sprintf("pid %d", state.PID)))
 	} else {
 		// Registered but not running is the interesting failure, so it is
 		// stated as one rather than left as an absent row.
-		fmt.Fprintf(tw, "running\tno -- registered but not up\n")
+		fmt.Fprintf(tw, "%s\t%s\n", st.Header("running"),
+			st.Bad("no -- registered but not up"))
 	}
 	if state.Detail != "" {
-		fmt.Fprintf(tw, "detail\t%s\n", state.Detail)
+		fmt.Fprintf(tw, "%s\t%s\n", st.Header("detail"), st.Muted(state.Detail))
 	}
 	return tw.Flush()
 }
@@ -335,6 +362,7 @@ func joinWorker(ctx context.Context, env *Env, j workerJoin) error {
 		args:      args,
 		verify:    verify,
 		nextStep:  next,
+		printOnly: j.mode.printOnly,
 	})
 }
 
@@ -454,14 +482,16 @@ func runDockerInstall(
 		}
 	}
 
-	tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintf(tw, "started\t%s as a container\n", spec.component)
-	fmt.Fprintf(tw, "container\t%s\n", containerName(spec.component))
-	fmt.Fprintf(tw, "image\t%s\n", spec.image)
+	st := env.Style
+	tw := env.table()
+	fmt.Fprintf(tw, "%s\t%s as a container\n", st.Header("started"), spec.component)
+	fmt.Fprintf(tw, "%s\t%s\n", st.Header("container"), containerName(spec.component))
+	fmt.Fprintf(tw, "%s\t%s\n", st.Header("image"), st.Muted(spec.image))
 	if endpoint != "" {
-		fmt.Fprintf(tw, "reachable at\t%s\n", endpoint)
+		fmt.Fprintf(tw, "%s\t%s\n", st.Header("reachable at"), endpoint)
 	}
-	fmt.Fprintf(tw, "logs\tdocker logs -f %s\n", containerName(spec.component))
+	fmt.Fprintf(tw, "%s\t%s\n", st.Header("logs"),
+		st.Cmd("docker logs -f "+containerName(spec.component)))
 	if err := tw.Flush(); err != nil {
 		return err
 	}

@@ -148,7 +148,7 @@ func TestTheTourUsesQualifiedNames(t *testing.T) {
 		"je run " + DemoSource + "/demo-hello",
 		"je run " + DemoSource + "/demo-ingest",
 		"je source",
-		"je quickstart", // nothing below it works until the engine is running
+		"je up", // nothing below it works until the engine is running
 	} {
 		if !strings.Contains(tour, want) {
 			t.Errorf("the tour does not mention %q", want)

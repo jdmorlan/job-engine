@@ -92,7 +92,8 @@ func runReset(ctx context.Context, env *Env, args []string) error {
 			failed, len(plan))
 	}
 
-	fmt.Fprintf(env.Stdout, "\nclean. Start again with:  je quickstart\n")
+	fmt.Fprintf(env.Stdout, "\n%s  %s\n",
+		env.Style.Muted("clean. Start again with:"), env.Style.Cmd("je up"))
 	return nil
 }
 

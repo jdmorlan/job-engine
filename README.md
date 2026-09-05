@@ -189,24 +189,44 @@ workers        NONE -- nothing will run
 
 ### Running it
 
-For trying it out, one command runs both halves in your terminal:
+One command brings up the whole engine, in the shape each piece should actually
+run in:
 
 ```console
-$ je quickstart
-je: control plane on 127.0.0.1:7620, one worker attached (default)
-    try:  je jobs        in another terminal
-          je run <job>
+$ je up
+
+control plane  running as a container   127.0.0.1:7620
+worker         registered as a service  default
+web            running as a container   http://127.0.0.1:7621
+
+  open http://127.0.0.1:7621         history, chains and schedules in a browser
+  je status                          is it up, and is anything attached
+  je source add <name> <owner/repo>  point it at your jobs
+  je down                            stop all of it; data and history stay
 ```
 
-For anything unattended, Docker — the same image that runs in a cluster:
+Those defaults are arguments, not conveniences. The control plane is a
+container because it owns a database and should survive a reboot without a
+terminal staying open. The worker is a **native service** because the published
+image is `FROM scratch`, so a containerised worker can only run jobs that need
+nothing but themselves — which is not the worker you want for your own jobs.
+The web client is a container because it is stateless and there is nothing to
+gain from treating it differently.
 
-```console
-$ docker compose up -d      # control plane and its system worker
-```
+It is safe to run again: anything already up is reported and left alone, so it
+is also how you bring back the piece that died. `je down` is the inverse and
+keeps your data, history, secrets and identity — `je reset` is the one that
+does not, and it says so and asks first.
 
-Or `je control-plane install --docker`, which sets the same thing up and leaves
-the CLI able to manage it: **you should never have to run a docker command to
-use the engine.** A CLI on the host of a containerised control plane finds it,
+To watch both halves interact in one terminal, registering nothing, there is
+`je up --foreground`. That used to be `je quickstart`, its own command; it is a
+flag now, because a quick start that teaches you a deployment you would never
+actually use is a detour rather than a start.
+
+There is also `docker compose up -d` — the same image that runs in a cluster —
+and the individual acts `je up` composes: `je control-plane install --docker`,
+`je worker join`, `je web start`. **You should never have to run a docker
+command to use the engine.** A CLI on the host of a containerised control plane finds it,
 takes the certificate it needs out of the container by itself, and a worker
 started there enrolls with nothing pasted — `je upgrade` restarts it too. The
 exception is this compose file, which is yours: it owns its containers, so the
@@ -274,7 +294,7 @@ becomes this worker.
 
 A worker sharing a machine with the control plane skips all of it. `je worker
 run` there enrolls itself from a token the control plane leaves in its own data
-directory, which is why `je quickstart` and `docker compose up -d` need nothing
+directory, which is why `je up` and `docker compose up -d` need nothing
 pasted.
 
 It opens no ports and dials out, so it works from a laptop behind NAT. It holds
@@ -451,7 +471,9 @@ je demo           register a repo of example jobs, a chain, and a tour
 je upgrade        upgrade this deployment: the binary, and what runs here
                   --from <path> installs one you built, without a release
 je reset          tear it all down on this machine and start from scratch
-je quickstart     a control plane and a worker, in this terminal
+je up             the whole engine here: control plane, worker, web client
+                  --foreground runs a control plane and a worker in this terminal
+je down           stop all of it; data, history and identity are kept
 je control-plane run    the control plane: schedules, history, the API
 je worker run           a worker: the thing that executes jobs
 je workers              what is attached, and what it can run
@@ -862,7 +884,7 @@ drifted from a real run's before the release that shipped it was a day old.
 Jobs from it are named `dev/<job>`, so their history and their cursor are their
 own — a job you are writing cannot touch the record of the same job served from
 a repository. It needs a control plane that can read the directory, which means
-one on this machine (`je quickstart`), and it says so plainly if it cannot.
+one on this machine (`je up`), and it says so plainly if it cannot.
 
 The engine talks to the job through the environment and three files, with no
 SDK and nothing to import — **the filesystem is the contract** (D6). Everything

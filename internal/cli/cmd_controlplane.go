@@ -2,8 +2,10 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
+	"time"
 
 	"github.com/jdmorlan/job-engine/internal/daemon"
 	"github.com/jdmorlan/job-engine/internal/service"
@@ -30,7 +32,8 @@ func init() {
 			"`install` sets up only the control plane. A worker is a separate act on\n" +
 			"a possibly different machine, so it is `je worker join` -- and until you\n" +
 			"run one, nothing executes.\n\n" +
-			"To try both together without registering anything, use `je quickstart`.",
+			"For the whole engine in one command -- this, a worker and the web client,\n" +
+			"each in the shape it should actually run in -- use `je up`.",
 		Local: true,
 		Run:   runControlPlane,
 	})
@@ -86,6 +89,26 @@ func installControlPlane(ctx context.Context, env *Env, addr string, mode instal
 	// Verification is "does it answer", not "did the supervisor accept a file".
 	verify := func(ctx context.Context) error { return waitForControlPlane(ctx, env) }
 
+	// A containerised control plane brings its own authority, and this machine
+	// has to be holding that one before anything tries to verify.
+	//
+	// The container generates a CA inside its own volume. A machine that has
+	// ever run a native control plane already has a different CA on disk, and
+	// authorityPath will keep preferring it -- so every connection is checked
+	// against a control plane that no longer exists. That failure is worse than
+	// it sounds: the container is up and answering, and the error names an
+	// authority the reader has never heard of.
+	//
+	// Copied here rather than on demand because this is the moment the answer
+	// changes; doing it per-command would mean a `docker cp` on every
+	// connection. Before `verify`, because `verify` is itself a connection.
+	dockerVerify := func(ctx context.Context) error {
+		if err := adoptContainerAuthorityWithin(ctx, env.Layout, 15*time.Second); err != nil {
+			return fmt.Errorf("taking the authority out of the container: %w", err)
+		}
+		return verify(ctx)
+	}
+
 	kind, err := chooseMode(env, mode)
 	if err != nil {
 		return err
@@ -125,7 +148,7 @@ func installControlPlane(ctx context.Context, env *Env, addr string, mode instal
 		}
 		// The published address, which is how this host reaches it. Inside the
 		// container it binds 0.0.0.0, and that address is meaningless here.
-		return runDockerInstall(ctx, env, spec, mode, verify, next, addr)
+		return runDockerInstall(ctx, env, spec, mode, dockerVerify, next, addr)
 	}
 
 	return installComponent(ctx, env, installPlan{

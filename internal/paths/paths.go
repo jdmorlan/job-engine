@@ -152,7 +152,7 @@ func (l Layout) IdentityKey() string  { return filepath.Join(l.Data, "worker.key
 //
 // Here rather than computed by whoever needs it, because it was computed twice
 // and the two disagreed: `je worker keygen` wrote <data>/identity while a
-// worker started by `je quickstart` looked in <data>/cache/identity, so the key
+// worker started by `je up --foreground` looked in <data>/cache/identity, so the key
 // you had just been told to create was never found. One definition is the fix.
 func (l Layout) AgeIdentity() string { return filepath.Join(l.Data, "identity") }
 
