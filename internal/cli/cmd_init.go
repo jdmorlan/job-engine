@@ -97,7 +97,7 @@ func runInit(ctx context.Context, env *Env, args []string) error {
 	fmt.Fprintf(env.Stdout, `
 next
 %s  je new <job> --language python     writes a job and its script here
-  je try <job>                       run it here while you get it working
+  je dev <job>                       run it from here, before pushing anything
   git init && git add -A && git commit -m "jobs"
   gh repo create %s --private --source=. --push
 
@@ -135,7 +135,7 @@ works whenever it is unambiguous.
 ## Writing a job
 
     je new my-job --language typescript
-    je try my-job
+    je dev my-job
 
 Job files hold only what you decided; everything else is a default. To see the
 full picture, including the values this file does not set and where each one
@@ -158,8 +158,8 @@ TypeScript and JavaScript there is also a helper to import, `+"`je`"+`, which th
 worker writes beside your dependencies. It is sugar over exactly
 those files and can never do more than they can.
 
-`+"`je try <job>`"+` runs a job here, without a control plane, and shows what the
-engine would have committed.
+`+"`je dev <job>`"+` runs a job straight from this directory, before it is pushed
+anywhere -- a real run, with real logs and events.
 `, title(name), name, name)
 }
 
@@ -174,7 +174,7 @@ func title(name string) string {
 // gitignore covers what running a job here leaves behind.
 //
 // It used to say "nothing here is generated", which stopped being true when the
-// worker started preparing trees: `je try` installs your dependencies and
+// worker started preparing trees: a run installs your dependencies and
 // writes the helpers your job imports (D28, D21), both into the tree it is
 // standing in. That is the same thing a worker does to its own cache copy, and
 // it is the right place for it -- but in your working copy it is somebody's
@@ -182,7 +182,7 @@ func title(name string) string {
 func gitignore() string {
 	return `# What running a job here leaves behind.
 #
-# ` + "`je try`" + ` prepares this tree the way a worker would: your dependencies
+# ` + "`je dev`" + ` prepares this tree the way a worker would: your dependencies
 # installed from your lockfile, and the helpers your job imports written where
 # your language resolves them. Both belong to the machine, not to the repository.
 node_modules/

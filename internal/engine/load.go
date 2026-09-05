@@ -106,8 +106,14 @@ func (e *Engine) Load(ctx context.Context, registered store.Source, src jobdef.S
 				// guess. Say what is actually wrong.
 				configErr = secretsErr
 			case len(missing) > 0:
-				configErr = fmt.Sprintf("secret not set: %s (set it with: je secret set %s)",
-					strings.Join(missing, ", "), missing[0])
+				// Two stores exist (D25), and which one to reach for depends on
+				// where the job came from. A job you are editing wants the one
+				// that travels with it, and pointing at the control plane's
+				// store would have you set it somewhere the definition will
+				// never carry -- so the suggestion names the source.
+				configErr = fmt.Sprintf(
+					"secret not set: %s (set it with: je secret set --source %s %s)",
+					strings.Join(missing, ", "), registered.Name, missing[0])
 			}
 		}
 		// Identity carries the source (D22). For the built-in local source that
@@ -245,6 +251,11 @@ func (e *Engine) loadDir(ctx context.Context, registered store.Source, dir strin
 // fetched once, which is what a job dispatched from an unfetched source has to
 // report rather than guess about.
 func (e *Engine) SourceDir(src store.Source) string {
+	if src.Kind == store.SourceKindDev {
+		// The working copy itself, which is where its jobs run and where their
+		// secrets file is (D25). Not a cache: nothing was fetched.
+		return src.Location
+	}
 	if src.Kind == store.SourceKindSystem {
 		// The engine's own jobs have no tree (P2). Their revision is the
 		// binary's version rather than a commit, so joining it onto the cache

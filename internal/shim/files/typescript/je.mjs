@@ -28,7 +28,7 @@ const channel = (name) => {
     // that silently discards its cursor is the failure D14 exists to prevent.
     throw new Error(
       `${name} is not set, so this is not running under the job engine. ` +
-        `Use \`je try\` to run it here, or \`je run\` to run it for real.`,
+        `Use \`je dev\` to run it from your working copy, or \`je run\` once it is pushed.`,
     );
   }
   return path;

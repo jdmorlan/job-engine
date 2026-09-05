@@ -255,13 +255,13 @@ func writeJobFile(env *Env, root, name string, t jobTemplate) error {
 	// `je sync` on its own would be a command that appears to do nothing.
 	fmt.Fprintln(env.Stdout)
 	tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
-	// Anything the author has to do by hand first. It goes above `je try`
+	// Anything the author has to do by hand first. It goes above `je dev`
 	// rather than in the prose, because a step you have to notice is a step
 	// somebody will not.
 	for _, step := range t.language.next {
 		fmt.Fprintf(tw, "  %s\n", step)
 	}
-	fmt.Fprintf(tw, "  je try %s\trun it here, before anything is committed\n", name)
+	fmt.Fprintf(tw, "  je dev %s\trun it from here, before anything is committed\n", name)
 	fmt.Fprintf(tw, "  git add -A && git commit -m %q && git push\tthe engine reads the repository\n", "add "+name)
 	fmt.Fprintf(tw, "  je source sync <source>\tfetch what you just pushed\n")
 	fmt.Fprintf(tw, "  je explain <source>/%s\tevery value, including the ones this file does not set\n", name)

@@ -262,7 +262,14 @@ func (s FSSource) readJobFile(dir string) (full string, body []byte, ok bool, er
 		switch {
 		case err == nil:
 			return full, body, true, nil
-		case errors.Is(err, fs.ErrNotExist):
+		case errors.Is(err, fs.ErrNotExist), errors.Is(err, fs.ErrPermission):
+			// This is a probe -- "is there a job in here?" -- and a directory
+			// we cannot read holds no job we could load. Treating that as a
+			// failure means one unreadable directory anywhere in the tree
+			// stops every job in it loading, and pointing this at somewhere
+			// like /tmp reports a permission error about a stranger's folder
+			// rather than the truth, which is that the job you asked for is
+			// not here.
 			continue
 		default:
 			return "", nil, false, fmt.Errorf("reading %s: %w", full, err)

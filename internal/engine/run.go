@@ -501,6 +501,15 @@ func execFailureMessage(exec executor.Result) string {
 
 func unrunnable(job store.Job) error {
 	switch {
+	case job.Removed():
+		// First, because everything below it is stale for a job whose
+		// definition is gone: its config error describes a file that no longer
+		// says that, and "is disabled" describes a field nothing is reading.
+		// The row is kept so its history stays readable (D19), not so its last
+		// known problem can be reported forever.
+		return fmt.Errorf(
+			"job %s is not in its source any more; its history is kept and it will not run",
+			job.Slug)
 	case job.LoadError != "":
 		return fmt.Errorf("job %s did not load: %s", job.Slug, job.LoadError)
 	case job.ConfigError != "":
@@ -508,34 +517,6 @@ func unrunnable(job store.Job) error {
 	default:
 		return fmt.Errorf("job %s is disabled", job.Slug)
 	}
-}
-
-// ValidateChannels checks what a job wrote against the protocol, without
-// committing any of it.
-//
-// Exported for `je try`, which is an authoring harness rather than a second
-// executor: it runs a job on this machine and shows what would have been
-// committed. The point of sharing this function rather than reimplementing the
-// checks is that a harness which enforces slightly different rules from the
-// control plane is worse than no harness at all -- it would send people to
-// production confident about a contract nobody actually checks that way.
-//
-// D20/C11 removed the CLI's ability to execute a run, and this does not bring
-// it back: nothing here writes to a database, records a run, or moves a cursor.
-func ValidateChannels(stateOut, output, events []byte) (json.RawMessage, json.RawMessage, []model.Event, error) {
-	state, err := validateJSONObject(stateOut, jobdef.MaxStateBytes, "state")
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	out, err := validateJSONObject(output, 1<<20, "output")
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	emitted, err := parseEvents(events)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	return state, out, emitted, nil
 }
 
 // validateJSONObject checks one of the single-value output channels (D6).

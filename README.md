@@ -457,7 +457,7 @@ je workers              what is attached, and what it can run
 je sync           reload job definitions, atomically
 je waiting        what has not happened yet, and what is stuck
 je run <job>      run a job now and follow its output
-je try <job>      run a job here from its file, while you are writing it
+je dev <job>      run a job from this directory, before it is pushed anywhere
 je retry <run>    add an attempt to an existing run
 je retention sweep  remove history past its keep period
 je init [dir]     set up a new jobs repository
@@ -817,42 +817,44 @@ reads back. A job in a language we ship no shim for does exactly as much through
 the protocol — the shim can never grow a capability the protocol lacks, because
 then "any language participates fully" would quietly stop being true.
 
-### Trying a job while you write it
+### Writing a job: `je dev`
+
+Every source is a repository, so a job you are *writing* would otherwise have to
+be committed and pushed before the engine could run it — every time. `je dev`
+points the control plane on your machine at the directory you are standing in:
 
 ```console
-$ je try ingest
-je: preparing typescript in ~/code/weather-jobs
-starting from 2026-09-01T00:00:00Z
-ingested 2 readings
+$ je dev water-plants
+je: ~/code/my-jobs -- 2 job(s), 1 chain(s)
+watering 3 zones since 2026-09-04T13:00:00Z
 
-ok  ingest would have succeeded
-    cursor  would move to {"since":"2026-09-04T13:00:00Z"}
-    output  {"rows":2}
-    emit    weather.ingested {"count":2}
+ok  run 6 succeeded in 124ms
+    cursor  since  2026-09-04T13:00:00Z -> 2026-09-05T00:36:21Z  (v6)
+    emitted plants.watered (event 32)
 ```
 
-`je try` reads the definition out of the directory you are standing in, prepares
-the tree exactly as a worker would — your dependencies, your helpers — runs the
-command, and shows what the engine **would** have committed. Nothing is
-recorded: no run, no history, no cursor movement, no control plane. It is for
-the loop you are in while getting a job working.
+An edit takes effect on the next command. No commit, no push, no sync.
 
-Give it a starting cursor with `--state '{"since":"..."}'` and a triggering
-payload with `--event '{...}'`.
-
-The checks are the engine's own code, not a second opinion, which matters most
-for the failure it exists to catch early — a job that exits zero and breaks the
-contract anyway:
+**These are real runs.** Same dispatch, same worker, same environment, same
+secrets decrypted from your own `secrets.enc.yaml`, same logs and events and
+cursor — so `je runs`, `je logs`, `je why` and `je chain` all work on the job
+you are writing, and a chain fires from your working copy:
 
 ```console
-$ je try sloppy
-all done!
-
-x  the job exited 0 but broke the protocol:
-   job state must be a JSON object, got [
+$ je chain dev/watering
+  trigger  dev/water-plants  run 4  succeeded in 180ms
+  step 1   dev/log-watering  run 5  succeeded in 8ms  on plants.watered
 ```
 
-In a real run that is a failed run and a message you have to go and find.
+Nothing here is a simulation, and there is no second executor that could tell
+you something the engine would not. That matters more than it sounds: the first
+version of this *was* a harness that ran the job itself, and its environment had
+drifted from a real run's before the release that shipped it was a day old.
+
+Jobs from it are named `dev/<job>`, so their history and their cursor are their
+own — a job you are writing cannot touch the record of the same job served from
+a repository. It needs a control plane that can read the directory, which means
+one on this machine (`je quickstart`), and it says so plainly if it cannot.
 
 The engine talks to the job through the environment and three files, with no
 SDK and nothing to import — **the filesystem is the contract** (D6). Everything

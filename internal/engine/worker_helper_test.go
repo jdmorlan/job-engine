@@ -123,11 +123,20 @@ func executeDispatch(t *testing.T, e *engine.Engine, d engine.Dispatch, ctx cont
 
 	// The worker resolves the workdir, so the helper must too -- otherwise it
 	// would test a path the product does not have (D20).
-	// A job runs in its source's tree (D22). Every job has one now, so there
-	// is no fallback left for this to reach for.
-	workdir := d.Workdir
-	if workdir == "" {
-		workdir = d.SourceRoot
+	//
+	// A job runs in its source's tree (D22), and a job that is a folder runs in
+	// that folder: its declared workdir is relative to the tree, so it has to
+	// be joined rather than used. The first version of this used it directly
+	// and every folder job failed with "fork/exec /bin/sh: no such file or
+	// directory" -- ENOENT on the directory, reported against the binary, which
+	// is the confusion resolveWorkdir has a comment about.
+	workdir := d.SourceRoot
+	switch {
+	case d.Workdir == "":
+	case filepath.IsAbs(d.Workdir):
+		workdir = d.Workdir
+	default:
+		workdir = filepath.Join(d.SourceRoot, d.Workdir)
 	}
 
 	env := append([]string{}, d.Env...)

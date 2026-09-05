@@ -113,6 +113,10 @@ func (e *Engine) loadRegistered(ctx context.Context, src store.Source) (LoadResu
 		result, err := e.Load(ctx, src, system.Source())
 		result.Revision = e.opts.Version
 		return result, err
+	case store.SourceKindDev:
+		// Re-read every time, with no caching and no revision: the point of a
+		// working copy is that it changes between runs (D2).
+		return e.Load(ctx, src, e.devSource(src))
 	case store.SourceKindGitHub:
 		result, err := e.loadGitHub(ctx, src)
 		if err == nil && result.Revision != src.Revision {

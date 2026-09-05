@@ -31,7 +31,7 @@ type scriptLanguage struct {
 	// written only when they are not already there.
 	project map[string]string
 
-	// next is anything the author has to do by hand before `je try` works.
+	// next is anything the author has to do by hand before `je dev` works.
 	next []string
 }
 
@@ -63,7 +63,7 @@ var languages = map[string]scriptLanguage{
 		// `tsx` comes from the tree's own dependencies, so the scaffold has to
 		// write the manifest that declares it and say what to run -- the
 		// alternative is a job file that looks finished and fails on the first
-		// `je try` with "command not found".
+		// `je dev` with "command not found".
 		project: map[string]string{"package.json": nodePackageJSON},
 		next: []string{
 			"pnpm install\twrites the lockfile the worker installs from",

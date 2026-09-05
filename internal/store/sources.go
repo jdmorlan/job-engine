@@ -32,6 +32,21 @@ const SourceKindGitHub = "github"
 // definition of its own work the engine executed (D11).
 const SourceKindSystem = "system"
 
+// SourceKindDev is the working copy somebody is editing right now (D2).
+//
+// One reserved name, `dev`, always a local directory, re-read on every run and
+// never fetched. It is not a kind anybody registers: D27's rule that a source
+// is a repository is about what production runs from, and this is the loop
+// before there is anything to push.
+//
+// Its jobs are called dev/<name>, so their runs, cursors and events are their
+// own -- a job you are writing cannot touch the history of the same job served
+// from a repository.
+const SourceKindDev = "dev"
+
+// DevSourceName is the one name that kind may have.
+const DevSourceName = "dev"
+
 // Source is a named place definitions come from.
 type Source struct {
 	Name     string `json:"name"`

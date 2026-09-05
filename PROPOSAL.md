@@ -511,6 +511,36 @@ Non-interactive form for scripting and for when you know what you want:
 
 ---
 
+#### Revised (v0.9): `je dev`, and the loop D27 took away
+
+Every source is a repository (D27), which is right for what production runs
+from and leaves authoring with no answer: a job you are *writing* had to be
+committed and pushed before the engine could run it, every time.
+
+`je dev` points the control plane on your own machine at the directory you are
+standing in, under one reserved source name. Everything after that is the
+ordinary path — same dispatch, same worker, same environment, same secrets from
+the tree's own file, same logs and events and cursor — which is the property
+that makes it evidence about what will happen when you push, rather than a
+second opinion.
+
+D27's argument survives untouched, because it was about *sources*: a source is
+what production runs from and must travel to whichever worker takes the job.
+`dev` is not a kind anybody can register, does not travel, and says so. The
+limitation is now stated rather than discovered — it needs a control plane that
+can read the directory, which is one on this machine.
+
+Its jobs are `dev/<name>`, so their runs, cursor and events are their own and
+cannot collide with the same job served from a repository.
+
+> *"I think they might understand dev a little better."*
+
+Named `dev` rather than `test`, which everywhere else means "run assertions" —
+and which is worth keeping free for exactly that, if a job ever gets to declare
+what it should emit or where its cursor should land.
+
+---
+
 #### Revised (v0.9): a job is a folder
 
 The flat layout put a definition at the top level and its code in a shared
@@ -1251,18 +1281,30 @@ So: **no manifest means nothing to install**, and a tree that *has* a manifest
 it cannot install from is still an error, which is the case D28's rule was
 actually written for.
 
-**`je try` came out of the same conversation** and is the other half of the
-ergonomics: run a job from your definitions repo, on this machine, with no
-control plane and nothing recorded, and see what the engine *would* have
-committed. It is not the daemonless path D20 removed — that was `je run`
-silently falling back to a second executor that wrote to the database. This
-writes nothing, has no run id, and exists so that "do my dependencies install
-and does my shim load?" is a question you answer in a loop while editing.
+**The authoring loop came out of the same conversation**, and its first version
+was wrong in a way worth recording. `je try` ran the job *itself*: a harness in
+the CLI that prepared the tree, built an environment, called the executor and
+printed what would have been committed. It wrote nothing, so it looked like it
+escaped D20/C11's rule against a second executor.
 
-Its checks are the engine's own function rather than a second implementation,
-deliberately: a harness that enforced slightly different rules would be worse
-than none, because it would send somebody to production confident about a
-contract nobody checks that way.
+It did not. It reimplemented four things the worker already did — dependency
+preparation, the environment, the executor call, the log sink — and the
+environment had drifted before the release that shipped it was a day old: it
+passed the whole shell through, where a real run gets PATH, HOME, TZ and its
+declared secrets. A job that read an ambient variable passed there and failed
+under `je run`, which is the exact failure the command existed to prevent.
+
+> *"We don't have to support source directories to be able to use `je run`... a
+> flag could reference a folder just like `je try` does. It's where do I read a
+> job definition/code from, everything else would stay the same... and honestly
+> if it logs things, that's not bad, it's actually showing them telemetry work
+> for their new job."*
+
+That is the right shape, and it is `je dev` (D2's revision below). One
+execution path, so the drift is not possible rather than merely fixed; real
+logs, events, cursor and chains on the job you are writing; and runs named
+`dev/<job>`, which is the "development run" marker with no schema change at
+all — a name that says so everywhere it appears.
 
 **Your response (v0.5):**
 

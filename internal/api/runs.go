@@ -20,6 +20,7 @@ import (
 // request until a job finishes would tie a run's lifetime to a connection, and
 // D8 already allows an hour-long job by default.
 func (s *Server) registerRuns(mux *http.ServeMux) {
+	mux.HandleFunc("POST /v1/dev", s.handleRegisterDev)
 	mux.HandleFunc("POST /v1/retention/sweep", s.handleRetentionSweep)
 	mux.HandleFunc("POST /v1/runs", s.handleTriggerRun)
 	mux.HandleFunc("POST /v1/runs/{id}/retry", s.handleRetryRun)
@@ -68,6 +69,46 @@ func (s *Server) handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, run)
+}
+
+// DevRequest is the body of POST /v1/dev: the directory to read definitions
+// from, on the control plane's own machine.
+type DevRequest struct {
+	Dir string `json:"dir"`
+}
+
+// handleRegisterDev points the `dev` source at a working copy (D2).
+//
+// A write, so the identity gate covers it: this decides what a control plane
+// will run, which is the most consequential thing an unidentified caller could
+// ask for.
+func (s *Server) handleRegisterDev(w http.ResponseWriter, r *http.Request) {
+	var req DevRequest
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+		return
+	}
+	if req.Dir == "" {
+		s.writeError(w, http.StatusBadRequest, "dir is required")
+		return
+	}
+
+	result, err := s.engine.RegisterDev(r.Context(), req.Dir)
+	switch {
+	case errors.Is(err, engine.ErrNotLocal):
+		// 422 rather than 500: the request was well formed and this control
+		// plane is the wrong one to send it to, which the caller can act on.
+		s.writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	case err != nil:
+		// A definition that will not parse arrives here, and it is the
+		// caller's file rather than our failure.
+		s.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 // SweepRequest is the body of POST /v1/retention/sweep.

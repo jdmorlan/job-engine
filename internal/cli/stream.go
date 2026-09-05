@@ -27,6 +27,11 @@ func (c *Client) RetryRun(ctx context.Context, id int64, actor string) (store.Ru
 		"/v1/runs/"+strconv.FormatInt(id, 10)+"/retry", api.RetryRequest{Actor: actor})
 }
 
+// RegisterDev points the control plane's `dev` source at a local directory.
+func (c *Client) RegisterDev(ctx context.Context, dir string) (engine.LoadResult, error) {
+	return do[engine.LoadResult](ctx, c, http.MethodPost, "/v1/dev", api.DevRequest{Dir: dir})
+}
+
 // Sweep asks the control plane to run a retention pass.
 func (c *Client) Sweep(ctx context.Context, req api.SweepRequest) (engine.Sweep, error) {
 	return do[engine.Sweep](ctx, c, http.MethodPost, "/v1/retention/sweep", req)

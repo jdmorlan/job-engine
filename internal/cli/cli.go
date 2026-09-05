@@ -90,7 +90,7 @@ func (attentionError) Error() string { return "something needs your attention" }
 // The dispatcher's job is to make sure a failure is never silent, and its
 // default way of doing that -- printing "je <cmd>: <err>" -- is exactly wrong
 // for a command whose whole output is a rendered report of the failure. Adding
-// a second line under `je try`'s own "x exited 1" would be noise, and dropping
+// a second line under a command's own rendered failure would be noise, and dropping
 // the non-zero exit would be a lie.
 var errReported = reportedError{}
 
